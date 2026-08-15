@@ -9,6 +9,7 @@ description = "MeshANSI Bytecode compiler, ANSI tokenization, and Heatshrink LZS
 thiserror.workspace = true
 serde.workspace = true
 log.workspace = true
+mesh-compression = { version = "0.1.0", path = "../mesh-compression" }
 
 # heatshrink bindings will go here (or simple pure Rust implementation or dependencies)
 # heatshrink = { version = "..." }

@@ -5,7 +5,7 @@ members = [
     "crates/meshcore-transport",
     "crates/meshbbs",
     "crates/meshclient"
-]
+, "crates/mesh-compression"]
 
 [workspace.dependencies]
 tokio = { version = "1.35", features = ["full"] }

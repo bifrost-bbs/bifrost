@@ -252,11 +252,11 @@ fn run_session_task(
     let db_store_perms = db_store.clone();
     {
         let mut store = db_store_perms.lock().unwrap();
-        let perms_table = store.entry("permissions".to_string()).or_insert_with(HashMap::new);
-        if !perms_table.contains_key(&node_hex_str_clone) {
-            let json_str = serde_json::to_string(&initial_permissions).unwrap_or_else(|_| "[]".to_string());
-            perms_table.insert(node_hex_str_clone, json_str);
-        }
+        let perms_table = store.entry("permissions".to_string()).or_default();
+        perms_table.entry(node_hex_str_clone).or_insert_with(|| {
+
+            serde_json::to_string(&initial_permissions).unwrap_or_else(|_| "[]".to_string())
+        });
     }
 
     // Accumulates output bytes for term.flush()
@@ -318,7 +318,7 @@ fn run_session_task(
 
     let out_buf = output_buf.clone();
     let transport_clone = transport.clone();
-    let node_id_clone = node_id.clone();
+    let node_id_clone = node_id;
     let rt = rt_handle.clone();
     term.set("flush", lua.create_function(move |_, (): ()| {
         let mut buf = out_buf.lock().unwrap();
@@ -430,7 +430,7 @@ fn run_session_task(
 
     let out_buf = output_buf.clone();
     let transport_clone = transport.clone();
-    let node_id_clone = node_id.clone();
+    let node_id_clone = node_id;
     let rt = rt_handle.clone();
     term.set("flush_form", lua.create_function(move |_, (): ()| {
         let mut buf = out_buf.lock().unwrap();
@@ -482,7 +482,7 @@ fn run_session_task(
             if let Some(val) = tbl.get(&key) {
                 if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(val) {
                     if let Ok(lua_val) = lua.to_value(&json_val) {
-                        return Ok(mlua::Value::from(lua_val));
+                        return Ok(lua_val);
                     }
                 }
             }
@@ -495,7 +495,7 @@ fn run_session_task(
         if let Ok(json_val) = lua.from_value::<serde_json::Value>(val) {
             if let Ok(json_str) = serde_json::to_string(&json_val) {
                 let mut store = db_store_set.lock().unwrap();
-                store.entry(table).or_insert_with(HashMap::new).insert(key, json_str);
+                store.entry(table).or_default().insert(key, json_str);
             }
         }
         Ok(())
