@@ -115,9 +115,10 @@ mod tests {
         let compiled = compile_ansi("Hello World\x1b").unwrap();
         assert_eq!(compiled[0], Opcode::ClearScreen as u8);
         assert_eq!(compiled[compiled.len() - 1], Opcode::EndOfFrame as u8);
-        
+
         // Extract inner string content from compiled bytecode
-        let content: Vec<u8> = compiled.iter()
+        let content: Vec<u8> = compiled
+            .iter()
             .cloned()
             .filter(|&x| x >= 0x20 && x <= 0x7E)
             .collect();
@@ -152,4 +153,3 @@ mod tests {
         );
     }
 }
-
