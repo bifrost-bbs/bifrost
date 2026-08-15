@@ -37,6 +37,8 @@ pub struct AppConfig {
     pub asset_broadcaster: AssetBroadcasterConfig,
     #[serde(default = "default_form_colors")]
     pub form_colors: FormColorsConfig,
+    #[serde(default)]
+    pub admin_nodes: Vec<String>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -85,6 +87,7 @@ pub fn default_config() -> AppConfig {
             submit_fg: 0,
             submit_bg: 7,
         },
+        admin_nodes: Vec::new(),
     }
 }
 
@@ -177,8 +180,9 @@ pub async fn start_server(
                                 let db_inner = db_store.clone();
                                 let rt_handle = tokio::runtime::Handle::current();
                                 let form_colors_config = config.form_colors.clone();
+                                let admin_nodes_config = config.admin_nodes.clone();
                                 std::thread::spawn(move || {
-                                    let res = run_session_task(src, rx, transport_inner, db_inner, rt_handle, form_colors_config);
+                                    let res = run_session_task(src, rx, transport_inner, db_inner, rt_handle, form_colors_config, admin_nodes_config);
                                     sessions_clone.lock().unwrap().remove(&src);
                                     if let Err(e) = res {
                                         log::error!("Session task error: {:?}", e);
@@ -218,10 +222,42 @@ fn run_session_task(
     db_store: Arc<StdMutex<HashMap<String, HashMap<String, String>>>>,
     rt_handle: tokio::runtime::Handle,
     form_colors: FormColorsConfig,
+    admin_nodes: Vec<String>,
 ) -> Result<()> {
     log::debug!("Starting run_session_task for client session");
     let lua = mlua::Lua::new();
     let active_app = Arc::new(StdMutex::new("00_main_menu".to_string()));
+
+    let node_hex_str: String = node_id.iter().map(|b| format!("{:02x}", b)).collect();
+    
+    // Check if configured as admin
+    let is_configured_admin = admin_nodes.contains(&node_hex_str);
+    
+    // Check if first user in database
+    let is_first_user = {
+        let store = db_store.lock().unwrap();
+        match store.get("users") {
+            Some(users_map) => users_map.is_empty(),
+            None => true,
+        }
+    };
+    
+    let mut initial_permissions = vec!["read".to_string(), "write".to_string()];
+    if is_configured_admin || is_first_user {
+        initial_permissions.push("admin".to_string());
+    }
+    
+    // Persist initial permissions in DB
+    let node_hex_str_clone = node_hex_str.clone();
+    let db_store_perms = db_store.clone();
+    {
+        let mut store = db_store_perms.lock().unwrap();
+        let perms_table = store.entry("permissions".to_string()).or_insert_with(HashMap::new);
+        if !perms_table.contains_key(&node_hex_str_clone) {
+            let json_str = serde_json::to_string(&initial_permissions).unwrap_or_else(|_| "[]".to_string());
+            perms_table.insert(node_hex_str_clone, json_str);
+        }
+    }
 
     // Accumulates output bytes for term.flush()
     let output_buf = Arc::new(StdMutex::new(Vec::new()));
@@ -361,6 +397,25 @@ fn run_session_task(
     })?)?;
 
     let out_buf = output_buf.clone();
+    term.set("add_multiline_field", lua.create_function(move |_, (field_id, col, row, width, height, default_val): (String, u8, u8, u8, u8, String)| {
+        let mut buf = out_buf.lock().unwrap();
+        buf.push(0xD4); // OP_FORM_FIELD_MULTILINE
+        buf.push(col);
+        buf.push(row);
+        buf.push(width);
+        buf.push(height);
+        
+        let id_bytes = field_id.as_bytes();
+        buf.push(id_bytes.len() as u8);
+        buf.extend_from_slice(id_bytes);
+
+        let val_bytes = default_val.as_bytes();
+        buf.push(val_bytes.len() as u8);
+        buf.extend_from_slice(val_bytes);
+        Ok(())
+    })?)?;
+
+    let out_buf = output_buf.clone();
     term.set("add_submit_button", lua.create_function(move |_, (button_id, col, row): (String, u8, u8)| {
         let mut buf = out_buf.lock().unwrap();
         buf.push(0xD2); // OP_FORM_SUBMIT
@@ -445,6 +500,18 @@ fn run_session_task(
         }
         Ok(())
     })?)?;
+
+    let db_store_keys = db_store.clone();
+    db.set("keys", lua.create_function(move |lua, table: String| {
+        let store = db_store_keys.lock().unwrap();
+        let table_tbl = lua.create_table()?;
+        if let Some(tbl) = store.get(&table) {
+            for (i, key) in tbl.keys().enumerate() {
+                table_tbl.set(i + 1, key.clone())?;
+            }
+        }
+        Ok(table_tbl)
+    })?)?;
     globals.set("db", db)?;
 
     // log table for app scripts
@@ -480,7 +547,6 @@ fn run_session_task(
 
     // session table & state
     let session = lua.create_table()?;
-    let node_hex_str: String = node_id.iter().map(|b| format!("{:02x}", b)).collect();
     let node_hex_str_clone = node_hex_str.clone();
     session.set("node_id", lua.create_function(move |_, (): ()| {
         Ok(node_hex_str_clone.clone())
@@ -503,6 +569,39 @@ fn run_session_task(
     session.set("close", lua.create_function(move |_, (): ()| {
         *session_close_clone.lock().unwrap() = true;
         Ok(())
+    })?)?;
+
+    let db_store_perms = db_store.clone();
+    let node_hex_str_clone = node_hex_str.clone();
+    session.set("permissions", lua.create_function(move |lua, (): ()| {
+        let store = db_store_perms.lock().unwrap();
+        if let Some(perms_table) = store.get("permissions") {
+            if let Some(json_str) = perms_table.get(&node_hex_str_clone) {
+                if let Ok(perms) = serde_json::from_str::<Vec<String>>(json_str) {
+                    let table = lua.create_table()?;
+                    for (i, p) in perms.into_iter().enumerate() {
+                        table.set(i + 1, p)?;
+                    }
+                    return Ok(table);
+                }
+            }
+        }
+        let empty_tbl = lua.create_table()?;
+        Ok(empty_tbl)
+    })?)?;
+
+    let db_store_has_perm = db_store.clone();
+    let node_hex_str_clone = node_hex_str.clone();
+    session.set("has_permission", lua.create_function(move |_, perm: String| {
+        let store = db_store_has_perm.lock().unwrap();
+        if let Some(perms_table) = store.get("permissions") {
+            if let Some(json_str) = perms_table.get(&node_hex_str_clone) {
+                if let Ok(perms) = serde_json::from_str::<Vec<String>>(json_str) {
+                    return Ok(perms.contains(&perm));
+                }
+            }
+        }
+        Ok(false)
     })?)?;
 
     let active_app_clone = active_app.clone();
@@ -752,6 +851,389 @@ max_asset_broadcast_duty_cycle = 0.1
 
         let board_response = board_msg.expect("Failed to reassemble discussion boards screen response");
         assert_eq!(board_response.opcode, 0x03);
+        
+        let _ = server_handle.await;
+    }
+
+    #[test]
+    fn test_config_deserialization_with_admin_nodes() {
+        let config_str = r#"
+admin_nodes = ["abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"]
+
+[rate_limiter]
+max_packets_per_minute = 30
+max_burst_packets = 5
+inter_packet_guard_ms = 200
+max_duty_cycle_percent = 0.5
+duty_cycle_window_secs = 1800
+
+[asset_broadcaster]
+enable_on_demand_broadcast = false
+max_asset_broadcast_duty_cycle = 0.1
+        "#;
+
+        let config: AppConfig = toml::from_str(config_str).unwrap();
+        assert_eq!(config.admin_nodes.len(), 1);
+        assert_eq!(config.admin_nodes[0], "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890");
+        assert_eq!(config.rate_limiter.max_packets_per_minute, 30);
+    }
+
+    #[test]
+    fn test_config_deserialization_without_admin_nodes() {
+        let config_str = r#"
+[rate_limiter]
+max_packets_per_minute = 45
+max_burst_packets = 4
+inter_packet_guard_ms = 350
+max_duty_cycle_percent = 1.0
+duty_cycle_window_secs = 3600
+
+[asset_broadcaster]
+enable_on_demand_broadcast = true
+max_asset_broadcast_duty_cycle = 0.15
+        "#;
+
+        let config: AppConfig = toml::from_str(config_str).unwrap();
+        assert!(config.admin_nodes.is_empty());
+    }
+
+    #[test]
+    fn test_config_deserialization_with_form_colors() {
+        let config_str = r#"
+[rate_limiter]
+max_packets_per_minute = 45
+max_burst_packets = 4
+inter_packet_guard_ms = 350
+max_duty_cycle_percent = 1.0
+duty_cycle_window_secs = 3600
+
+[asset_broadcaster]
+enable_on_demand_broadcast = true
+max_asset_broadcast_duty_cycle = 0.15
+
+[form_colors]
+field_fg = 10
+field_bg = 2
+submit_fg = 3
+submit_bg = 5
+        "#;
+
+        let config: AppConfig = toml::from_str(config_str).unwrap();
+        assert_eq!(config.form_colors.field_fg, 10);
+        assert_eq!(config.form_colors.field_bg, 2);
+        assert_eq!(config.form_colors.submit_fg, 3);
+        assert_eq!(config.form_colors.submit_bg, 5);
+    }
+
+    #[test]
+    fn test_default_form_colors() {
+        let fc = default_form_colors();
+        assert_eq!(fc.field_fg, 15);
+        assert_eq!(fc.field_bg, 1);
+        assert_eq!(fc.submit_fg, 0);
+        assert_eq!(fc.submit_bg, 7);
+    }
+
+    #[test]
+    fn test_default_config_has_empty_admin_nodes() {
+        let config = default_config();
+        assert!(config.admin_nodes.is_empty());
+        assert_eq!(config.form_colors.field_fg, 15);
+        assert_eq!(config.form_colors.field_bg, 1);
+    }
+
+    #[test]
+    fn test_permissions_first_user_gets_admin() {
+        // Simulates the permissions initialization logic for the first user
+        let db_store: HashMap<String, HashMap<String, String>> = HashMap::new();
+        let admin_nodes: Vec<String> = Vec::new();
+        let node_hex = "0505050505050505050505050505050505050505050505050505050505050505".to_string();
+
+        let is_configured_admin = admin_nodes.contains(&node_hex);
+        let is_first_user = match db_store.get("users") {
+            Some(users_map) => users_map.is_empty(),
+            None => true,
+        };
+
+        assert!(!is_configured_admin);
+        assert!(is_first_user);
+
+        let mut perms = vec!["read".to_string(), "write".to_string()];
+        if is_configured_admin || is_first_user {
+            perms.push("admin".to_string());
+        }
+        assert_eq!(perms, vec!["read", "write", "admin"]);
+    }
+
+    #[test]
+    fn test_permissions_configured_admin_node() {
+        let node_hex = "aabbccdd00000000000000000000000000000000000000000000000000000000".to_string();
+        let admin_nodes = vec![node_hex.clone()];
+
+        let mut db_store: HashMap<String, HashMap<String, String>> = HashMap::new();
+        // Simulate an existing user so this node is NOT the first user
+        let mut users = HashMap::new();
+        users.insert("other_node".to_string(), "{}".to_string());
+        db_store.insert("users".to_string(), users);
+
+        let is_configured_admin = admin_nodes.contains(&node_hex);
+        let is_first_user = match db_store.get("users") {
+            Some(users_map) => users_map.is_empty(),
+            None => true,
+        };
+
+        assert!(is_configured_admin);
+        assert!(!is_first_user);
+
+        let mut perms = vec!["read".to_string(), "write".to_string()];
+        if is_configured_admin || is_first_user {
+            perms.push("admin".to_string());
+        }
+        assert_eq!(perms, vec!["read", "write", "admin"]);
+    }
+
+    #[test]
+    fn test_permissions_regular_user() {
+        let node_hex = "1111111111111111111111111111111111111111111111111111111111111111".to_string();
+        let admin_nodes: Vec<String> = Vec::new();
+
+        let mut db_store: HashMap<String, HashMap<String, String>> = HashMap::new();
+        let mut users = HashMap::new();
+        users.insert("existing_admin".to_string(), "{}".to_string());
+        db_store.insert("users".to_string(), users);
+
+        let is_configured_admin = admin_nodes.contains(&node_hex);
+        let is_first_user = match db_store.get("users") {
+            Some(users_map) => users_map.is_empty(),
+            None => true,
+        };
+
+        assert!(!is_configured_admin);
+        assert!(!is_first_user);
+
+        let mut perms = vec!["read".to_string(), "write".to_string()];
+        if is_configured_admin || is_first_user {
+            perms.push("admin".to_string());
+        }
+        assert_eq!(perms, vec!["read", "write"]);
+    }
+
+    #[test]
+    fn test_permissions_persistence_in_db() {
+        let mut db_store: HashMap<String, HashMap<String, String>> = HashMap::new();
+        let node_hex = "abcd".to_string();
+        let perms = vec!["read".to_string(), "write".to_string(), "admin".to_string()];
+        let json_str = serde_json::to_string(&perms).unwrap();
+
+        let perms_table = db_store.entry("permissions".to_string()).or_insert_with(HashMap::new);
+        perms_table.insert(node_hex.clone(), json_str);
+
+        // Verify we can read them back
+        let stored = db_store.get("permissions").unwrap().get(&node_hex).unwrap();
+        let decoded: Vec<String> = serde_json::from_str(stored).unwrap();
+        assert_eq!(decoded, vec!["read", "write", "admin"]);
+        assert!(decoded.contains(&"admin".to_string()));
+    }
+
+    #[test]
+    fn test_permissions_dedup_on_reconnect() {
+        // If perms already exist in DB, they should NOT be overwritten
+        let mut db_store: HashMap<String, HashMap<String, String>> = HashMap::new();
+        let node_hex = "node123".to_string();
+        let original_perms = vec!["read".to_string()];
+        let json_str = serde_json::to_string(&original_perms).unwrap();
+
+        let perms_table = db_store.entry("permissions".to_string()).or_insert_with(HashMap::new);
+        perms_table.insert(node_hex.clone(), json_str);
+
+        // Simulate reconnect logic: only insert if not present
+        let new_perms = vec!["read".to_string(), "write".to_string(), "admin".to_string()];
+        let new_json = serde_json::to_string(&new_perms).unwrap();
+        let perms_table = db_store.get_mut("permissions").unwrap();
+        if !perms_table.contains_key(&node_hex) {
+            perms_table.insert(node_hex.clone(), new_json);
+        }
+
+        // Should still have original perms
+        let stored = db_store.get("permissions").unwrap().get(&node_hex).unwrap();
+        let decoded: Vec<String> = serde_json::from_str(stored).unwrap();
+        assert_eq!(decoded, vec!["read"]);
+    }
+
+    #[test]
+    fn test_db_keys_pattern() {
+        let mut db_store: HashMap<String, HashMap<String, String>> = HashMap::new();
+        let mut users = HashMap::new();
+        users.insert("node_a".to_string(), r#"{"nickname":"Alice"}"#.to_string());
+        users.insert("node_b".to_string(), r#"{"nickname":"Bob"}"#.to_string());
+        db_store.insert("users".to_string(), users);
+
+        let keys: Vec<String> = db_store.get("users").unwrap().keys().cloned().collect();
+        assert_eq!(keys.len(), 2);
+        assert!(keys.contains(&"node_a".to_string()));
+        assert!(keys.contains(&"node_b".to_string()));
+    }
+
+    #[test]
+    fn test_db_keys_empty_table() {
+        let db_store: HashMap<String, HashMap<String, String>> = HashMap::new();
+        let keys: Vec<String> = match db_store.get("users") {
+            Some(tbl) => tbl.keys().cloned().collect(),
+            None => Vec::new(),
+        };
+        assert!(keys.is_empty());
+    }
+
+    #[test]
+    fn test_find_workspace_path_nonexistent() {
+        let path = find_workspace_path("apps/nonexistent.lua");
+        // The function returns the path regardless, it just won't exist
+        assert!(path.to_str().unwrap().contains("nonexistent.lua"));
+    }
+
+    #[test]
+    fn test_form_colors_config_clone() {
+        let fc = FormColorsConfig {
+            field_fg: 10,
+            field_bg: 2,
+            submit_fg: 3,
+            submit_bg: 5,
+        };
+        let fc2 = fc.clone();
+        assert_eq!(fc2.field_fg, 10);
+        assert_eq!(fc2.field_bg, 2);
+        assert_eq!(fc2.submit_fg, 3);
+        assert_eq!(fc2.submit_bg, 5);
+    }
+
+    #[test]
+    fn test_app_config_admin_nodes_multiple() {
+        let config_str = r#"
+admin_nodes = [
+    "aaaa000000000000000000000000000000000000000000000000000000000000",
+    "bbbb000000000000000000000000000000000000000000000000000000000000",
+    "cccc000000000000000000000000000000000000000000000000000000000000"
+]
+
+[rate_limiter]
+max_packets_per_minute = 45
+max_burst_packets = 4
+inter_packet_guard_ms = 350
+max_duty_cycle_percent = 1.0
+duty_cycle_window_secs = 3600
+
+[asset_broadcaster]
+enable_on_demand_broadcast = true
+max_asset_broadcast_duty_cycle = 0.15
+        "#;
+        let config: AppConfig = toml::from_str(config_str).unwrap();
+        assert_eq!(config.admin_nodes.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_server_with_admin_nodes_config() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let mut config = default_config();
+        config.admin_nodes = vec![
+            "0505050505050505050505050505050505050505050505050505050505050505".to_string()
+        ];
+        let transport = Arc::new(MockSocketTransport::new(0.0, 10, 200));
+        let result = start_server(config, transport, Some(1)).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_session_reconnect_preserves_nickname() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let config = default_config();
+        let server_transport = Arc::new(MockSocketTransport::new_server("127.0.0.1:9096".to_string(), 0.0, 0, 200));
+        
+        let server_handle = tokio::spawn(async move {
+            start_server(config, server_transport, Some(3)).await
+        });
+        
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        let client_transport = MockSocketTransport::new_client("127.0.0.1:9096".to_string(), 0.0, 0, 200);
+        
+        let client_key = [7u8; 32];
+        
+        // First connection: handshake
+        let handshake_msg = MeshBbsMessage::new(0x03, 0x01, 0x00, Vec::new());
+        let handshake_payloads = handshake_msg.to_fragments(200).unwrap();
+        
+        let mut sent = false;
+        for _ in 0..10 {
+            let packet = RadioPacket {
+                is_broadcast: false,
+                src_node: client_key,
+                dst_node: [0; 32],
+                payload: handshake_payloads[0].clone(),
+                signal_rssi: -50,
+                signal_snr: 10,
+            };
+            if client_transport.send_packet(packet).await.is_ok() {
+                sent = true;
+                break;
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        }
+        assert!(sent, "Failed to send handshake");
+        
+        // Receive initial welcome (nickname setup form for first user)
+        let mut client_reassembler = MessageReassembler::new();
+        let mut assembled_msg = None;
+        let start_time = tokio::time::Instant::now();
+        while start_time.elapsed() < tokio::time::Duration::from_millis(1500) {
+            match tokio::time::timeout(tokio::time::Duration::from_millis(100), client_transport.receive_packet()).await {
+                Ok(Ok(packet)) => {
+                    if let Some(msg) = client_reassembler.process_packet([0; 32], &packet.payload).unwrap() {
+                        assembled_msg = Some(msg);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        
+        assert!(assembled_msg.is_some(), "Should receive welcome screen");
+        let welcome = assembled_msg.unwrap();
+        assert_eq!(welcome.opcode, 0x03);
+        
+        // Register nickname
+        let register_json = r#"{"nickname":"ReconnectTestUser","submit":"register"}"#;
+        let register_msg = MeshBbsMessage::new(0x02, 0x02, 0x00, register_json.as_bytes().to_vec());
+        let register_payloads = register_msg.to_fragments(200).unwrap();
+        
+        let packet = RadioPacket {
+            is_broadcast: false,
+            src_node: client_key,
+            dst_node: [0; 32],
+            payload: register_payloads[0].clone(),
+            signal_rssi: -50,
+            signal_snr: 10,
+        };
+        client_transport.send_packet(packet).await.unwrap();
+        
+        // After registering, server should send back the main menu with "Hello ReconnectTestUser"
+        let mut hello_msg = None;
+        let start_time = tokio::time::Instant::now();
+        while start_time.elapsed() < tokio::time::Duration::from_millis(1500) {
+            match tokio::time::timeout(tokio::time::Duration::from_millis(100), client_transport.receive_packet()).await {
+                Ok(Ok(packet)) => {
+                    if let Some(msg) = client_reassembler.process_packet([0; 32], &packet.payload).unwrap() {
+                        hello_msg = Some(msg);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        
+        let hello_response = hello_msg.expect("Should receive Hello screen after nickname registration");
+        assert_eq!(hello_response.opcode, 0x03);
+        // The payload should contain the user's nickname in the hello greeting
+        let payload_str = String::from_utf8_lossy(&hello_response.payload);
+        assert!(payload_str.contains("ReconnectTestUser"), "Hello screen should contain user nickname, got: {}", payload_str);
         
         let _ = server_handle.await;
     }

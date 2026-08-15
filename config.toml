@@ -33,3 +33,7 @@ field_bg = 1       # Blue
 submit_fg = 0      # Black
 submit_bg = 7      # Light Gray
 
+# List of node hex IDs (32 bytes = 64 hex characters) that should always have admin privileges
+admin_nodes = [
+    "0101010101010101010101010101010101010101010101010101010101010101"
+]

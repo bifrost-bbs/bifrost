@@ -33,6 +33,7 @@ pub struct FormField {
     pub col: u8,
     pub row: u8,
     pub width: u8,
+    pub height: u8,
     pub val: String,
     pub is_submit: bool,
 }
@@ -199,7 +200,8 @@ async fn main() -> Result<()> {
                             let fg = form.field_fg;
                             let bg = form.field_bg;
                             let field = &mut form.fields[idx];
-                            if !field.is_submit && field.val.len() < field.width as usize {
+                            let max_len = field.width as usize * field.height as usize;
+                            if !field.is_submit && field.val.len() < max_len {
                                 field.val.push(c);
                                 render_field_local(field, fg, bg, layout_val);
                                 position_cursor(&form, layout_val);
@@ -435,7 +437,10 @@ fn position_cursor(form: &FormState, layout: LayoutMode) {
     if field.is_submit {
         print!("\x1b[{};{}H", row_offset + field.row as u16 + 1, col_offset + field.col as u16 + 3);
     } else {
-        print!("\x1b[{};{}H", row_offset + field.row as u16 + 1, col_offset + field.col as u16 + field.val.len() as u16 + 1);
+        let char_idx = field.val.chars().count();
+        let r = char_idx / field.width as usize;
+        let c = char_idx % field.width as usize;
+        print!("\x1b[{};{}H", row_offset + field.row as u16 + r as u16 + 1, col_offset + field.col as u16 + c as u16 + 1);
     }
 }
 
@@ -459,7 +464,19 @@ fn render_form_fields_offset(form: &FormState, col_offset: u16, row_offset: u16)
                 (form.field_fg, form.field_bg)
             };
             apply_color_attribute((bg << 4) | fg);
-            print!("\x1b[{};{}H{:width$}\x1b[0m", row_offset + field.row as u16 + 1, col_offset + field.col as u16 + 1, field.val, width = field.width as usize);
+            for r in 0..field.height {
+                print!("\x1b[{};{}H{:width$}", row_offset + field.row as u16 + r as u16 + 1, col_offset + field.col as u16 + 1, "", width = field.width as usize);
+            }
+            let val_chars: Vec<char> = field.val.chars().collect();
+            for r in 0..field.height {
+                let start = r as usize * field.width as usize;
+                if start < val_chars.len() {
+                    let end = std::cmp::min(start + field.width as usize, val_chars.len());
+                    let line_str: String = val_chars[start..end].iter().collect();
+                    print!("\x1b[{};{}H{}", row_offset + field.row as u16 + r as u16 + 1, col_offset + field.col as u16 + 1, line_str);
+                }
+            }
+            print!("\x1b[0m");
         }
     }
 }
@@ -468,13 +485,21 @@ fn render_field_local(field: &FormField, fg: u8, bg: u8, layout: LayoutMode) {
     let (term_w, term_h) = crossterm::terminal::size().unwrap_or((80, 25));
     let (col_offset, row_offset, _, _) = get_viewport_offsets(layout, term_w, term_h);
     apply_color_attribute((bg << 4) | fg);
-    print!("\x1b[{};{}H{:width$}\x1b[0m", 
-        row_offset + field.row as u16 + 1, 
-        col_offset + field.col as u16 + 1, 
-        field.val, 
-        width = field.width as usize
-    );
+    for r in 0..field.height {
+        print!("\x1b[{};{}H{:width$}", row_offset + field.row as u16 + r as u16 + 1, col_offset + field.col as u16 + 1, "", width = field.width as usize);
+    }
+    let val_chars: Vec<char> = field.val.chars().collect();
+    for r in 0..field.height {
+        let start = r as usize * field.width as usize;
+        if start < val_chars.len() {
+            let end = std::cmp::min(start + field.width as usize, val_chars.len());
+            let line_str: String = val_chars[start..end].iter().collect();
+            print!("\x1b[{};{}H{}", row_offset + field.row as u16 + r as u16 + 1, col_offset + field.col as u16 + 1, line_str);
+        }
+    }
+    print!("\x1b[0m");
 }
+
 
 fn append_to_history(history: &mut Vec<u8>, payload: &[u8]) {
     if let Some(pos) = payload.iter().position(|&x| x == 0x01) {
@@ -592,6 +617,7 @@ fn interpret_bytecode(payload: &[u8], form_state: &mut FormState, col_offset: u1
                                 col,
                                 row,
                                 width,
+                                height: 1,
                                 val: val.clone(),
                                 is_submit: false,
                             });
@@ -624,6 +650,7 @@ fn interpret_bytecode(payload: &[u8], form_state: &mut FormState, col_offset: u1
                             col,
                             row,
                             width: (id.len() + 4) as u8,
+                            height: 1,
                             val: String::new(),
                             is_submit: true,
                         });
@@ -643,6 +670,57 @@ fn interpret_bytecode(payload: &[u8], form_state: &mut FormState, col_offset: u1
                 // OP_FORM_END
                 render_form_fields_offset(form_state, col_offset, row_offset);
                 i += 1;
+            }
+            0xD4 => {
+                // OP_FORM_FIELD_MULTILINE (col, row, width, height, id, val)
+                if i + 6 < payload.len() {
+                    let col = payload[i + 1];
+                    let row = payload[i + 2];
+                    let width = payload[i + 3];
+                    let height = payload[i + 4];
+                    let id_len = payload[i + 5] as usize;
+                    if i + 6 + id_len < payload.len() {
+                        let id = String::from_utf8_lossy(&payload[i + 6 .. i + 6 + id_len]).into_owned();
+                        let val_len_idx = i + 6 + id_len;
+                        let val_len = payload[val_len_idx] as usize;
+                        if val_len_idx + 1 + val_len <= payload.len() {
+                            let val = String::from_utf8_lossy(&payload[val_len_idx + 1 .. val_len_idx + 1 + val_len]).into_owned();
+                            
+                            form_state.fields.push(FormField {
+                                id,
+                                col,
+                                row,
+                                width,
+                                height,
+                                val: val.clone(),
+                                is_submit: false,
+                            });
+                            
+                            // Render field with form colors
+                            apply_color_attribute((form_state.field_bg << 4) | form_state.field_fg);
+                            for r in 0..height {
+                                print!("\x1b[{};{}H{:width$}\x1b[0m", row_offset + row as u16 + r as u16 + 1, col_offset + col as u16 + 1, "", width = width as usize);
+                            }
+                            let val_chars: Vec<char> = val.chars().collect();
+                            for r in 0..height {
+                                let start = r as usize * width as usize;
+                                if start < val_chars.len() {
+                                    let end = std::cmp::min(start + width as usize, val_chars.len());
+                                    let line_str: String = val_chars[start..end].iter().collect();
+                                    print!("\x1b[{};{}H{}", row_offset + row as u16 + r as u16 + 1, col_offset + col as u16 + 1, line_str);
+                                }
+                            }
+                            
+                            i = val_len_idx + 1 + val_len;
+                        } else {
+                            i += 1;
+                        }
+                    } else {
+                        i += 1;
+                    }
+                } else {
+                    i += 1;
+                }
             }
             c => {
                 print!("{}", c as char);
