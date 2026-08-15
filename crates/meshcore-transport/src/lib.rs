@@ -263,6 +263,23 @@ pub fn crc16(data: &[u8]) -> u16 {
     crc
 }
 
+/// CRC32 calculation helper using standard IEEE 802.3 polynomial (0xEDB88320).
+pub fn crc32(data: &[u8]) -> u32 {
+    let mut crc = 0xFFFF_FFFFu32;
+    for &byte in data {
+        crc ^= byte as u32;
+        for _ in 0..8 {
+            if (crc & 1) != 0 {
+                crc = (crc >> 1) ^ 0xEDB8_8320;
+            } else {
+                crc >>= 1;
+            }
+        }
+    }
+    !crc
+}
+
+
 /// Represents a high-level application message that can be fragmented/reassembled.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MeshBbsMessage {
@@ -600,6 +617,14 @@ mod tests {
         // Standard test vector for CRC16-CCITT with polynomial 0x1021, seed 0xFFFF is 0x29B1
         assert_eq!(crc16(data), 0x29B1);
     }
+
+    #[test]
+    fn test_crc32_correctness() {
+        let data = b"123456789";
+        // Standard test vector for CRC32 (IEEE 802.3) for b"123456789" is 0xCBF43926
+        assert_eq!(crc32(data), 0xCBF43926);
+    }
+
 
     #[test]
     fn test_message_fragmentation_and_reassembly() {

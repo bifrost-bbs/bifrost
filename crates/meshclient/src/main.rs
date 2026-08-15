@@ -6,6 +6,7 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
     ExecutableCommand,
 };
+use std::collections::HashMap;
 use std::io::{self, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -13,6 +14,7 @@ use std::sync::{Arc, Mutex};
 use meshcore_transport::{
     MeshBbsMessage, MessageReassembler, MockSocketTransport, RadioPacket, RadioTransport,
 };
+
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LayoutMode {
@@ -342,9 +344,32 @@ async fn main() -> Result<()> {
     // Receive and render bytecode packets from server in main loop
     let mut reassembler = MessageReassembler::new();
     let mut bytecode_history = Vec::new();
+    let (req_asset_tx, mut req_asset_rx) = tokio::sync::mpsc::unbounded_channel::<u16>();
+    let mut asset_cache_assembler: HashMap<u16, (u8, u32, HashMap<u8, Vec<u8>>)> = HashMap::new();
+
     loop {
         if input_handle.is_finished() {
             break;
+        }
+
+        // Drain any pending asset requests
+        while let Ok(asset_id) = req_asset_rx.try_recv() {
+            log::info!("Sending REQ_ASSET for asset 0x{:04X} to server", asset_id);
+            let req_msg = MeshBbsMessage::new(0x01, 0x05, 0x00, asset_id.to_be_bytes().to_vec());
+            let mtu = transport.get_mtu();
+            if let Ok(frags) = req_msg.to_fragments(mtu) {
+                for frag in frags {
+                    let packet = RadioPacket {
+                        is_broadcast: false,
+                        src_node: client_key,
+                        dst_node: [0; 32],
+                        payload: frag,
+                        signal_rssi: -50,
+                        signal_snr: 10,
+                    };
+                    let _ = transport.send_packet(packet).await;
+                }
+            }
         }
 
         if redraw_trigger.load(Ordering::SeqCst) {
@@ -363,6 +388,7 @@ async fn main() -> Result<()> {
                 layout_val,
                 col_offset,
                 row_offset,
+                &req_asset_tx,
             );
 
             if form_lock.active {
@@ -377,39 +403,84 @@ async fn main() -> Result<()> {
         )
         .await
         {
-            Ok(Ok(packet)) => match reassembler.process_packet([0; 32], &packet.payload) {
-                Ok(Some(msg)) => {
-                    append_to_history(&mut bytecode_history, &msg.payload);
+            Ok(Ok(packet)) => {
+                // Check for public broadcast asset chunks (AppPort 0xBB, MsgType 0x04)
+                if packet.payload.len() >= 12 && packet.payload[0] == 0xBB && packet.payload[1] == 0x04 {
+                    let chunk_idx = packet.payload[3];
+                    let total_chunks = packet.payload[4];
+                    let asset_id = u16::from_be_bytes([packet.payload[5], packet.payload[6]]);
+                    let payload_len = packet.payload[7] as usize;
+                    let master_crc = u32::from_be_bytes([
+                        packet.payload[8],
+                        packet.payload[9],
+                        packet.payload[10],
+                        packet.payload[11],
+                    ]);
+                    if packet.payload.len() >= 12 + payload_len {
+                        let chunk_data = &packet.payload[12..12 + payload_len];
+                        let entry = asset_cache_assembler
+                            .entry(asset_id)
+                            .or_insert_with(|| (total_chunks, master_crc, HashMap::new()));
+                        entry.2.insert(chunk_idx, chunk_data.to_vec());
 
-                    let (term_w, term_h) = crossterm::terminal::size().unwrap_or((80, 25));
-                    let layout_val = *layout.lock().unwrap();
-                    let (col_offset, row_offset, w, h) =
-                        get_viewport_offsets(layout_val, term_w, term_h);
-
-                    if msg.payload.first() == Some(&0x01) {
-                        print!("\x1b[2J\x1b[H");
-                        draw_viewport_border(col_offset, row_offset, w, h);
+                        if entry.2.len() == total_chunks as usize {
+                            let mut assembled = Vec::new();
+                            for idx in 1..=total_chunks {
+                                if let Some(c) = entry.2.get(&idx) {
+                                    assembled.extend_from_slice(c);
+                                }
+                            }
+                            if meshcore_transport::crc32(&assembled) == master_crc {
+                                log::info!(
+                                    "Promiscuous cache assembled asset 0x{:04X} ({} bytes)",
+                                    asset_id,
+                                    assembled.len()
+                                );
+                                save_asset_to_cache(asset_id, &assembled);
+                                redraw_trigger.store(true, Ordering::SeqCst);
+                            } else {
+                                log::warn!("Asset 0x{:04X} CRC32 mismatch, discarding", asset_id);
+                            }
+                        }
                     }
+                    continue;
+                }
 
-                    let mut form_lock = form_state.lock().unwrap();
-                    interpret_bytecode(
-                        &msg.payload,
-                        &mut form_lock,
-                        layout_val,
-                        col_offset,
-                        row_offset,
-                    );
+                match reassembler.process_packet([0; 32], &packet.payload) {
+                    Ok(Some(msg)) => {
+                        append_to_history(&mut bytecode_history, &msg.payload);
 
-                    if form_lock.active {
-                        position_cursor(&form_lock, layout_val);
+                        let (term_w, term_h) = crossterm::terminal::size().unwrap_or((80, 25));
+                        let layout_val = *layout.lock().unwrap();
+                        let (col_offset, row_offset, w, h) =
+                            get_viewport_offsets(layout_val, term_w, term_h);
+
+                        if msg.payload.first() == Some(&0x01) {
+                            print!("\x1b[2J\x1b[H");
+                            draw_viewport_border(col_offset, row_offset, w, h);
+                        }
+
+                        let mut form_lock = form_state.lock().unwrap();
+                        interpret_bytecode(
+                            &msg.payload,
+                            &mut form_lock,
+                            layout_val,
+                            col_offset,
+                            row_offset,
+                            &req_asset_tx,
+                        );
+
+                        if form_lock.active {
+                            position_cursor(&form_lock, layout_val);
+                        }
+                        let _ = io::stdout().flush();
                     }
-                    let _ = io::stdout().flush();
+                    Ok(None) => {}
+                    Err(e) => {
+                        log::error!("Client packet reassembly error: {}", e);
+                    }
                 }
-                Ok(None) => {}
-                Err(e) => {
-                    log::error!("Client packet reassembly error: {}", e);
-                }
-            },
+            }
             Ok(Err(meshcore_transport::TransportError::ConnectionClosed)) => {
                 break;
             }
@@ -595,6 +666,7 @@ fn interpret_bytecode(
     layout: LayoutMode,
     col_offset: u16,
     row_offset: u16,
+    req_asset_tx: &tokio::sync::mpsc::UnboundedSender<u16>,
 ) {
     let mut i = 0;
     while i < payload.len() {
@@ -667,7 +739,9 @@ fn interpret_bytecode(
                 // OP_RENDER_ASSET
                 if i + 2 < payload.len() {
                     let id = u16::from_be_bytes([payload[i + 1], payload[i + 2]]);
-                    render_cached_asset(id, col_offset, row_offset);
+                    if !render_cached_asset(id, col_offset, row_offset) {
+                        let _ = req_asset_tx.send(id);
+                    }
                     i += 3;
                 } else {
                     i += 1;
@@ -894,26 +968,37 @@ fn find_workspace_path(relative_path: &str) -> std::path::PathBuf {
     path
 }
 
-fn render_cached_asset(asset_id: u16, col_offset: u16, row_offset: u16) {
-    let path = match asset_id {
-        0x0101 => Some("assets/dungeon_banner.ans"),
-        0x0102 => Some("assets/main_menu_border.ans"),
-        0x0103 => Some("assets/main_menu_banner.ans"),
-        _ => None,
+fn save_asset_to_cache(asset_id: u16, data: &[u8]) {
+    let cache_dir = find_workspace_path(".client_cache");
+    let _ = std::fs::create_dir_all(&cache_dir);
+    let cache_file = cache_dir.join(format!("{:04x}.ans", asset_id));
+    let _ = std::fs::write(&cache_file, data);
+}
+
+fn render_cached_asset(asset_id: u16, col_offset: u16, row_offset: u16) -> bool {
+    let cache_dir = find_workspace_path(".client_cache");
+    let cache_file = cache_dir.join(format!("{:04x}.ans", asset_id));
+
+    // Check client cache first
+    let content = if let Ok(c) = std::fs::read_to_string(&cache_file) {
+        Some(c)
+    } else {
+        None
     };
-    if let Some(p) = path {
-        let p_buf = find_workspace_path(p);
-        if let Ok(content) = std::fs::read_to_string(&p_buf) {
-            print!("\x1b[{};{}H", row_offset + 1, col_offset + 1);
-            let newline_replacement = if col_offset > 0 {
-                format!("\r\n\x1b[{}C", col_offset)
-            } else {
-                "\r\n".to_string()
-            };
-            let aligned_content = content
-                .replace("\r\n", "\n")
-                .replace("\n", &newline_replacement);
-            print!("{}", aligned_content);
-        }
+
+    if let Some(content) = content {
+        print!("\x1b[{};{}H", row_offset + 1, col_offset + 1);
+        let newline_replacement = if col_offset > 0 {
+            format!("\r\n\x1b[{}C", col_offset)
+        } else {
+            "\r\n".to_string()
+        };
+        let aligned_content = content
+            .replace("\r\n", "\n")
+            .replace("\n", &newline_replacement);
+        print!("{}", aligned_content);
+        true
+    } else {
+        false
     }
 }
