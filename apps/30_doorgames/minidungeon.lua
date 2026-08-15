@@ -1,11 +1,16 @@
 local app = {}
 
 local MONSTER_TYPES = {
-    { name = "Mesh Goblin", hp_base = 15, str_base = 8, dex_base = 10, xp_base = 15 },
-    { name = "LoRa Orc", hp_base = 25, str_base = 12, dex_base = 8, xp_base = 25 },
-    { name = "Packet Loss Wraith", hp_base = 18, str_base = 6, dex_base = 16, xp_base = 30 },
-    { name = "Bytecode Behemoth", hp_base = 40, str_base = 16, dex_base = 6, xp_base = 50 },
-    { name = "Antenna Mimic", hp_base = 20, str_base = 10, dex_base = 12, xp_base = 20 }
+    -- Tier 1 (Level 1+)
+    { name = "Mesh Goblin", min_level = 1, hp_base = 10, str_base = 6, dex_base = 8, xp_base = 15 },
+    { name = "Bit Beetle", min_level = 1, hp_base = 8, str_base = 5, dex_base = 9, xp_base = 12 },
+    { name = "Antenna Mimic", min_level = 1, hp_base = 12, str_base = 7, dex_base = 10, xp_base = 20 },
+    -- Tier 2 (Level 2+)
+    { name = "LoRa Orc", min_level = 2, hp_base = 18, str_base = 10, dex_base = 8, xp_base = 25 },
+    { name = "Packet Loss Wraith", min_level = 2, hp_base = 15, str_base = 8, dex_base = 12, xp_base = 30 },
+    -- Tier 3 (Level 3+)
+    { name = "Bytecode Behemoth", min_level = 3, hp_base = 28, str_base = 13, dex_base = 6, xp_base = 50 },
+    { name = "Firmware Dragon", min_level = 4, hp_base = 40, str_base = 16, dex_base = 10, xp_base = 75 }
 }
 
 local EVENT_TYPES = {
@@ -68,7 +73,7 @@ end
 
 function app.on_start(session)
     local player = db.get("dungeon_players", session.node_id())
-    if not player or player.hp <= 0 then
+    if not player or type(player) ~= "table" or not player.hp or player.hp <= 0 then
         player = init_player(session)
         save_player(session, player)
     end
@@ -221,15 +226,26 @@ function app.do_event(session, player)
     elseif rtype == "EXIT" then
         app.view_room(session, player, "You found the stairs leading down!")
     elseif rtype == "MONSTER" then
-        local m_base = MONSTER_TYPES[math.random(1, #MONSTER_TYPES)]
-        local scale = player.dungeon_level
+        local available_monsters = {}
+        for _, m in ipairs(MONSTER_TYPES) do
+            if m.min_level <= player.dungeon_level then
+                table.insert(available_monsters, m)
+            end
+        end
+        if #available_monsters == 0 then
+            available_monsters = { MONSTER_TYPES[1] }
+        end
+        local m_base = available_monsters[math.random(1, #available_monsters)]
+        local depth_bonus = player.dungeon_level - 1
+        local m_hp = m_base.hp_base + (depth_bonus * 3) + math.random(-1, 2)
+        if m_hp < 5 then m_hp = 5 end
         local monster = {
             name = m_base.name,
-            hp = m_base.hp_base + (scale * 5) + math.random(-2, 5),
-            max_hp = m_base.hp_base + (scale * 5) + math.random(-2, 5),
-            str = m_base.str_base + scale,
-            dex = m_base.dex_base + scale,
-            xp = m_base.xp_base + (scale * 5)
+            hp = m_hp,
+            max_hp = m_hp,
+            str = m_base.str_base + depth_bonus,
+            dex = m_base.dex_base + depth_bonus,
+            xp = m_base.xp_base + (player.dungeon_level * 5)
         }
         app.battle_round(session, player, monster, "A wild " .. monster.name .. " attacks!")
     else
