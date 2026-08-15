@@ -14,22 +14,37 @@ function app.on_start(session)
     term.set_color(7, 0)
     term.print(string.format("Hero: %s | HP: %d/20 | Gold: %d\n", session.callsign(), player.hp, player.gold))
     
-    term.move_to(2, 12)
-    term.print("[1] Explore Crypt  [2] Rest at Camp  [Q] Exit\n")
-    term.print("Enter choice: ")
-    term.flush()
+    term.define_form(4)
+    term.add_submit_button("explore", 2, 12)
+    term.add_submit_button("rest", 18, 12)
+    term.add_submit_button("exit", 32, 12)
+    term.flush_form()
     
-    session.await_input(1, function(input)
-        if input == "1" then
+    session.await_input(4, function(submission)
+        if type(submission) == "string" then
+            app.on_start(session)
+            return
+        end
+
+        local action = submission.submit
+        log.info("Dungeon game option selected: " .. tostring(action))
+        if action == "explore" then
             app.battle(session, player)
-        elseif input == "2" then
+        elseif action == "rest" then
             player.hp = 20
             db.set("dungeon_players", session.node_id(), player)
-            term.move_to(2, 14)
+            
+            term.clear()
+            term.render_asset("ASSET_DUNGEON_BANNER")
+            term.move_to(2, 8)
             term.set_color(10, 0) -- Green
-            term.print("You rested and restored your HP! Press any key to continue...\n")
-            term.flush()
-            session.await_input(1, function() app.on_start(session) end)
+            term.print("You rested and restored your HP!\n\n")
+            
+            term.define_form(5)
+            term.add_submit_button("continue", 2, 11)
+            term.flush_form()
+            
+            session.await_input(5, function() app.on_start(session) end)
         else
             session.load_app("00_main_menu")
         end
@@ -38,18 +53,24 @@ end
 
 function app.battle(session, player)
     local monster_hp = math.random(5, 12)
-    term.move_to(2, 14)
+    term.clear()
+    term.render_asset("ASSET_DUNGEON_BANNER")
+    term.move_to(2, 8)
     term.set_color(12, 0) -- Light Red
     term.print(string.format("A Wild Mesh Goblin appears! (HP: %d)\n", monster_hp))
     player.gold = player.gold + 5
     player.hp = math.max(1, player.hp - 3)
     db.set("dungeon_players", session.node_id(), player)
-    term.move_to(2, 16)
+    
+    term.move_to(2, 10)
     term.set_color(11, 0) -- Cyan
-    term.print("You defeated the Goblin and earned 5 Gold!\n")
-    term.print("Press any key to return...\n")
-    term.flush()
-    session.await_input(1, function() app.on_start(session) end)
+    term.print("You defeated the Goblin and earned 5 Gold!\n\n")
+    
+    term.define_form(6)
+    term.add_submit_button("continue", 2, 13)
+    term.flush_form()
+    
+    session.await_input(6, function() app.on_start(session) end)
 end
 
 return app

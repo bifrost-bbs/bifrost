@@ -150,11 +150,26 @@ async fn main() -> Result<()> {
                 KeyCode::Char('c') | KeyCode::Char('C') if modifiers.contains(KeyModifiers::CONTROL) => {
                     break;
                 }
-                KeyCode::Tab => {
+                KeyCode::Tab | KeyCode::Down | KeyCode::Right => {
                     let mut form = form_clone.lock().unwrap();
                     let layout_val = *layout_clone.lock().unwrap();
                     if form.active && !form.fields.is_empty() {
                         form.active_idx = (form.active_idx + 1) % form.fields.len();
+                        let (term_w, term_h) = crossterm::terminal::size().unwrap_or((80, 25));
+                        let (col_offset, row_offset, _, _) = get_viewport_offsets(layout_val, term_w, term_h);
+                        render_form_fields_offset(&form, col_offset, row_offset);
+                        position_cursor(&form, layout_val);
+                        let _ = io::stdout().flush();
+                    }
+                }
+                KeyCode::Up | KeyCode::Left => {
+                    let mut form = form_clone.lock().unwrap();
+                    let layout_val = *layout_clone.lock().unwrap();
+                    if form.active && !form.fields.is_empty() {
+                        form.active_idx = (form.active_idx + form.fields.len() - 1) % form.fields.len();
+                        let (term_w, term_h) = crossterm::terminal::size().unwrap_or((80, 25));
+                        let (col_offset, row_offset, _, _) = get_viewport_offsets(layout_val, term_w, term_h);
+                        render_form_fields_offset(&form, col_offset, row_offset);
                         position_cursor(&form, layout_val);
                         let _ = io::stdout().flush();
                     }
@@ -240,6 +255,9 @@ async fn main() -> Result<()> {
                             } else {
                                 // Move to next field
                                 form.active_idx = (form.active_idx + 1) % form.fields.len();
+                                let (term_w, term_h) = crossterm::terminal::size().unwrap_or((80, 25));
+                                let (col_offset, row_offset, _, _) = get_viewport_offsets(layout_val, term_w, term_h);
+                                render_form_fields_offset(&form, col_offset, row_offset);
                                 position_cursor(&form, layout_val);
                                 let _ = io::stdout().flush();
                                 (false, None)
@@ -421,6 +439,31 @@ fn position_cursor(form: &FormState, layout: LayoutMode) {
     }
 }
 
+fn render_form_fields_offset(form: &FormState, col_offset: u16, row_offset: u16) {
+    for (idx, field) in form.fields.iter().enumerate() {
+        let is_active = idx == form.active_idx;
+        if field.is_submit {
+            let (fg, bg) = if is_active {
+                // Focus highlight: swap colors
+                (form.submit_bg, form.submit_fg)
+            } else {
+                (form.submit_fg, form.submit_bg)
+            };
+            apply_color_attribute((bg << 4) | fg);
+            print!("\x1b[{};{}H[ {} ]\x1b[0m", row_offset + field.row as u16 + 1, col_offset + field.col as u16 + 1, field.id);
+        } else {
+            let (fg, bg) = if is_active {
+                // Focus highlight: swap colors
+                (form.field_bg, form.field_fg)
+            } else {
+                (form.field_fg, form.field_bg)
+            };
+            apply_color_attribute((bg << 4) | fg);
+            print!("\x1b[{};{}H{:width$}\x1b[0m", row_offset + field.row as u16 + 1, col_offset + field.col as u16 + 1, field.val, width = field.width as usize);
+        }
+    }
+}
+
 fn render_field_local(field: &FormField, fg: u8, bg: u8, layout: LayoutMode) {
     let (term_w, term_h) = crossterm::terminal::size().unwrap_or((80, 25));
     let (col_offset, row_offset, _, _) = get_viewport_offsets(layout, term_w, term_h);
@@ -598,6 +641,7 @@ fn interpret_bytecode(payload: &[u8], form_state: &mut FormState, col_offset: u1
             }
             0xD3 => {
                 // OP_FORM_END
+                render_form_fields_offset(form_state, col_offset, row_offset);
                 i += 1;
             }
             c => {
