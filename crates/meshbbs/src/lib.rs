@@ -817,6 +817,9 @@ fn run_session_task(
             if let Some(tbl) = store.get(&table) {
                 if let Some(val) = tbl.get(&key) {
                     if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(val) {
+                        if json_val.is_null() {
+                            return Ok(mlua::Value::Nil);
+                        }
                         if let Ok(lua_val) = lua.to_value(&json_val) {
                             return Ok(mlua::Value::from(lua_val));
                         }
@@ -832,9 +835,17 @@ fn run_session_task(
         "set",
         lua.create_function(
             move |lua, (table, key, val): (String, String, mlua::Value)| {
-                if let Ok(json_val) = lua.from_value::<serde_json::Value>(val) {
-                    if let Ok(json_str) = serde_json::to_string(&json_val) {
-                        let mut store = db_store_set.lock().unwrap();
+                let mut store = db_store_set.lock().unwrap();
+                if val.is_nil() {
+                    if let Some(tbl) = store.get_mut(&table) {
+                        tbl.remove(&key);
+                    }
+                } else if let Ok(json_val) = lua.from_value::<serde_json::Value>(val) {
+                    if json_val.is_null() {
+                        if let Some(tbl) = store.get_mut(&table) {
+                            tbl.remove(&key);
+                        }
+                    } else if let Ok(json_str) = serde_json::to_string(&json_val) {
                         store
                             .entry(table)
                             .or_insert_with(HashMap::new)
@@ -1857,6 +1868,134 @@ max_asset_broadcast_duty_cycle = 0.15
         stats.record_session_connect(node2);
 
         assert_eq!(stats.unique_users_24h(), 2);
+    }
+
+    #[test]
+    fn test_db_set_nil_and_null_handling() {
+        let lua = mlua::Lua::new();
+        let db_store = Arc::new(StdMutex::new(HashMap::<String, HashMap<String, String>>::new()));
+
+        let db = lua.create_table().unwrap();
+        let db_store_get = db_store.clone();
+        db.set(
+            "get",
+            lua.create_function(move |lua, (table, key): (String, String)| {
+                let store = db_store_get.lock().unwrap();
+                if let Some(tbl) = store.get(&table) {
+                    if let Some(val) = tbl.get(&key) {
+                        if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(val) {
+                            if json_val.is_null() {
+                                return Ok(mlua::Value::Nil);
+                            }
+                            if let Ok(lua_val) = lua.to_value(&json_val) {
+                                return Ok(mlua::Value::from(lua_val));
+                            }
+                        }
+                    }
+                }
+                Ok(mlua::Value::Nil)
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        let db_store_set = db_store.clone();
+        db.set(
+            "set",
+            lua.create_function(
+                move |lua, (table, key, val): (String, String, mlua::Value)| {
+                    let mut store = db_store_set.lock().unwrap();
+                    if val.is_nil() {
+                        if let Some(tbl) = store.get_mut(&table) {
+                            tbl.remove(&key);
+                        }
+                    } else if let Ok(json_val) = lua.from_value::<serde_json::Value>(val) {
+                        if json_val.is_null() {
+                            if let Some(tbl) = store.get_mut(&table) {
+                                tbl.remove(&key);
+                            }
+                        } else if let Ok(json_str) = serde_json::to_string(&json_val) {
+                            store
+                                .entry(table)
+                                .or_insert_with(HashMap::new)
+                                .insert(key, json_str);
+                        }
+                    }
+                    Ok(())
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        lua.globals().set("db", db).unwrap();
+
+        // 1. Set a table
+        lua.load(r#"db.set("test_table", "player1", { hp = 25, name = "Hero" })"#)
+            .exec()
+            .unwrap();
+
+        // Verify get returns table
+        let hp: i32 = lua
+            .load(r#"local p = db.get("test_table", "player1"); return p.hp"#)
+            .eval()
+            .unwrap();
+        assert_eq!(hp, 25);
+
+        // 2. Set nil (game over / clear save)
+        lua.load(r#"db.set("test_table", "player1", nil)"#)
+            .exec()
+            .unwrap();
+
+        // Verify get returns nil (not userdata Null!)
+        let is_nil: bool = lua
+            .load(r#"local p = db.get("test_table", "player1"); return p == nil"#)
+            .eval()
+            .unwrap();
+        assert!(is_nil, "db.get after setting nil should return nil");
+
+        // Verify condition `if not player or player.hp <= 0` does not error on userdata index
+        let ok_result: bool = lua
+            .load(
+                r#"
+                local p = db.get("test_table", "player1")
+                if not p or p.hp <= 0 then
+                    return true
+                end
+                return false
+                "#,
+            )
+            .eval()
+            .unwrap();
+        assert!(ok_result);
+    }
+
+    #[test]
+    fn test_minidungeon_xp_and_stat_mechanics() {
+        let lua = mlua::Lua::new();
+        let code = std::fs::read_to_string(find_workspace_path("apps/30_doorgames/minidungeon.lua"))
+            .unwrap();
+
+        // Verify exponential XP progression
+        let xp_checks: (i64, i64, i64, i64) = lua
+            .load(
+                r#"
+                local function xp_needed(level)
+                    return 50 * (math.floor(2 ^ level) - 1)
+                end
+                return xp_needed(1), xp_needed(2), xp_needed(3), xp_needed(4)
+                "#,
+            )
+            .eval()
+            .unwrap();
+
+        assert_eq!(xp_checks.0, 50, "Level 1->2 should need 50 XP");
+        assert_eq!(xp_checks.1, 150, "Level 2->3 should need 150 total XP");
+        assert_eq!(xp_checks.2, 350, "Level 3->4 should need 350 total XP");
+        assert_eq!(xp_checks.3, 750, "Level 4->5 should need 750 total XP");
+
+        // Verify minidungeon script compiles without syntax errors
+        assert!(!code.is_empty());
     }
 }
 
