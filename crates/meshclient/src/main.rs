@@ -357,7 +357,13 @@ async fn main() -> Result<()> {
             draw_viewport_border(col_offset, row_offset, w, h);
 
             let mut form_lock = form_state.lock().unwrap();
-            interpret_bytecode(&bytecode_history, &mut form_lock, col_offset, row_offset);
+            interpret_bytecode(
+                &bytecode_history,
+                &mut form_lock,
+                layout_val,
+                col_offset,
+                row_offset,
+            );
 
             if form_lock.active {
                 position_cursor(&form_lock, layout_val);
@@ -386,7 +392,13 @@ async fn main() -> Result<()> {
                     }
 
                     let mut form_lock = form_state.lock().unwrap();
-                    interpret_bytecode(&msg.payload, &mut form_lock, col_offset, row_offset);
+                    interpret_bytecode(
+                        &msg.payload,
+                        &mut form_lock,
+                        layout_val,
+                        col_offset,
+                        row_offset,
+                    );
 
                     if form_lock.active {
                         position_cursor(&form_lock, layout_val);
@@ -580,6 +592,7 @@ fn append_to_history(history: &mut Vec<u8>, payload: &[u8]) {
 fn interpret_bytecode(
     payload: &[u8],
     form_state: &mut FormState,
+    layout: LayoutMode,
     col_offset: u16,
     row_offset: u16,
 ) {
@@ -594,17 +607,9 @@ fn interpret_bytecode(
                 // OP_CLEAR_SCREEN (Viewport relative)
                 print!("\x1b[2J\x1b[H");
                 let (term_w, term_h) = crossterm::terminal::size().unwrap_or((80, 25));
-                let (_, _, w, h) = get_viewport_offsets(
-                    if col_offset > 25 {
-                        LayoutMode::Full
-                    } else {
-                        LayoutMode::Compact
-                    },
-                    term_w,
-                    term_h,
-                );
-                draw_viewport_border(col_offset, row_offset, w, h);
-                print!("\x1b[{};{}H", row_offset + 1, col_offset + 1);
+                let (c_off, r_off, w, h) = get_viewport_offsets(layout, term_w, term_h);
+                draw_viewport_border(c_off, r_off, w, h);
+                print!("\x1b[{};{}H", r_off + 1, c_off + 1);
 
                 // Clear active form state when screen is cleared!
                 form_state.active = false;
@@ -615,11 +620,19 @@ fn interpret_bytecode(
             }
             0x02 => {
                 // OP_CRLF inside viewport
-                print!("\r\n\x1b[{}C", col_offset);
+                if col_offset > 0 {
+                    print!("\r\n\x1b[{}C", col_offset);
+                } else {
+                    print!("\r\n");
+                }
                 i += 1;
             }
             b'\n' => {
-                print!("\r\n\x1b[{}C", col_offset);
+                if col_offset > 0 {
+                    print!("\r\n\x1b[{}C", col_offset);
+                } else {
+                    print!("\r\n");
+                }
                 i += 1;
             }
             0x04 => {
@@ -857,6 +870,30 @@ fn apply_color_attribute(attr: u8) {
     print!("\x1b[{};{}m", fg_code, bg_code);
 }
 
+fn find_workspace_path(relative_path: &str) -> std::path::PathBuf {
+    let path = std::path::PathBuf::from(relative_path);
+    if path.exists() {
+        return path;
+    }
+    if let Ok(current) = std::env::current_dir() {
+        if current.ends_with("crates/meshclient")
+            || current.ends_with("meshclient")
+            || current.ends_with("crates/meshbbs")
+            || current.ends_with("meshbbs")
+        {
+            if let Some(parent) = current.parent() {
+                if let Some(workspace_root) = parent.parent() {
+                    let parent_path = workspace_root.join(relative_path);
+                    if parent_path.exists() {
+                        return parent_path;
+                    }
+                }
+            }
+        }
+    }
+    path
+}
+
 fn render_cached_asset(asset_id: u16, col_offset: u16, row_offset: u16) {
     let path = match asset_id {
         0x0101 => Some("assets/dungeon_banner.ans"),
@@ -865,9 +902,14 @@ fn render_cached_asset(asset_id: u16, col_offset: u16, row_offset: u16) {
         _ => None,
     };
     if let Some(p) = path {
-        if let Ok(content) = std::fs::read_to_string(p) {
+        let p_buf = find_workspace_path(p);
+        if let Ok(content) = std::fs::read_to_string(&p_buf) {
             print!("\x1b[{};{}H", row_offset + 1, col_offset + 1);
-            let newline_replacement = format!("\r\n\x1b[{}C", col_offset);
+            let newline_replacement = if col_offset > 0 {
+                format!("\r\n\x1b[{}C", col_offset)
+            } else {
+                "\r\n".to_string()
+            };
             let aligned_content = content
                 .replace("\r\n", "\n")
                 .replace("\n", &newline_replacement);
