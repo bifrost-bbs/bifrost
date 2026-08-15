@@ -31,3 +31,7 @@ database.db-journal
 
 # Lua cache / compiled files
 *.luac
+
+# Client asset cache directory
+.client_cache/
+
