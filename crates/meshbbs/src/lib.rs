@@ -4,14 +4,66 @@
 use anyhow::Result;
 use log::{info, warn};
 use mlua::LuaSerdeExt;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
+use std::time::Instant;
 use tokio::sync::mpsc;
 
 // Pull from sibling workspace crates
-use meshcore_transport::{MockSocketTransport, RadioTransport, RadioPacket, MeshBbsMessage, MessageReassembler};
+use meshcore_transport::{MockSocketTransport, RadioTransport, RadioPacket, MeshBbsMessage, MessageReassembler, TransportStats};
+
+/// BBS-level statistics tracker for session and user accounting.
+pub struct BbsStats {
+    /// Timestamps of when each unique node connected (for 24h active user count)
+    pub session_timestamps: StdMutex<Vec<(Instant, [u8; 32])>>,
+    /// Currently active session node IDs
+    pub active_session_count: StdMutex<usize>,
+}
+
+impl BbsStats {
+    pub fn new() -> Self {
+        Self {
+            session_timestamps: StdMutex::new(Vec::new()),
+            active_session_count: StdMutex::new(0),
+        }
+    }
+
+    /// Records a new session connection.
+    pub fn record_session_connect(&self, node_id: [u8; 32]) {
+        if let Ok(mut ts) = self.session_timestamps.lock() {
+            ts.push((Instant::now(), node_id));
+        }
+        if let Ok(mut count) = self.active_session_count.lock() {
+            *count += 1;
+        }
+    }
+
+    /// Records a session disconnection.
+    pub fn record_session_disconnect(&self) {
+        if let Ok(mut count) = self.active_session_count.lock() {
+            *count = count.saturating_sub(1);
+        }
+    }
+
+    /// Returns the count of unique nodes that have connected in the last 24 hours.
+    pub fn unique_users_24h(&self) -> usize {
+        let cutoff = Instant::now() - std::time::Duration::from_secs(86400);
+        if let Ok(mut ts) = self.session_timestamps.lock() {
+            ts.retain(|&(t, _)| t >= cutoff);
+            let unique: HashSet<[u8; 32]> = ts.iter().map(|&(_, id)| id).collect();
+            unique.len()
+        } else {
+            0
+        }
+    }
+
+    /// Returns the current number of active sessions.
+    pub fn active_sessions(&self) -> usize {
+        *self.active_session_count.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
 
 fn default_form_colors() -> FormColorsConfig {
     FormColorsConfig {
@@ -108,19 +160,21 @@ pub async fn run_bbs(config_path: Option<PathBuf>, run_duration_secs: Option<u64
     };
 
     // 2. Initialize Transport
-    let transport: Arc<dyn RadioTransport> = if run_duration_secs.is_some() {
-        Arc::new(MockSocketTransport::new(0.0, 10, 200))
+    let mock_transport = if run_duration_secs.is_some() {
+        MockSocketTransport::new(0.0, 10, 200)
     } else {
-        Arc::new(MockSocketTransport::new_server(
+        MockSocketTransport::new_server(
             "127.0.0.1:8088".to_string(),
             0.0,
             10,
             200,
-        ))
+        )
     };
+    let transport_stats = mock_transport.stats.clone();
+    let transport: Arc<dyn RadioTransport> = Arc::new(mock_transport);
 
     // 3. Start Server Runtime
-    start_server(config, transport, run_duration_secs).await
+    start_server_with_stats(config, transport, run_duration_secs, Some(transport_stats)).await
 }
 
 struct Session {
@@ -133,6 +187,16 @@ pub async fn start_server(
     config: AppConfig,
     transport: Arc<dyn RadioTransport>,
     run_duration_secs: Option<u64>,
+) -> Result<()> {
+    start_server_with_stats(config, transport, run_duration_secs, None).await
+}
+
+/// Starts the BBS Host server daemon with optional transport-level stats tracking.
+pub async fn start_server_with_stats(
+    config: AppConfig,
+    transport: Arc<dyn RadioTransport>,
+    run_duration_secs: Option<u64>,
+    transport_stats: Option<Arc<TransportStats>>,
 ) -> Result<()> {
     info!(
         "Rate Limiter active: Max Packets/Min={}, Max Duty Cycle={}%",
@@ -148,7 +212,47 @@ pub async fn start_server(
     let active_sessions = Arc::new(StdMutex::new(HashMap::<[u8; 32], Session>::new()));
     let db_store = Arc::new(StdMutex::new(HashMap::<String, HashMap<String, String>>::new()));
     let mut reassembler = MessageReassembler::new();
+    let bbs_stats = Arc::new(BbsStats::new());
 
+    // Spawn periodic stats logger (once per minute)
+    let stats_logger_handle = if let Some(ref ts) = transport_stats {
+        let ts_clone = ts.clone();
+        let bbs_stats_clone = bbs_stats.clone();
+        let duration_limit = run_duration_secs;
+        Some(tokio::spawn(async move {
+            let start = tokio::time::Instant::now();
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
+            interval.tick().await; // First tick fires immediately, skip it
+            loop {
+                interval.tick().await;
+                if let Some(dur) = duration_limit {
+                    if start.elapsed() >= tokio::time::Duration::from_secs(dur) {
+                        break;
+                    }
+                }
+
+                let active = bbs_stats_clone.active_sessions();
+                let unique_24h = bbs_stats_clone.unique_users_24h();
+                let tx_total = ts_clone.total_packets_sent();
+                let rx_total = ts_clone.total_packets_received();
+                let tx_bytes = ts_clone.total_bytes_sent();
+                let rx_bytes = ts_clone.total_bytes_received();
+                let uptime = ts_clone.uptime_secs();
+                let (tx_ppm_1h, rx_ppm_1h) = ts_clone.packets_per_minute_last(3600);
+                let (tx_ppm_24h, rx_ppm_24h) = ts_clone.packets_per_minute_last(86400);
+
+                info!("=== BBS Stats (uptime {}s) ===", uptime);
+                info!("  Active sessions: {}  |  Unique users (24h): {}", active, unique_24h);
+                info!("  Packets TX: {} ({} bytes)  |  Packets RX: {} ({} bytes)", tx_total, tx_bytes, rx_total, rx_bytes);
+                info!("  Avg TX/min (1h): {:.1}  |  Avg RX/min (1h): {:.1}", tx_ppm_1h, rx_ppm_1h);
+                info!("  Avg TX/min (24h): {:.1}  |  Avg RX/min (24h): {:.1}", tx_ppm_24h, rx_ppm_24h);
+            }
+        }))
+    } else {
+        None
+    };
+
+    let bbs_stats_clone = bbs_stats.clone();
     // Main packet routing loop placeholder
     let loop_handle = tokio::spawn(async move {
         let start_time = tokio::time::Instant::now();
@@ -174,6 +278,7 @@ pub async fn start_server(
                                 let (tx, rx) = mpsc::channel(100);
                                 let session = Session { input_tx: tx.clone() };
                                 active_sessions.lock().unwrap().insert(src, session);
+                                bbs_stats_clone.record_session_connect(src);
 
                                 let sessions_clone = active_sessions.clone();
                                 let transport_inner = transport.clone();
@@ -181,9 +286,11 @@ pub async fn start_server(
                                 let rt_handle = tokio::runtime::Handle::current();
                                 let form_colors_config = config.form_colors.clone();
                                 let admin_nodes_config = config.admin_nodes.clone();
+                                let bbs_stats_inner = bbs_stats_clone.clone();
                                 std::thread::spawn(move || {
                                     let res = run_session_task(src, rx, transport_inner, db_inner, rt_handle, form_colors_config, admin_nodes_config);
                                     sessions_clone.lock().unwrap().remove(&src);
+                                    bbs_stats_inner.record_session_disconnect();
                                     if let Err(e) = res {
                                         log::error!("Session task error: {:?}", e);
                                     }
@@ -211,6 +318,11 @@ pub async fn start_server(
     });
 
     loop_handle.await??;
+
+    // Cancel the stats logger if it was running
+    if let Some(handle) = stats_logger_handle {
+        handle.abort();
+    }
 
     Ok(())
 }
@@ -1237,4 +1349,48 @@ max_asset_broadcast_duty_cycle = 0.15
         
         let _ = server_handle.await;
     }
+
+    #[test]
+    fn test_bbs_stats_new() {
+        let stats = BbsStats::new();
+        assert_eq!(stats.active_sessions(), 0);
+        assert_eq!(stats.unique_users_24h(), 0);
+    }
+
+    #[test]
+    fn test_bbs_stats_session_connect_disconnect() {
+        let stats = BbsStats::new();
+        let node1 = [1u8; 32];
+        let node2 = [2u8; 32];
+
+        stats.record_session_connect(node1);
+        assert_eq!(stats.active_sessions(), 1);
+
+        stats.record_session_connect(node2);
+        assert_eq!(stats.active_sessions(), 2);
+
+        stats.record_session_disconnect();
+        assert_eq!(stats.active_sessions(), 1);
+
+        stats.record_session_disconnect();
+        assert_eq!(stats.active_sessions(), 0);
+
+        // Disconnecting below 0 should saturate at 0
+        stats.record_session_disconnect();
+        assert_eq!(stats.active_sessions(), 0);
+    }
+
+    #[test]
+    fn test_bbs_stats_unique_users_24h() {
+        let stats = BbsStats::new();
+        let node1 = [1u8; 32];
+        let node2 = [2u8; 32];
+
+        stats.record_session_connect(node1);
+        stats.record_session_connect(node1); // Same node reconnecting
+        stats.record_session_connect(node2);
+
+        assert_eq!(stats.unique_users_24h(), 2);
+    }
 }
+

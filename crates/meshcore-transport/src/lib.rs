@@ -3,6 +3,9 @@
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -47,6 +50,132 @@ pub trait RadioTransport: Send + Sync {
     fn get_mtu(&self) -> usize;
 }
 
+/// Shared statistics tracker for transport-level packet accounting.
+///
+/// All counters use relaxed atomic ordering for low-overhead, best-effort
+/// accuracy.  The `packet_timestamps` vec is pruned to the last 24 hours
+/// whenever [`packets_per_minute_last`] is called.
+pub struct TransportStats {
+    pub packets_sent: AtomicU64,
+    pub packets_received: AtomicU64,
+    pub bytes_sent: AtomicU64,
+    pub bytes_received: AtomicU64,
+    pub send_errors: AtomicU64,
+    pub receive_errors: AtomicU64,
+    pub started_at: Instant,
+    pub packet_timestamps: Mutex<Vec<(Instant, bool)>>,
+}
+
+impl TransportStats {
+    /// Creates a new stats tracker with all counters zeroed.
+    pub fn new() -> Self {
+        Self {
+            packets_sent: AtomicU64::new(0),
+            packets_received: AtomicU64::new(0),
+            bytes_sent: AtomicU64::new(0),
+            bytes_received: AtomicU64::new(0),
+            send_errors: AtomicU64::new(0),
+            receive_errors: AtomicU64::new(0),
+            started_at: Instant::now(),
+            packet_timestamps: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Records a successful send of `payload_bytes` bytes.
+    pub fn record_send(&self, payload_bytes: usize) {
+        self.packets_sent.fetch_add(1, Ordering::Relaxed);
+        self.bytes_sent.fetch_add(payload_bytes as u64, Ordering::Relaxed);
+        if let Ok(mut ts) = self.packet_timestamps.lock() {
+            ts.push((Instant::now(), true));
+        }
+    }
+
+    /// Records a successful receive of `payload_bytes` bytes.
+    pub fn record_receive(&self, payload_bytes: usize) {
+        self.packets_received.fetch_add(1, Ordering::Relaxed);
+        self.bytes_received.fetch_add(payload_bytes as u64, Ordering::Relaxed);
+        if let Ok(mut ts) = self.packet_timestamps.lock() {
+            ts.push((Instant::now(), false));
+        }
+    }
+
+    /// Records a send error.
+    pub fn record_send_error(&self) {
+        self.send_errors.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Records a receive error.
+    pub fn record_receive_error(&self) {
+        self.receive_errors.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Returns `(send_ppm, recv_ppm)` over the last `duration_secs` seconds.
+    ///
+    /// Also prunes timestamps older than 24 hours.
+    pub fn packets_per_minute_last(&self, duration_secs: u64) -> (f64, f64) {
+        let now = Instant::now();
+        let cutoff_24h = now - std::time::Duration::from_secs(86400);
+        let window = now - std::time::Duration::from_secs(duration_secs);
+
+        let mut ts = match self.packet_timestamps.lock() {
+            Ok(guard) => guard,
+            Err(_) => return (0.0, 0.0),
+        };
+
+        // Prune entries older than 24 hours
+        ts.retain(|&(t, _)| t >= cutoff_24h);
+
+        let mut send_count: u64 = 0;
+        let mut recv_count: u64 = 0;
+        for &(t, is_send) in ts.iter() {
+            if t >= window {
+                if is_send {
+                    send_count += 1;
+                } else {
+                    recv_count += 1;
+                }
+            }
+        }
+
+        let minutes = duration_secs as f64 / 60.0;
+        if minutes <= 0.0 {
+            return (0.0, 0.0);
+        }
+        (send_count as f64 / minutes, recv_count as f64 / minutes)
+    }
+
+    /// Total packets sent since creation.
+    pub fn total_packets_sent(&self) -> u64 {
+        self.packets_sent.load(Ordering::Relaxed)
+    }
+
+    /// Total packets received since creation.
+    pub fn total_packets_received(&self) -> u64 {
+        self.packets_received.load(Ordering::Relaxed)
+    }
+
+    /// Total payload bytes sent since creation.
+    pub fn total_bytes_sent(&self) -> u64 {
+        self.bytes_sent.load(Ordering::Relaxed)
+    }
+
+    /// Total payload bytes received since creation.
+    pub fn total_bytes_received(&self) -> u64 {
+        self.bytes_received.load(Ordering::Relaxed)
+    }
+
+    /// Seconds elapsed since the stats tracker was created.
+    pub fn uptime_secs(&self) -> u64 {
+        self.started_at.elapsed().as_secs()
+    }
+}
+
+impl Default for TransportStats {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// A simulated virtual socket transport harness using TCP sockets.
 /// Simulates packet drops and transport latency to model LoRa networks.
 pub struct MockSocketTransport {
@@ -58,6 +187,7 @@ pub struct MockSocketTransport {
     #[allow(dead_code)]
     latency_ms: u32,
     mtu: usize,
+    pub stats: Arc<TransportStats>,
 }
 
 impl MockSocketTransport {
@@ -78,6 +208,7 @@ impl MockSocketTransport {
             packet_loss_rate,
             latency_ms,
             mtu,
+            stats: Arc::new(TransportStats::new()),
         }
     }
 
@@ -111,6 +242,7 @@ impl MockSocketTransport {
             packet_loss_rate,
             latency_ms,
             mtu,
+            stats: Arc::new(TransportStats::new()),
         }
     }
 
@@ -139,6 +271,7 @@ impl MockSocketTransport {
             packet_loss_rate,
             latency_ms,
             mtu,
+            stats: Arc::new(TransportStats::new()),
         }
     }
 }
@@ -214,9 +347,19 @@ impl RadioTransport for MockSocketTransport {
             tokio::time::sleep(tokio::time::Duration::from_millis(self.latency_ms as u64)).await;
         }
 
+        let payload_len = packet.payload.len();
+        let dst = packet.dst_node;
         if self.tx.send(packet).await.is_err() {
+            self.stats.record_send_error();
             return Err(TransportError::SendError("Transport channel closed".to_string()));
         }
+
+        self.stats.record_send(payload_len);
+        log::info!(
+            "[RADIO TX] {} bytes -> node {:02x}{:02x}..{:02x}{:02x}",
+            payload_len,
+            dst[0], dst[1], dst[30], dst[31],
+        );
 
         Ok(())
     }
@@ -224,6 +367,12 @@ impl RadioTransport for MockSocketTransport {
     async fn receive_packet(&self) -> Result<RadioPacket, TransportError> {
         let mut rx = self.rx.lock().await;
         if let Some(packet) = rx.recv().await {
+            self.stats.record_receive(packet.payload.len());
+            log::info!(
+                "[RADIO RX] {} bytes <- node {:02x}{:02x}..{:02x}{:02x}",
+                packet.payload.len(),
+                packet.src_node[0], packet.src_node[1], packet.src_node[30], packet.src_node[31],
+            );
             Ok(packet)
         } else {
             Err(TransportError::ConnectionClosed)
@@ -647,5 +796,70 @@ mod tests {
         corrupted_frag[len - 1] ^= 0xFF; // flip bits in payload
         assert!(reassembler.process_packet(src, &corrupted_frag).is_err());
     }
-}
 
+    #[test]
+    fn test_transport_stats_new() {
+        let stats = TransportStats::new();
+        assert_eq!(stats.total_packets_sent(), 0);
+        assert_eq!(stats.total_packets_received(), 0);
+        assert_eq!(stats.total_bytes_sent(), 0);
+        assert_eq!(stats.total_bytes_received(), 0);
+        assert_eq!(stats.send_errors.load(Ordering::Relaxed), 0);
+        assert_eq!(stats.receive_errors.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn test_transport_stats_record_send_receive() {
+        let stats = TransportStats::new();
+        stats.record_send(100);
+        stats.record_send(200);
+        stats.record_receive(50);
+        stats.record_receive(75);
+        stats.record_receive(25);
+
+        assert_eq!(stats.total_packets_sent(), 2);
+        assert_eq!(stats.total_packets_received(), 3);
+        assert_eq!(stats.total_bytes_sent(), 300);
+        assert_eq!(stats.total_bytes_received(), 150);
+
+        stats.record_send_error();
+        stats.record_send_error();
+        stats.record_receive_error();
+        assert_eq!(stats.send_errors.load(Ordering::Relaxed), 2);
+        assert_eq!(stats.receive_errors.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn test_transport_stats_packets_per_minute() {
+        let stats = TransportStats::new();
+        // Record 6 sends and 3 receives
+        for _ in 0..6 {
+            stats.record_send(10);
+        }
+        for _ in 0..3 {
+            stats.record_receive(10);
+        }
+
+        // All timestamps are within the last 60 seconds
+        let (send_ppm, recv_ppm) = stats.packets_per_minute_last(60);
+        // 6 sends in 1 minute = 6 ppm
+        assert!((send_ppm - 6.0).abs() < 0.01, "send_ppm was {}", send_ppm);
+        // 3 receives in 1 minute = 3 ppm
+        assert!((recv_ppm - 3.0).abs() < 0.01, "recv_ppm was {}", recv_ppm);
+
+        // With a 120-second window, same counts spread over 2 minutes
+        let (send_ppm_2, recv_ppm_2) = stats.packets_per_minute_last(120);
+        assert!((send_ppm_2 - 3.0).abs() < 0.01, "send_ppm_2 was {}", send_ppm_2);
+        assert!((recv_ppm_2 - 1.5).abs() < 0.01, "recv_ppm_2 was {}", recv_ppm_2);
+    }
+
+    #[test]
+    fn test_transport_stats_uptime() {
+        let stats = TransportStats::new();
+        // Just-created stats should have started_at in the past (or equal to now)
+        // uptime_secs may be 0 if the test runs fast, but elapsed should be >= 0
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        // started_at.elapsed() should be > 0 in nanoseconds at least
+        assert!(stats.started_at.elapsed().as_nanos() > 0);
+    }
+}
