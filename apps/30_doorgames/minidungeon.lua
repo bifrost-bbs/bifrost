@@ -13,12 +13,26 @@ local MONSTER_TYPES = {
     { name = "Firmware Dragon", min_level = 4, hp_base = 40, str_base = 16, dex_base = 10, xp_base = 75 }
 }
 
+-- Rebalanced event pool: positive/NPC encounters are now rare (~1/4 of previous occurrence)
 local EVENT_TYPES = {
-    "EMPTY", "EMPTY", "MONSTER", "MONSTER", "MONSTER", "TREASURE", "TRAP", "NPC", "FOUNTAIN", "EASTER_EGG"
+    "EMPTY", "EMPTY", "EMPTY", "EMPTY", "EMPTY", "EMPTY", "EMPTY", "EMPTY",
+    "MONSTER", "MONSTER", "MONSTER", "MONSTER", "MONSTER", "MONSTER", "MONSTER", "MONSTER", "MONSTER", "MONSTER",
+    "TRAP", "TRAP", "TRAP",
+    "TREASURE",
+    "FOUNTAIN",
+    "NPC",
+    "EASTER_EGG"
 }
 
+-- Exponential XP progression: 50 for Lvl 2, 150 total for Lvl 3, 350 total for Lvl 4, etc.
 local function xp_needed(level)
-    return level * 50
+    return 50 * (math.floor(2 ^ level) - 1)
+end
+
+local function rest_cost(player)
+    local cost = 10 - math.floor((player.wis or 10) / 4)
+    if cost < 5 then cost = 5 end
+    return cost
 end
 
 local function generate_map(dungeon_level)
@@ -89,13 +103,16 @@ function app.view_room(session, player, msg)
     term.move_to(2, 7)
     term.set_color(7, 0)
     term.print(string.format("HP: %d/%d | Gold: %d | XP: %d/%d | Pots: %d", player.hp, player.max_hp, player.gold, player.xp, xp_needed(player.level), player.potions))
+    term.move_to(2, 8)
+    term.set_color(10, 0)
+    term.print(string.format("STR:%d DEX:%d CON:%d INT:%d WIS:%d CHA:%d", player.str, player.dex, player.con, player.int, player.wis, player.cha))
 
-    term.move_to(2, 9)
+    term.move_to(2, 10)
     term.set_color(11, 0)
     term.print(msg or "")
 
     -- Draw minimap
-    local map_start_x = 40
+    local map_start_x = 42
     local map_start_y = 6
     term.set_color(8, 0)
     for y = 1, 5 do
@@ -147,13 +164,14 @@ function app.view_room(session, player, msg)
         elseif act == "west" then player.x = player.x - 1; app.do_event(session, player)
         elseif act == "descend" then app.descend(session, player)
         elseif act == "rest" then
-            if player.gold >= 10 then
-                player.gold = player.gold - 10
+            local cost = rest_cost(player)
+            if player.gold >= cost then
+                player.gold = player.gold - cost
                 player.hp = player.max_hp
                 save_player(session, player)
-                app.view_room(session, player, "You rested for 10 Gold. HP fully restored!")
+                app.view_room(session, player, "You rested for " .. cost .. " Gold. HP fully restored!")
             else
-                app.view_room(session, player, "Not enough Gold to rest! Need 10G.")
+                app.view_room(session, player, "Not enough Gold to rest! Need " .. cost .. "G.")
             end
         elseif act == "quit" then
             save_player(session, player)
@@ -179,9 +197,11 @@ function app.do_event(session, player)
     if rtype == "EMPTY" then
         app.view_room(session, player, "The room is empty. Dust settles softly.")
     elseif rtype == "TREASURE" then
-        local amt = math.random(5, 20) + (player.dungeon_level * 5)
+        local base_amt = math.random(5, 15) + (player.dungeon_level * 4)
+        local cha_bonus = math.floor(player.cha * 1.2)
+        local amt = base_amt + cha_bonus
         player.gold = player.gold + amt
-        local has_pot = math.random(1, 100) > 70
+        local has_pot = math.random(1, 100) > (85 - math.floor(player.wis * 1.5))
         local msg = "You found a chest with " .. amt .. " Gold!"
         if has_pot then
             player.potions = player.potions + 1
@@ -190,29 +210,57 @@ function app.do_event(session, player)
         save_player(session, player)
         app.msg_view(session, player, 20, msg, 10) -- green
     elseif rtype == "TRAP" then
-        local dmg = math.random(2, 6) + player.dungeon_level
+        -- Wisdom to spot/disarm, Dexterity to dodge, Constitution to mitigate damage
+        local spot_chance = math.min(60, player.wis * 3)
+        if math.random(1, 100) <= spot_chance then
+            player.xp = player.xp + 5
+            save_player(session, player)
+            app.msg_view(session, player, 21, "Your keen Wisdom spotted a trap! You safely disarmed it (+5 XP).", 10)
+            return
+        end
+        local dodge_chance = math.min(60, player.dex * 3)
+        if math.random(1, 100) <= dodge_chance then
+            app.msg_view(session, player, 21, "A trap sprang, but your quick Dexterity allowed you to leap clear!", 11)
+            return
+        end
+        local base_dmg = math.random(3, 7) + player.dungeon_level
+        local con_mitigation = math.floor(player.con / 4)
+        local dmg = math.max(1, base_dmg - con_mitigation)
         player.hp = player.hp - dmg
         save_player(session, player)
         if player.hp <= 0 then
-            app.game_over(session, player, "You stepped on a trap and perished!")
+            app.game_over(session, player, "You stepped on a deadly trap and perished!")
         else
             app.msg_view(session, player, 21, "You triggered a trap and took " .. dmg .. " damage!", 12)
         end
     elseif rtype == "FOUNTAIN" then
-        local heal = math.random(5, 15)
+        -- Wisdom boosts fountain healing
+        local heal = math.random(6, 12) + math.floor(player.wis * 1.2)
         player.hp = math.min(player.max_hp, player.hp + heal)
         save_player(session, player)
         app.msg_view(session, player, 22, "You drink from a glowing fountain and restore " .. heal .. " HP.", 11)
     elseif rtype == "NPC" then
+        -- Charisma enhances NPC interactions and gifts
         local msgs = {
-            "A wandering merchant gives you a potion!",
-            "An old wizard casts a minor heal on you.",
-            "A friendly goblin offers you 10 gold."
+            "A wandering merchant is charmed and gives you a potion!",
+            "An old wizard casts a healing aura on you.",
+            "A friendly mesh nomad offers you some gold."
         }
         local choice = math.random(1, #msgs)
-        if choice == 1 then player.potions = player.potions + 1
-        elseif choice == 2 then player.hp = math.min(player.max_hp, player.hp + 10)
-        elseif choice == 3 then player.gold = player.gold + 10 end
+        if choice == 1 then
+            player.potions = player.potions + 1
+        elseif choice == 2 then
+            local heal = 10 + math.floor(player.wis * 0.8)
+            player.hp = math.min(player.max_hp, player.hp + heal)
+        elseif choice == 3 then
+            local gold_amt = 10 + math.floor(player.cha * 1.5)
+            player.gold = player.gold + gold_amt
+            msgs[3] = "A friendly mesh nomad offers you " .. gold_amt .. " gold."
+        end
+        if player.cha >= 14 and math.random(1, 100) <= 50 then
+            player.potions = player.potions + 1
+            msgs[choice] = msgs[choice] .. " (Bonus potion thanks to high Charisma!)"
+        end
         save_player(session, player)
         app.msg_view(session, player, 23, msgs[choice], 14)
     elseif rtype == "EASTER_EGG" then
@@ -278,22 +326,26 @@ function app.battle_round(session, player, monster, msg)
     term.move_to(2, 9)
     term.set_color(7, 0)
     term.print(string.format("HP: %d/%d | Pots: %d", player.hp, player.max_hp, player.potions))
+    term.move_to(2, 10)
+    term.set_color(10, 0)
+    term.print(string.format("STR:%d DEX:%d CON:%d INT:%d WIS:%d CHA:%d", player.str, player.dex, player.con, player.int, player.wis, player.cha))
 
-    term.move_to(30, 8)
+    term.move_to(35, 8)
     term.set_color(13, 0)
     term.print(monster.name)
-    term.move_to(30, 9)
+    term.move_to(35, 9)
     term.set_color(7, 0)
     term.print(string.format("HP: %d/%d", monster.hp, monster.max_hp))
 
-    term.move_to(2, 11)
+    term.move_to(2, 12)
     term.set_color(15, 0)
     term.print(msg or "")
 
     term.define_form(30)
-    term.add_submit_button("attack", 2, 13)
-    term.add_submit_button("potion", 12, 13)
-    term.add_submit_button("flee", 22, 13)
+    term.add_submit_button("attack", 2, 14)
+    term.add_submit_button("cast", 10, 14)
+    term.add_submit_button("potion", 18, 14)
+    term.add_submit_button("flee", 26, 14)
     term.flush_form()
 
     session.await_input(30, function(sub)
@@ -301,16 +353,23 @@ function app.battle_round(session, player, monster, msg)
         local act = sub.submit
 
         if act == "attack" then
-            -- Player attacks
+            -- Player physical attack (STR damage, DEX accuracy, INT crit chance)
             local hit_chance = 50 + (player.dex * 2) - (monster.dex * 2)
-            if hit_chance < 10 then hit_chance = 10 end
+            if hit_chance < 15 then hit_chance = 15 end
             if hit_chance > 95 then hit_chance = 95 end
             
             local result_msg = ""
             if math.random(1, 100) <= hit_chance then
-                local dmg = math.floor(player.str / 2) + math.random(1, 4)
+                local base_dmg = math.floor(player.str / 2) + math.random(1, 4)
+                local is_crit = math.random(1, 100) <= math.floor(player.int * 1.5)
+                local dmg = base_dmg
+                if is_crit then
+                    dmg = math.floor(base_dmg * 1.5) + 1
+                    result_msg = "CRITICAL HIT! Hit " .. monster.name .. " for " .. dmg .. " dmg! "
+                else
+                    result_msg = "You hit " .. monster.name .. " for " .. dmg .. " dmg! "
+                end
                 monster.hp = monster.hp - dmg
-                result_msg = "You hit the " .. monster.name .. " for " .. dmg .. " dmg! "
             else
                 result_msg = "You missed! "
             end
@@ -320,9 +379,41 @@ function app.battle_round(session, player, monster, msg)
                 return
             end
             
+            -- Monster attacks (CON mitigation, DEX evasion)
+            local m_hit_chance = 50 + (monster.dex * 2) - (player.dex * 2)
+            if m_hit_chance < 15 then m_hit_chance = 15 end
+            if m_hit_chance > 95 then m_hit_chance = 95 end
+
+            if math.random(1, 100) <= m_hit_chance then
+                local mdmg = math.floor(monster.str / 2) + math.random(1, 4) - math.floor(player.con / 4)
+                if mdmg < 1 then mdmg = 1 end
+                player.hp = player.hp - mdmg
+                result_msg = result_msg .. monster.name .. " hits you for " .. mdmg .. " dmg!"
+            else
+                result_msg = result_msg .. monster.name .. " misses you!"
+            end
+
+            save_player(session, player)
+            if player.hp <= 0 then
+                app.game_over(session, player, "You were slain by a " .. monster.name .. "!")
+            else
+                app.battle_round(session, player, monster, result_msg)
+            end
+
+        elseif act == "cast" then
+            -- Magic spell (INT damage, never misses)
+            local spell_dmg = math.floor(player.int * 0.7) + math.random(2, 5)
+            monster.hp = monster.hp - spell_dmg
+            local result_msg = "You cast Arcane Bolt for " .. spell_dmg .. " magic dmg! "
+
+            if monster.hp <= 0 then
+                app.victory(session, player, monster)
+                return
+            end
+
             -- Monster attacks
             local m_hit_chance = 50 + (monster.dex * 2) - (player.dex * 2)
-            if m_hit_chance < 10 then m_hit_chance = 10 end
+            if m_hit_chance < 15 then m_hit_chance = 15 end
             if m_hit_chance > 95 then m_hit_chance = 95 end
 
             if math.random(1, 100) <= m_hit_chance then
@@ -344,19 +435,23 @@ function app.battle_round(session, player, monster, msg)
         elseif act == "potion" then
             if player.potions > 0 then
                 player.potions = player.potions - 1
-                local heal = 20 + math.floor(player.max_hp * 0.2)
+                local heal = 20 + math.floor(player.max_hp * 0.2) + math.floor(player.con / 2)
                 player.hp = math.min(player.max_hp, player.hp + heal)
                 save_player(session, player)
-                app.battle_round(session, player, monster, "You drank a potion and healed " .. heal .. " HP.")
+                app.battle_round(session, player, monster, "You drank a potion and restored " .. heal .. " HP.")
             else
                 app.battle_round(session, player, monster, "You don't have any potions!")
             end
         elseif act == "flee" then
-            local flee_chance = 50 + (player.dex * 2) - (monster.dex * 2)
+            local flee_chance = 45 + (player.dex * 2) + math.floor(player.cha * 1.2) - (monster.dex * 2)
+            if flee_chance < 15 then flee_chance = 15 end
+            if flee_chance > 90 then flee_chance = 90 end
+
             if math.random(1, 100) <= flee_chance then
                 app.view_room(session, player, "You successfully fled the battle!")
             else
-                local mdmg = math.floor(monster.str / 2) + math.random(1, 4)
+                local mdmg = math.floor(monster.str / 2) + math.random(1, 4) - math.floor(player.con / 4)
+                if mdmg < 1 then mdmg = 1 end
                 player.hp = player.hp - mdmg
                 save_player(session, player)
                 if player.hp <= 0 then
@@ -370,11 +465,14 @@ function app.battle_round(session, player, monster, msg)
 end
 
 function app.victory(session, player, monster)
-    player.xp = player.xp + monster.xp
-    local gold_gained = math.random(2, 8) + player.dungeon_level * 2
+    -- INT provides bonus XP from encounters
+    local xp_gain = monster.xp + math.floor(player.int * 0.5)
+    player.xp = player.xp + xp_gain
+    -- CHA provides bonus gold from defeated monsters
+    local gold_gained = math.random(2, 6) + (player.dungeon_level * 2) + math.floor(player.cha * 0.5)
     player.gold = player.gold + gold_gained
 
-    local msg = "Victory! Gained " .. monster.xp .. " XP and " .. gold_gained .. " Gold!"
+    local msg = "Victory! Gained " .. xp_gain .. " XP and " .. gold_gained .. " Gold!"
     save_player(session, player)
 
     if player.xp >= xp_needed(player.level) then

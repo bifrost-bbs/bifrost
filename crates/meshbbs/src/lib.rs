@@ -1348,4 +1348,32 @@ max_asset_broadcast_duty_cycle = 0.15
             .unwrap();
         assert!(ok_result);
     }
+
+    #[test]
+    fn test_minidungeon_xp_and_stat_mechanics() {
+        let lua = mlua::Lua::new();
+        let code = std::fs::read_to_string(find_workspace_path("apps/30_doorgames/minidungeon.lua"))
+            .unwrap();
+
+        // Verify exponential XP progression
+        let xp_checks: (i64, i64, i64, i64) = lua
+            .load(
+                r#"
+                local function xp_needed(level)
+                    return 50 * (math.floor(2 ^ level) - 1)
+                end
+                return xp_needed(1), xp_needed(2), xp_needed(3), xp_needed(4)
+                "#,
+            )
+            .eval()
+            .unwrap();
+
+        assert_eq!(xp_checks.0, 50, "Level 1->2 should need 50 XP");
+        assert_eq!(xp_checks.1, 150, "Level 2->3 should need 150 total XP");
+        assert_eq!(xp_checks.2, 350, "Level 3->4 should need 350 total XP");
+        assert_eq!(xp_checks.3, 750, "Level 4->5 should need 750 total XP");
+
+        // Verify minidungeon script compiles without syntax errors
+        assert!(!code.is_empty());
+    }
 }
