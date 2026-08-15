@@ -80,12 +80,44 @@ async fn main() -> Result<()> {
         200,
     ));
 
+    // Sleep a short moment to ensure the TCP connection completes before sending advert/handshake
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+    // Send a mock binary advert packet so the BBS learns our metadata (name, location)
+    let mut advert_payload = Vec::new();
+    advert_payload.extend_from_slice(&client_key); // 32 bytes public key
+    advert_payload.extend_from_slice(&0u32.to_le_bytes()); // 4 bytes timestamp
+    advert_payload.extend_from_slice(&[0u8; 64]); // 64 bytes signature
+
+    let flags: u8 = 0x80 | 0x10; // has name | has location
+    advert_payload.push(flags);
+
+    // latitude (37.7749 * 1_000_000)
+    let lat_int: i32 = 37774900;
+    advert_payload.extend_from_slice(&lat_int.to_le_bytes());
+    // longitude (-122.4194 * 1_000_000)
+    let lon_int: i32 = -122419400;
+    advert_payload.extend_from_slice(&lon_int.to_le_bytes());
+
+    let node_name = "TestClient";
+    advert_payload.extend_from_slice(node_name.as_bytes());
+
+    let advert_packet = RadioPacket {
+        is_broadcast: true,
+        src_node: client_key,
+        dst_node: [0; 32],
+        payload: advert_payload,
+        signal_rssi: -40,
+        signal_snr: 12,
+    };
+    transport.send_packet(advert_packet).await?;
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
     // Send connection handshake packet to boot session
     let handshake_msg = MeshBbsMessage::new(0x03, 0x01, 0x00, Vec::new());
     let handshake_payloads = handshake_msg.to_fragments(200).unwrap();
     
-    // Sleep a short moment to ensure the TCP connection completes before sending handshake
-    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
     if !handshake_payloads.is_empty() {
         let handshake = RadioPacket {
             is_broadcast: false,

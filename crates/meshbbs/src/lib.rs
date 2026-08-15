@@ -163,6 +163,75 @@ pub async fn start_server(
             match tokio::time::timeout(tokio::time::Duration::from_millis(100), transport.receive_packet()).await {
                 Ok(Ok(packet)) => {
                     let src = packet.src_node;
+
+                    // Intercept MeshCore advert packets
+                    // An advert packet starts with the 32-byte public key which matches the src_node.
+                    if packet.payload.len() >= 101 && packet.payload[0..32] == src {
+                        let flags = packet.payload[100];
+                        let mut offset = 101;
+                        let mut metadata = serde_json::Map::new();
+
+                        if (flags & 0x10) != 0 && packet.payload.len() >= offset + 8 {
+                            let lat_int = i32::from_le_bytes([
+                                packet.payload[offset],
+                                packet.payload[offset + 1],
+                                packet.payload[offset + 2],
+                                packet.payload[offset + 3],
+                            ]);
+                            let lon_int = i32::from_le_bytes([
+                                packet.payload[offset + 4],
+                                packet.payload[offset + 5],
+                                packet.payload[offset + 6],
+                                packet.payload[offset + 7],
+                            ]);
+                            offset += 8;
+                            let lat = lat_int as f64 / 1_000_000.0;
+                            let lon = lon_int as f64 / 1_000_000.0;
+                            metadata.insert("latitude".to_string(), serde_json::json!(lat));
+                            metadata.insert("longitude".to_string(), serde_json::json!(lon));
+                            metadata.insert("last_known_location".to_string(), serde_json::json!(format!("{:.4}, {:.4}", lat, lon)));
+                        }
+
+                        if (flags & 0x20) != 0 && packet.payload.len() >= offset + 2 {
+                            offset += 2;
+                        }
+
+                        if (flags & 0x40) != 0 && packet.payload.len() >= offset + 2 {
+                            offset += 2;
+                        }
+
+                        if (flags & 0x80) != 0 && packet.payload.len() > offset {
+                            if let Ok(name_str) = String::from_utf8(packet.payload[offset..].to_vec()) {
+                                metadata.insert("node_name".to_string(), serde_json::json!(name_str));
+                            }
+                        }
+
+                        let mut store = db_store.lock().unwrap();
+                        let users_table = store.entry("users".to_string()).or_insert_with(HashMap::new);
+                        let node_hex: String = src.iter().map(|b| format!("{:02x}", b)).collect();
+
+                        let mut existing_user = if let Some(existing_json) = users_table.get(&node_hex) {
+                            serde_json::from_str::<serde_json::Value>(existing_json).unwrap_or(serde_json::json!({}))
+                        } else {
+                            serde_json::json!({})
+                        };
+
+                        if let Some(obj) = existing_user.as_object_mut() {
+                            for (k, v) in metadata {
+                                if k != "nickname" { // Just in case, though metadata doesn't have nickname
+                                    obj.insert(k, v);
+                                }
+                            }
+                        }
+
+                        if let Ok(merged_json) = serde_json::to_string(&existing_user) {
+                            log::info!("Processed advert packet for node {}: {}", node_hex, merged_json);
+                            users_table.insert(node_hex, merged_json);
+                        }
+
+                        continue;
+                    }
+
                     match reassembler.process_packet(src, &packet.payload) {
                         Ok(Some(msg)) => {
                             let tx_opt = active_sessions.lock().unwrap().get(&src).map(|s| s.input_tx.clone());
@@ -552,7 +621,19 @@ fn run_session_task(
         Ok(node_hex_str_clone.clone())
     })?)?;
 
-    session.set("callsign", lua.create_function(|_, (): ()| {
+    let db_store_callsign = db_store.clone();
+    let node_hex_str_clone = node_hex_str.clone();
+    session.set("callsign", lua.create_function(move |_, (): ()| {
+        let store = db_store_callsign.lock().unwrap();
+        if let Some(users_table) = store.get("users") {
+            if let Some(user_json) = users_table.get(&node_hex_str_clone) {
+                if let Ok(user_obj) = serde_json::from_str::<serde_json::Value>(user_json) {
+                    if let Some(nickname) = user_obj.get("nickname").and_then(|v| v.as_str()) {
+                        return Ok(nickname.to_string());
+                    }
+                }
+            }
+        }
         Ok("RadioOperator".to_string())
     })?)?;
 
@@ -1140,6 +1221,84 @@ max_asset_broadcast_duty_cycle = 0.15
         let transport = Arc::new(MockSocketTransport::new(0.0, 10, 200));
         let result = start_server(config, transport, Some(1)).await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_advert_packet_processing() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let config = default_config();
+        let server_transport = Arc::new(MockSocketTransport::new_server("127.0.0.1:9097".to_string(), 0.0, 0, 200));
+
+        let server_handle = tokio::spawn(async move {
+            start_server(config, server_transport, Some(2)).await
+        });
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        let client_transport = MockSocketTransport::new_client("127.0.0.1:9097".to_string(), 0.0, 0, 200);
+
+        let client_key = [8u8; 32];
+
+        // Send advert packet
+        let mut advert_payload = Vec::new();
+        advert_payload.extend_from_slice(&client_key); // 32 bytes public key
+        advert_payload.extend_from_slice(&0u32.to_le_bytes()); // 4 bytes timestamp
+        advert_payload.extend_from_slice(&[0u8; 64]); // 64 bytes signature
+
+        let flags: u8 = 0x80 | 0x10; // has name | has location
+        advert_payload.push(flags);
+
+        let lat_int: i32 = 47606200; // Seattle lat
+        advert_payload.extend_from_slice(&lat_int.to_le_bytes());
+        let lon_int: i32 = -122332100; // Seattle lon
+        advert_payload.extend_from_slice(&lon_int.to_le_bytes());
+
+        let node_name = "AdvertUser";
+        advert_payload.extend_from_slice(node_name.as_bytes());
+
+        let advert_packet = RadioPacket {
+            is_broadcast: true,
+            src_node: client_key,
+            dst_node: [0; 32],
+            payload: advert_payload,
+            signal_rssi: -40,
+            signal_snr: 12,
+        };
+        client_transport.send_packet(advert_packet).await.unwrap();
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+        // Send handshake
+        let handshake_msg = MeshBbsMessage::new(0x03, 0x01, 0x00, Vec::new());
+        let handshake_payloads = handshake_msg.to_fragments(200).unwrap();
+        let handshake = RadioPacket {
+            is_broadcast: false,
+            src_node: client_key,
+            dst_node: [0; 32],
+            payload: handshake_payloads[0].clone(),
+            signal_rssi: -50,
+            signal_snr: 10,
+        };
+        client_transport.send_packet(handshake).await.unwrap();
+
+        let mut client_reassembler = MessageReassembler::new();
+        let mut assembled_msg = None;
+        let start_time = tokio::time::Instant::now();
+        while start_time.elapsed() < tokio::time::Duration::from_millis(1500) {
+            match tokio::time::timeout(tokio::time::Duration::from_millis(100), client_transport.receive_packet()).await {
+                Ok(Ok(packet)) => {
+                    if let Some(msg) = client_reassembler.process_packet([0; 32], &packet.payload).unwrap() {
+                        assembled_msg = Some(msg);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        assert!(assembled_msg.is_some(), "Should receive welcome screen");
+
+        // Wait for server to shutdown
+        let _ = server_handle.await;
     }
 
     #[tokio::test]
