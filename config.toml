@@ -1,0 +1,35 @@
+# Bifrost MeshBBS Host Configuration
+
+[rate_limiter]
+# Maximum packets per minute across all active BBS sessions
+max_packets_per_minute = 45
+
+# Maximum instantaneous burst size before hard throttling kicks in
+max_burst_packets = 4
+
+# Minimum quiet period between consecutive packet transmissions (milliseconds)
+inter_packet_guard_ms = 350
+
+# Maximum allowed transmitter duty cycle percentage (e.g., 1.0% for EU868)
+max_duty_cycle_percent = 1.0
+
+# Rolling window for airtime duty cycle calculation (seconds)
+duty_cycle_window_secs = 3600
+
+# Channel congestion backoff multiplier when collision/retry is detected
+congestion_backoff_factor = 1.5
+
+[asset_broadcaster]
+# Enable passive public broadcasting of assets upon client request (multicast cache population)
+enable_on_demand_broadcast = true
+
+# Maximum duty cycle allocated to public asset broadcasts (%)
+max_asset_broadcast_duty_cycle = 0.15
+
+[form_colors]
+# Default styling attributes for interactive forms
+field_fg = 15      # White
+field_bg = 1       # Blue
+submit_fg = 0      # Black
+submit_bg = 7      # Light Gray
+

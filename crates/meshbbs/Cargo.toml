@@ -1,0 +1,20 @@
+[package]
+name = "meshbbs"
+version = "0.1.0"
+edition = "2021"
+authors = ["Bifrost Contributors"]
+description = "Bifrost MeshBBS Host server daemon kernel, scheduler, and Lua sandbox interpreter"
+
+[dependencies]
+meshansi = { path = "../meshansi" }
+meshcore-transport = { path = "../meshcore-transport" }
+
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+mlua.workspace = true
+log.workspace = true
+env_logger.workspace = true

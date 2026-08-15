@@ -1,0 +1,14 @@
+[package]
+name = "meshansi"
+version = "0.1.0"
+edition = "2021"
+authors = ["Bifrost Contributors"]
+description = "MeshANSI Bytecode compiler, ANSI tokenization, and Heatshrink LZSS compression/decompression"
+
+[dependencies]
+thiserror.workspace = true
+serde.workspace = true
+log.workspace = true
+
+# heatshrink bindings will go here (or simple pure Rust implementation or dependencies)
+# heatshrink = { version = "..." }

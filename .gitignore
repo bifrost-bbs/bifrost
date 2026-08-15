@@ -1,0 +1,31 @@
+# Rust build artifacts
+target/
+
+# Cargo lockfile (optional to ignore, but we include it here or let developers manage it)
+# Cargo.lock
+
+# IDE and Editor configs
+.idea/
+.vscode/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.swp
+*.swo
+.DS_Store
+
+# Temporary files & logs
+*.log
+tmp/
+scratch/
+
+# Local configuration overrides
+config.local.toml
+database.db
+database.db-journal
+*.db
+*.sqlite
+
+# Lua cache / compiled files
+*.luac

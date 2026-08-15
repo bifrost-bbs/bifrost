@@ -1,0 +1,18 @@
+[package]
+name = "meshclient"
+version = "0.1.0"
+edition = "2021"
+authors = ["Bifrost Contributors"]
+description = "Interactive client terminal emulator for MeshBBS testing over mock radio socket"
+
+[dependencies]
+meshansi = { path = "../meshansi" }
+meshcore-transport = { path = "../meshcore-transport" }
+
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+log.workspace = true
+env_logger.workspace = true
+crossterm.workspace = true

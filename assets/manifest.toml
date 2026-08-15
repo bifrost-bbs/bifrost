@@ -1,0 +1,12 @@
+# MeshBBS Public Asset Manifest
+# Maps human-readable Asset Names to 16-bit static IDs (AssetID) and file paths.
+
+[[assets]]
+name = "ASSET_DUNGEON_BANNER"
+id = 0x0101
+path = "assets/dungeon_banner.ans"
+
+[[assets]]
+name = "ASSET_MAIN_MENU_BORDER"
+id = 0x0102
+path = "assets/main_menu_border.ans"
