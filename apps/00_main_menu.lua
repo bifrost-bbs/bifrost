@@ -6,10 +6,8 @@ function menu.on_start(session)
     local user = db.get("users", user_id)
 
     term.clear()
-    term.set_color(11, 0) -- Cyan on Black
-    term.print("========================================\n")
-    term.print("       BIFROST BBS FORM MAIN MENU       \n")
-    term.print("========================================\n")
+    term.render_asset("ASSET_MAIN_MENU_BANNER")
+    term.print("\n")
     term.set_color(7, 0) -- White on Black
 
     if not user then

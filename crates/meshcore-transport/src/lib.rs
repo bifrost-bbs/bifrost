@@ -33,13 +33,13 @@ pub struct RadioPacket {
 pub trait RadioTransport: Send + Sync {
     /// Dispatches a packet to the radio.
     async fn send_packet(&self, packet: RadioPacket) -> Result<(), TransportError>;
-    
+
     /// Blocks until an incoming packet is captured.
     async fn receive_packet(&self) -> Result<RadioPacket, TransportError>;
-    
+
     /// Calculates the estimated LoRa airtime in milliseconds for a payload size.
     fn get_estimated_airtime_ms(&self, payload_len: usize) -> u32;
-    
+
     /// Returns the current rolling duty cycle percentage of the transmitter.
     fn get_current_duty_cycle(&self) -> f32;
 
@@ -65,11 +65,9 @@ impl MockSocketTransport {
     pub fn new(packet_loss_rate: f64, latency_ms: u32, mtu: usize) -> Self {
         let (tx, mut rx_out) = tokio::sync::mpsc::channel(100);
         let (tx_in, rx) = tokio::sync::mpsc::channel(100);
-        
+
         // Spawn a dummy task to drain the outbound queue so it doesn't block or error
-        tokio::spawn(async move {
-            while rx_out.recv().await.is_some() {}
-        });
+        tokio::spawn(async move { while rx_out.recv().await.is_some() {} });
 
         Self {
             tx,
@@ -155,7 +153,10 @@ async fn handle_socket_connection(
 
     let write_loop = async {
         while let Some(packet) = rx_out.recv().await {
-            log::debug!("TCP write_loop: forwarding packet of len {} over TCP", packet.payload.len());
+            log::debug!(
+                "TCP write_loop: forwarding packet of len {} over TCP",
+                packet.payload.len()
+            );
             let json = serde_json::to_string(&packet)?;
             let bytes = json.as_bytes();
             let len = bytes.len() as u32;
@@ -215,7 +216,9 @@ impl RadioTransport for MockSocketTransport {
         }
 
         if self.tx.send(packet).await.is_err() {
-            return Err(TransportError::SendError("Transport channel closed".to_string()));
+            return Err(TransportError::SendError(
+                "Transport channel closed".to_string(),
+            ));
         }
 
         Ok(())
@@ -344,7 +347,10 @@ impl MeshBbsMessage {
         // Verify CRC16
         let crc_actual = crc16(&payload);
         if crc_actual != crc_expected {
-            return Err(format!("CRC mismatch: expected {:04X}, got {:04X}", crc_expected, crc_actual));
+            return Err(format!(
+                "CRC mismatch: expected {:04X}, got {:04X}",
+                crc_expected, crc_actual
+            ));
         }
 
         Ok(Self {
@@ -359,7 +365,8 @@ impl MeshBbsMessage {
 /// Helper to handle stream reassembly of incoming packets per node session.
 #[derive(Default)]
 pub struct MessageReassembler {
-    sessions: std::collections::HashMap<([u8; 32], u8), (u8, std::collections::HashMap<u8, Vec<u8>>)>,
+    sessions:
+        std::collections::HashMap<([u8; 32], u8), (u8, std::collections::HashMap<u8, Vec<u8>>)>,
 }
 
 impl MessageReassembler {
@@ -370,7 +377,11 @@ impl MessageReassembler {
     }
 
     /// Process an incoming fragment. If a message is fully reassembled, returns it.
-    pub fn process_packet(&mut self, src_node: [u8; 32], packet_payload: &[u8]) -> Result<Option<MeshBbsMessage>, String> {
+    pub fn process_packet(
+        &mut self,
+        src_node: [u8; 32],
+        packet_payload: &[u8],
+    ) -> Result<Option<MeshBbsMessage>, String> {
         if packet_payload.len() < 4 {
             return Ok(None);
         }
@@ -389,7 +400,10 @@ impl MessageReassembler {
         }
 
         let key = (src_node, channel_flag);
-        let entry = self.sessions.entry(key).or_insert_with(|| (total_chunks, std::collections::HashMap::new()));
+        let entry = self
+            .sessions
+            .entry(key)
+            .or_insert_with(|| (total_chunks, std::collections::HashMap::new()));
 
         if entry.0 != total_chunks {
             entry.0 = total_chunks;
@@ -511,18 +525,22 @@ mod tests {
     #[tokio::test]
     async fn test_mock_transport_receive_timeout() {
         let transport = MockSocketTransport::new(0.0, 0, 100);
-        let result = tokio::time::timeout(tokio::time::Duration::from_millis(5), transport.receive_packet()).await;
+        let result = tokio::time::timeout(
+            tokio::time::Duration::from_millis(5),
+            transport.receive_packet(),
+        )
+        .await;
         assert!(result.is_err()); // Expect timeout to occur
     }
 
     #[tokio::test]
     async fn test_tcp_transport_loopback() {
         let bind_addr = "127.0.0.1:9099".to_string();
-        
+
         let server = MockSocketTransport::new_server(bind_addr.clone(), 0.0, 0, 200);
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
         let client = MockSocketTransport::new_client(bind_addr, 0.0, 0, 200);
-        
+
         let test_packet = RadioPacket {
             is_broadcast: false,
             src_node: [3; 32],
@@ -531,7 +549,7 @@ mod tests {
             signal_rssi: -40,
             signal_snr: 12,
         };
-        
+
         let mut sent = false;
         for _ in 0..10 {
             if client.send_packet(test_packet.clone()).await.is_ok() {
@@ -541,12 +559,18 @@ mod tests {
             tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
         }
         assert!(sent, "Failed to send packet from client");
-        
-        let rx_result = tokio::time::timeout(tokio::time::Duration::from_millis(500), server.receive_packet()).await;
+
+        let rx_result = tokio::time::timeout(
+            tokio::time::Duration::from_millis(500),
+            server.receive_packet(),
+        )
+        .await;
         assert!(rx_result.is_ok(), "Server packet receive timed out");
-        let rx_packet = rx_result.unwrap().expect("Failed to receive packet on server");
+        let rx_packet = rx_result
+            .unwrap()
+            .expect("Failed to receive packet on server");
         assert_eq!(rx_packet.payload, vec![1, 2, 3, 4]);
-        
+
         let response_packet = RadioPacket {
             is_broadcast: false,
             src_node: [4; 32],
@@ -555,12 +579,18 @@ mod tests {
             signal_rssi: -40,
             signal_snr: 12,
         };
-        
+
         assert!(server.send_packet(response_packet).await.is_ok());
-        
-        let rx_client_result = tokio::time::timeout(tokio::time::Duration::from_millis(500), client.receive_packet()).await;
+
+        let rx_client_result = tokio::time::timeout(
+            tokio::time::Duration::from_millis(500),
+            client.receive_packet(),
+        )
+        .await;
         assert!(rx_client_result.is_ok(), "Client packet receive timed out");
-        let rx_client_packet = rx_client_result.unwrap().expect("Failed to receive packet on client");
+        let rx_client_packet = rx_client_result
+            .unwrap()
+            .expect("Failed to receive packet on client");
         assert_eq!(rx_client_packet.payload, vec![9, 8, 7]);
     }
 
@@ -604,7 +634,7 @@ mod tests {
         // Process final fragment
         let final_res = reassembler.process_packet(src_node, &fragments[3]).unwrap();
         assert!(final_res.is_some(), "Should be fully reassembled now");
-        
+
         let assembled_msg = final_res.unwrap();
         assert_eq!(assembled_msg.channel_flag, 0x01);
         assert_eq!(assembled_msg.opcode, 0x03);
@@ -622,7 +652,7 @@ mod tests {
         let src_node = [7u8; 32];
         let res = reassembler.process_packet(src_node, &fragments[0]).unwrap();
         assert!(res.is_some());
-        
+
         let assembled = res.unwrap();
         assert_eq!(assembled.opcode, 0x02);
         assert_eq!(assembled.payload, vec![1, 2, 3]);
@@ -635,11 +665,17 @@ mod tests {
 
         let mut reassembler = MessageReassembler::new();
         let src = [0u8; 32];
-        
+
         // Too short payload
-        assert!(reassembler.process_packet(src, &[0xBB, 1, 1]).unwrap().is_none());
+        assert!(reassembler
+            .process_packet(src, &[0xBB, 1, 1])
+            .unwrap()
+            .is_none());
         // Wrong app port
-        assert!(reassembler.process_packet(src, &[0xAA, 1, 1, 1, 1]).unwrap().is_none());
+        assert!(reassembler
+            .process_packet(src, &[0xAA, 1, 1, 1, 1])
+            .unwrap()
+            .is_none());
 
         // CRC Mismatch
         let mut corrupted_frag = msg.to_fragments(100).unwrap()[0].clone();
@@ -648,4 +684,3 @@ mod tests {
         assert!(reassembler.process_packet(src, &corrupted_frag).is_err());
     }
 }
-

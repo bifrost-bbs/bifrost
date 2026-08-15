@@ -11,7 +11,9 @@ use std::sync::Mutex as StdMutex;
 use tokio::sync::mpsc;
 
 // Pull from sibling workspace crates
-use meshcore_transport::{MockSocketTransport, RadioTransport, RadioPacket, MeshBbsMessage, MessageReassembler};
+use meshcore_transport::{
+    MeshBbsMessage, MessageReassembler, MockSocketTransport, RadioPacket, RadioTransport,
+};
 
 fn default_form_colors() -> FormColorsConfig {
     FormColorsConfig {
@@ -100,7 +102,10 @@ pub async fn run_bbs(config_path: Option<PathBuf>, run_duration_secs: Option<u64
             let contents = std::fs::read_to_string(&path)?;
             toml::from_str(&contents)?
         } else {
-            warn!("Config file not found at {:?}, using default settings", path);
+            warn!(
+                "Config file not found at {:?}, using default settings",
+                path
+            );
             default_config()
         }
     } else {
@@ -146,7 +151,9 @@ pub async fn start_server(
     }
 
     let active_sessions = Arc::new(StdMutex::new(HashMap::<[u8; 32], Session>::new()));
-    let db_store = Arc::new(StdMutex::new(HashMap::<String, HashMap<String, String>>::new()));
+    let db_store = Arc::new(StdMutex::new(
+        HashMap::<String, HashMap<String, String>>::new(),
+    ));
     let mut reassembler = MessageReassembler::new();
 
     // Main packet routing loop placeholder
@@ -160,19 +167,30 @@ pub async fn start_server(
             }
 
             // Receive packet from radio (timeout check allows quick loop exit)
-            match tokio::time::timeout(tokio::time::Duration::from_millis(100), transport.receive_packet()).await {
+            match tokio::time::timeout(
+                tokio::time::Duration::from_millis(100),
+                transport.receive_packet(),
+            )
+            .await
+            {
                 Ok(Ok(packet)) => {
                     let src = packet.src_node;
                     match reassembler.process_packet(src, &packet.payload) {
                         Ok(Some(msg)) => {
-                            let tx_opt = active_sessions.lock().unwrap().get(&src).map(|s| s.input_tx.clone());
+                            let tx_opt = active_sessions
+                                .lock()
+                                .unwrap()
+                                .get(&src)
+                                .map(|s| s.input_tx.clone());
                             if let Some(tx) = tx_opt {
                                 let _ = tx.send(msg).await;
                             } else {
                                 // Boot new session
                                 info!("Booting new Lua session for node: {:?}", src);
                                 let (tx, rx) = mpsc::channel(100);
-                                let session = Session { input_tx: tx.clone() };
+                                let session = Session {
+                                    input_tx: tx.clone(),
+                                };
                                 active_sessions.lock().unwrap().insert(src, session);
 
                                 let sessions_clone = active_sessions.clone();
@@ -182,7 +200,15 @@ pub async fn start_server(
                                 let form_colors_config = config.form_colors.clone();
                                 let admin_nodes_config = config.admin_nodes.clone();
                                 std::thread::spawn(move || {
-                                    let res = run_session_task(src, rx, transport_inner, db_inner, rt_handle, form_colors_config, admin_nodes_config);
+                                    let res = run_session_task(
+                                        src,
+                                        rx,
+                                        transport_inner,
+                                        db_inner,
+                                        rt_handle,
+                                        form_colors_config,
+                                        admin_nodes_config,
+                                    );
                                     sessions_clone.lock().unwrap().remove(&src);
                                     if let Err(e) = res {
                                         log::error!("Session task error: {:?}", e);
@@ -229,10 +255,10 @@ fn run_session_task(
     let active_app = Arc::new(StdMutex::new("00_main_menu".to_string()));
 
     let node_hex_str: String = node_id.iter().map(|b| format!("{:02x}", b)).collect();
-    
+
     // Check if configured as admin
     let is_configured_admin = admin_nodes.contains(&node_hex_str);
-    
+
     // Check if first user in database
     let is_first_user = {
         let store = db_store.lock().unwrap();
@@ -241,20 +267,23 @@ fn run_session_task(
             None => true,
         }
     };
-    
+
     let mut initial_permissions = vec!["read".to_string(), "write".to_string()];
     if is_configured_admin || is_first_user {
         initial_permissions.push("admin".to_string());
     }
-    
+
     // Persist initial permissions in DB
     let node_hex_str_clone = node_hex_str.clone();
     let db_store_perms = db_store.clone();
     {
         let mut store = db_store_perms.lock().unwrap();
-        let perms_table = store.entry("permissions".to_string()).or_insert_with(HashMap::new);
+        let perms_table = store
+            .entry("permissions".to_string())
+            .or_insert_with(HashMap::new);
         if !perms_table.contains_key(&node_hex_str_clone) {
-            let json_str = serde_json::to_string(&initial_permissions).unwrap_or_else(|_| "[]".to_string());
+            let json_str =
+                serde_json::to_string(&initial_permissions).unwrap_or_else(|_| "[]".to_string());
             perms_table.insert(node_hex_str_clone, json_str);
         }
     }
@@ -271,59 +300,235 @@ fn run_session_task(
 
     // term table
     let term = lua.create_table()?;
-    
-    let out_buf = output_buf.clone();
-    term.set("clear", lua.create_function(move |_, (): ()| {
-        out_buf.lock().unwrap().push(0x01); // OP_CLEAR_SCREEN
-        Ok(())
-    })?)?;
 
     let out_buf = output_buf.clone();
-    term.set("move_to", lua.create_function(move |_, (col, row): (u8, u8)| {
-        let mut buf = out_buf.lock().unwrap();
-        buf.push(0xC3); // OP_CURSOR_ABS
-        buf.push(col);
-        buf.push(row);
-        Ok(())
-    })?)?;
+    term.set(
+        "clear",
+        lua.create_function(move |_, (): ()| {
+            out_buf.lock().unwrap().push(0x01); // OP_CLEAR_SCREEN
+            Ok(())
+        })?,
+    )?;
 
     let out_buf = output_buf.clone();
-    term.set("print", lua.create_function(move |_, text: String| {
-        let mut buf = out_buf.lock().unwrap();
-        buf.extend_from_slice(text.as_bytes());
-        Ok(())
-    })?)?;
+    term.set(
+        "move_to",
+        lua.create_function(move |_, (col, row): (u8, u8)| {
+            let mut buf = out_buf.lock().unwrap();
+            buf.push(0xC3); // OP_CURSOR_ABS
+            buf.push(col);
+            buf.push(row);
+            Ok(())
+        })?,
+    )?;
 
     let out_buf = output_buf.clone();
-    term.set("set_color", lua.create_function(move |_, (fg, bg): (u8, u8)| {
-        let mut buf = out_buf.lock().unwrap();
-        buf.push(0xC0); // OP_SET_COLOR
-        let attr = (bg << 4) | (fg & 0x0F);
-        buf.push(attr);
-        Ok(())
-    })?)?;
+    term.set(
+        "print",
+        lua.create_function(move |_, text: String| {
+            let mut buf = out_buf.lock().unwrap();
+            buf.extend_from_slice(text.as_bytes());
+            Ok(())
+        })?,
+    )?;
 
     let out_buf = output_buf.clone();
-    term.set("render_asset", lua.create_function(move |_, asset_name: String| {
-        let mut buf = out_buf.lock().unwrap();
-        buf.push(0xC5); // OP_RENDER_ASSET
-        let id: u16 = if asset_name == "ASSET_DUNGEON_BANNER" {
-            0x0101
-        } else {
-            0x0102
-        };
-        buf.extend_from_slice(&id.to_be_bytes());
-        Ok(())
-    })?)?;
+    term.set(
+        "set_color",
+        lua.create_function(move |_, (fg, bg): (u8, u8)| {
+            let mut buf = out_buf.lock().unwrap();
+            buf.push(0xC0); // OP_SET_COLOR
+            let attr = (bg << 4) | (fg & 0x0F);
+            buf.push(attr);
+            Ok(())
+        })?,
+    )?;
+
+    let out_buf = output_buf.clone();
+    term.set(
+        "render_asset",
+        lua.create_function(move |_, asset_name: String| {
+            let mut buf = out_buf.lock().unwrap();
+            buf.push(0xC5); // OP_RENDER_ASSET
+            let id: u16 = if asset_name == "ASSET_DUNGEON_BANNER" {
+                0x0101
+            } else if asset_name == "ASSET_MAIN_MENU_BANNER" {
+                0x0103
+            } else {
+                0x0102
+            };
+            buf.extend_from_slice(&id.to_be_bytes());
+            Ok(())
+        })?,
+    )?;
 
     let out_buf = output_buf.clone();
     let transport_clone = transport.clone();
     let node_id_clone = node_id.clone();
     let rt = rt_handle.clone();
-    term.set("flush", lua.create_function(move |_, (): ()| {
-        let mut buf = out_buf.lock().unwrap();
-        log::debug!("term.flush() called with {} bytes in session buffer", buf.len());
-        if !buf.is_empty() {
+    term.set(
+        "flush",
+        lua.create_function(move |_, (): ()| {
+            let mut buf = out_buf.lock().unwrap();
+            log::debug!(
+                "term.flush() called with {} bytes in session buffer",
+                buf.len()
+            );
+            if !buf.is_empty() {
+                buf.push(0x04); // EndOfFrame
+                let payload = buf.clone();
+                buf.clear();
+
+                let msg = MeshBbsMessage::new(0x01, 0x03, 0x00, payload);
+                let mtu = transport_clone.get_mtu();
+                match msg.to_fragments(mtu) {
+                    Ok(fragments) => {
+                        let transport_inner = transport_clone.clone();
+                        log::debug!(
+                            "Sending term.flush() fragmented packets over transport (count={})",
+                            fragments.len()
+                        );
+                        rt.block_on(async {
+                            for frag in fragments {
+                                let packet = RadioPacket {
+                                    is_broadcast: false,
+                                    src_node: [0; 32],
+                                    dst_node: node_id_clone,
+                                    payload: frag,
+                                    signal_rssi: 0,
+                                    signal_snr: 0,
+                                };
+                                if let Err(e) = transport_inner.send_packet(packet).await {
+                                    log::error!("Failed to send packet fragment: {:?}", e);
+                                    break;
+                                }
+                            }
+                        });
+                        log::debug!("send_packet fragments done");
+                    }
+                    Err(e) => {
+                        log::error!("Failed to fragment flush message: {}", e);
+                    }
+                }
+            }
+            Ok(())
+        })?,
+    )?;
+
+    let out_buf = output_buf.clone();
+    let form_colors_clone = form_colors.clone();
+    term.set(
+        "define_form",
+        lua.create_function(
+            move |_,
+                  (form_id, field_fg, field_bg, submit_fg, submit_bg): (
+                u8,
+                Option<u8>,
+                Option<u8>,
+                Option<u8>,
+                Option<u8>,
+            )| {
+                let f_fg = field_fg.unwrap_or(form_colors_clone.field_fg);
+                let f_bg = field_bg.unwrap_or(form_colors_clone.field_bg);
+                let s_fg = submit_fg.unwrap_or(form_colors_clone.submit_fg);
+                let s_bg = submit_bg.unwrap_or(form_colors_clone.submit_bg);
+
+                let mut buf = out_buf.lock().unwrap();
+                buf.push(0xD0); // OP_FORM_START
+                buf.push(form_id);
+                buf.push(f_fg);
+                buf.push(f_bg);
+                buf.push(s_fg);
+                buf.push(s_bg);
+                Ok(())
+            },
+        )?,
+    )?;
+
+    let out_buf = output_buf.clone();
+    term.set(
+        "add_input_field",
+        lua.create_function(
+            move |_, (field_id, col, row, width, default_val): (String, u8, u8, u8, String)| {
+                let mut buf = out_buf.lock().unwrap();
+                buf.push(0xD1); // OP_FORM_FIELD
+                buf.push(col);
+                buf.push(row);
+                buf.push(width);
+
+                let id_bytes = field_id.as_bytes();
+                buf.push(id_bytes.len() as u8);
+                buf.extend_from_slice(id_bytes);
+
+                let val_bytes = default_val.as_bytes();
+                buf.push(val_bytes.len() as u8);
+                buf.extend_from_slice(val_bytes);
+                Ok(())
+            },
+        )?,
+    )?;
+
+    let out_buf = output_buf.clone();
+    term.set(
+        "add_multiline_field",
+        lua.create_function(
+            move |_,
+                  (field_id, col, row, width, height, default_val): (
+                String,
+                u8,
+                u8,
+                u8,
+                u8,
+                String,
+            )| {
+                let mut buf = out_buf.lock().unwrap();
+                buf.push(0xD4); // OP_FORM_FIELD_MULTILINE
+                buf.push(col);
+                buf.push(row);
+                buf.push(width);
+                buf.push(height);
+
+                let id_bytes = field_id.as_bytes();
+                buf.push(id_bytes.len() as u8);
+                buf.extend_from_slice(id_bytes);
+
+                let val_bytes = default_val.as_bytes();
+                buf.push(val_bytes.len() as u8);
+                buf.extend_from_slice(val_bytes);
+                Ok(())
+            },
+        )?,
+    )?;
+
+    let out_buf = output_buf.clone();
+    term.set(
+        "add_submit_button",
+        lua.create_function(move |_, (button_id, col, row): (String, u8, u8)| {
+            let mut buf = out_buf.lock().unwrap();
+            buf.push(0xD2); // OP_FORM_SUBMIT
+            buf.push(col);
+            buf.push(row);
+
+            let id_bytes = button_id.as_bytes();
+            buf.push(id_bytes.len() as u8);
+            buf.extend_from_slice(id_bytes);
+            Ok(())
+        })?,
+    )?;
+
+    let out_buf = output_buf.clone();
+    let transport_clone = transport.clone();
+    let node_id_clone = node_id.clone();
+    let rt = rt_handle.clone();
+    term.set(
+        "flush_form",
+        lua.create_function(move |_, (): ()| {
+            let mut buf = out_buf.lock().unwrap();
+            log::debug!(
+                "term.flush_form() called with {} bytes in session buffer",
+                buf.len()
+            );
+            buf.push(0xD3); // OP_FORM_END
             buf.push(0x04); // EndOfFrame
             let payload = buf.clone();
             buf.clear();
@@ -333,7 +538,10 @@ fn run_session_task(
             match msg.to_fragments(mtu) {
                 Ok(fragments) => {
                     let transport_inner = transport_clone.clone();
-                    log::debug!("Sending term.flush() fragmented packets over transport (count={})", fragments.len());
+                    log::debug!(
+                        "Sending term.flush_form() fragmented packets over transport (count={})",
+                        fragments.len()
+                    );
                     rt.block_on(async {
                         for frag in fragments {
                             let packet = RadioPacket {
@@ -353,256 +561,185 @@ fn run_session_task(
                     log::debug!("send_packet fragments done");
                 }
                 Err(e) => {
-                    log::error!("Failed to fragment flush message: {}", e);
+                    log::error!("Failed to fragment flush_form message: {}", e);
                 }
             }
-        }
-        Ok(())
-    })?)?;
-
-    let out_buf = output_buf.clone();
-    let form_colors_clone = form_colors.clone();
-    term.set("define_form", lua.create_function(move |_, (form_id, field_fg, field_bg, submit_fg, submit_bg): (u8, Option<u8>, Option<u8>, Option<u8>, Option<u8>)| {
-        let f_fg = field_fg.unwrap_or(form_colors_clone.field_fg);
-        let f_bg = field_bg.unwrap_or(form_colors_clone.field_bg);
-        let s_fg = submit_fg.unwrap_or(form_colors_clone.submit_fg);
-        let s_bg = submit_bg.unwrap_or(form_colors_clone.submit_bg);
-
-        let mut buf = out_buf.lock().unwrap();
-        buf.push(0xD0); // OP_FORM_START
-        buf.push(form_id);
-        buf.push(f_fg);
-        buf.push(f_bg);
-        buf.push(s_fg);
-        buf.push(s_bg);
-        Ok(())
-    })?)?;
-
-    let out_buf = output_buf.clone();
-    term.set("add_input_field", lua.create_function(move |_, (field_id, col, row, width, default_val): (String, u8, u8, u8, String)| {
-        let mut buf = out_buf.lock().unwrap();
-        buf.push(0xD1); // OP_FORM_FIELD
-        buf.push(col);
-        buf.push(row);
-        buf.push(width);
-        
-        let id_bytes = field_id.as_bytes();
-        buf.push(id_bytes.len() as u8);
-        buf.extend_from_slice(id_bytes);
-
-        let val_bytes = default_val.as_bytes();
-        buf.push(val_bytes.len() as u8);
-        buf.extend_from_slice(val_bytes);
-        Ok(())
-    })?)?;
-
-    let out_buf = output_buf.clone();
-    term.set("add_multiline_field", lua.create_function(move |_, (field_id, col, row, width, height, default_val): (String, u8, u8, u8, u8, String)| {
-        let mut buf = out_buf.lock().unwrap();
-        buf.push(0xD4); // OP_FORM_FIELD_MULTILINE
-        buf.push(col);
-        buf.push(row);
-        buf.push(width);
-        buf.push(height);
-        
-        let id_bytes = field_id.as_bytes();
-        buf.push(id_bytes.len() as u8);
-        buf.extend_from_slice(id_bytes);
-
-        let val_bytes = default_val.as_bytes();
-        buf.push(val_bytes.len() as u8);
-        buf.extend_from_slice(val_bytes);
-        Ok(())
-    })?)?;
-
-    let out_buf = output_buf.clone();
-    term.set("add_submit_button", lua.create_function(move |_, (button_id, col, row): (String, u8, u8)| {
-        let mut buf = out_buf.lock().unwrap();
-        buf.push(0xD2); // OP_FORM_SUBMIT
-        buf.push(col);
-        buf.push(row);
-
-        let id_bytes = button_id.as_bytes();
-        buf.push(id_bytes.len() as u8);
-        buf.extend_from_slice(id_bytes);
-        Ok(())
-    })?)?;
-
-    let out_buf = output_buf.clone();
-    let transport_clone = transport.clone();
-    let node_id_clone = node_id.clone();
-    let rt = rt_handle.clone();
-    term.set("flush_form", lua.create_function(move |_, (): ()| {
-        let mut buf = out_buf.lock().unwrap();
-        log::debug!("term.flush_form() called with {} bytes in session buffer", buf.len());
-        buf.push(0xD3); // OP_FORM_END
-        buf.push(0x04); // EndOfFrame
-        let payload = buf.clone();
-        buf.clear();
-
-        let msg = MeshBbsMessage::new(0x01, 0x03, 0x00, payload);
-        let mtu = transport_clone.get_mtu();
-        match msg.to_fragments(mtu) {
-            Ok(fragments) => {
-                let transport_inner = transport_clone.clone();
-                log::debug!("Sending term.flush_form() fragmented packets over transport (count={})", fragments.len());
-                rt.block_on(async {
-                    for frag in fragments {
-                        let packet = RadioPacket {
-                            is_broadcast: false,
-                            src_node: [0; 32],
-                            dst_node: node_id_clone,
-                            payload: frag,
-                            signal_rssi: 0,
-                            signal_snr: 0,
-                        };
-                        if let Err(e) = transport_inner.send_packet(packet).await {
-                            log::error!("Failed to send packet fragment: {:?}", e);
-                            break;
-                        }
-                    }
-                });
-                log::debug!("send_packet fragments done");
-            }
-            Err(e) => {
-                log::error!("Failed to fragment flush_form message: {}", e);
-            }
-        }
-        Ok(())
-    })?)?;
+            Ok(())
+        })?,
+    )?;
 
     globals.set("term", term)?;
 
     // db table
     let db = lua.create_table()?;
     let db_store_get = db_store.clone();
-    db.set("get", lua.create_function(move |lua, (table, key): (String, String)| {
-        let store = db_store_get.lock().unwrap();
-        if let Some(tbl) = store.get(&table) {
-            if let Some(val) = tbl.get(&key) {
-                if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(val) {
-                    if let Ok(lua_val) = lua.to_value(&json_val) {
-                        return Ok(mlua::Value::from(lua_val));
+    db.set(
+        "get",
+        lua.create_function(move |lua, (table, key): (String, String)| {
+            let store = db_store_get.lock().unwrap();
+            if let Some(tbl) = store.get(&table) {
+                if let Some(val) = tbl.get(&key) {
+                    if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(val) {
+                        if let Ok(lua_val) = lua.to_value(&json_val) {
+                            return Ok(mlua::Value::from(lua_val));
+                        }
                     }
                 }
             }
-        }
-        Ok(mlua::Value::Nil)
-    })?)?;
+            Ok(mlua::Value::Nil)
+        })?,
+    )?;
 
     let db_store_set = db_store.clone();
-    db.set("set", lua.create_function(move |lua, (table, key, val): (String, String, mlua::Value)| {
-        if let Ok(json_val) = lua.from_value::<serde_json::Value>(val) {
-            if let Ok(json_str) = serde_json::to_string(&json_val) {
-                let mut store = db_store_set.lock().unwrap();
-                store.entry(table).or_insert_with(HashMap::new).insert(key, json_str);
-            }
-        }
-        Ok(())
-    })?)?;
+    db.set(
+        "set",
+        lua.create_function(
+            move |lua, (table, key, val): (String, String, mlua::Value)| {
+                if let Ok(json_val) = lua.from_value::<serde_json::Value>(val) {
+                    if let Ok(json_str) = serde_json::to_string(&json_val) {
+                        let mut store = db_store_set.lock().unwrap();
+                        store
+                            .entry(table)
+                            .or_insert_with(HashMap::new)
+                            .insert(key, json_str);
+                    }
+                }
+                Ok(())
+            },
+        )?,
+    )?;
 
     let db_store_keys = db_store.clone();
-    db.set("keys", lua.create_function(move |lua, table: String| {
-        let store = db_store_keys.lock().unwrap();
-        let table_tbl = lua.create_table()?;
-        if let Some(tbl) = store.get(&table) {
-            for (i, key) in tbl.keys().enumerate() {
-                table_tbl.set(i + 1, key.clone())?;
+    db.set(
+        "keys",
+        lua.create_function(move |lua, table: String| {
+            let store = db_store_keys.lock().unwrap();
+            let table_tbl = lua.create_table()?;
+            if let Some(tbl) = store.get(&table) {
+                for (i, key) in tbl.keys().enumerate() {
+                    table_tbl.set(i + 1, key.clone())?;
+                }
             }
-        }
-        Ok(table_tbl)
-    })?)?;
+            Ok(table_tbl)
+        })?,
+    )?;
     globals.set("db", db)?;
 
     // log table for app scripts
     let log_table = lua.create_table()?;
     let active_app_clone = active_app.clone();
-    log_table.set("info", lua.create_function(move |_, msg: String| {
-        let app = active_app_clone.lock().unwrap().clone();
-        log::info!(target: "lua_app", "[Lua: {}] {}", app, msg);
-        Ok(())
-    })?)?;
+    log_table.set(
+        "info",
+        lua.create_function(move |_, msg: String| {
+            let app = active_app_clone.lock().unwrap().clone();
+            log::info!(target: "lua_app", "[Lua: {}] {}", app, msg);
+            Ok(())
+        })?,
+    )?;
 
     let active_app_clone = active_app.clone();
-    log_table.set("warn", lua.create_function(move |_, msg: String| {
-        let app = active_app_clone.lock().unwrap().clone();
-        log::warn!(target: "lua_app", "[Lua: {}] {}", app, msg);
-        Ok(())
-    })?)?;
+    log_table.set(
+        "warn",
+        lua.create_function(move |_, msg: String| {
+            let app = active_app_clone.lock().unwrap().clone();
+            log::warn!(target: "lua_app", "[Lua: {}] {}", app, msg);
+            Ok(())
+        })?,
+    )?;
 
     let active_app_clone = active_app.clone();
-    log_table.set("error", lua.create_function(move |_, msg: String| {
-        let app = active_app_clone.lock().unwrap().clone();
-        log::error!(target: "lua_app", "[Lua: {}] {}", app, msg);
-        Ok(())
-    })?)?;
+    log_table.set(
+        "error",
+        lua.create_function(move |_, msg: String| {
+            let app = active_app_clone.lock().unwrap().clone();
+            log::error!(target: "lua_app", "[Lua: {}] {}", app, msg);
+            Ok(())
+        })?,
+    )?;
 
     let active_app_clone = active_app.clone();
-    log_table.set("debug", lua.create_function(move |_, msg: String| {
-        let app = active_app_clone.lock().unwrap().clone();
-        log::debug!(target: "lua_app", "[Lua: {}] {}", app, msg);
-        Ok(())
-    })?)?;
+    log_table.set(
+        "debug",
+        lua.create_function(move |_, msg: String| {
+            let app = active_app_clone.lock().unwrap().clone();
+            log::debug!(target: "lua_app", "[Lua: {}] {}", app, msg);
+            Ok(())
+        })?,
+    )?;
     globals.set("log", log_table)?;
 
     // session table & state
     let session = lua.create_table()?;
     let node_hex_str_clone = node_hex_str.clone();
-    session.set("node_id", lua.create_function(move |_, (): ()| {
-        Ok(node_hex_str_clone.clone())
-    })?)?;
+    session.set(
+        "node_id",
+        lua.create_function(move |_, (): ()| Ok(node_hex_str_clone.clone()))?,
+    )?;
 
-    session.set("callsign", lua.create_function(|_, (): ()| {
-        Ok("RadioOperator".to_string())
-    })?)?;
+    session.set(
+        "callsign",
+        lua.create_function(|_, (): ()| Ok("RadioOperator".to_string()))?,
+    )?;
 
     let callback_store = Arc::new(StdMutex::new(None));
     let callback_store_clone = callback_store.clone();
-    session.set("await_input", lua.create_function(move |lua, (max_len, cb): (usize, mlua::Function)| {
-        let key = lua.create_registry_value(cb)?;
-        *callback_store_clone.lock().unwrap() = Some((max_len, key));
-        Ok(())
-    })?)?;
+    session.set(
+        "await_input",
+        lua.create_function(move |lua, (max_len, cb): (usize, mlua::Function)| {
+            let key = lua.create_registry_value(cb)?;
+            *callback_store_clone.lock().unwrap() = Some((max_len, key));
+            Ok(())
+        })?,
+    )?;
 
     let session_close = Arc::new(StdMutex::new(false));
     let session_close_clone = session_close.clone();
-    session.set("close", lua.create_function(move |_, (): ()| {
-        *session_close_clone.lock().unwrap() = true;
-        Ok(())
-    })?)?;
+    session.set(
+        "close",
+        lua.create_function(move |_, (): ()| {
+            *session_close_clone.lock().unwrap() = true;
+            Ok(())
+        })?,
+    )?;
 
     let db_store_perms = db_store.clone();
     let node_hex_str_clone = node_hex_str.clone();
-    session.set("permissions", lua.create_function(move |lua, (): ()| {
-        let store = db_store_perms.lock().unwrap();
-        if let Some(perms_table) = store.get("permissions") {
-            if let Some(json_str) = perms_table.get(&node_hex_str_clone) {
-                if let Ok(perms) = serde_json::from_str::<Vec<String>>(json_str) {
-                    let table = lua.create_table()?;
-                    for (i, p) in perms.into_iter().enumerate() {
-                        table.set(i + 1, p)?;
+    session.set(
+        "permissions",
+        lua.create_function(move |lua, (): ()| {
+            let store = db_store_perms.lock().unwrap();
+            if let Some(perms_table) = store.get("permissions") {
+                if let Some(json_str) = perms_table.get(&node_hex_str_clone) {
+                    if let Ok(perms) = serde_json::from_str::<Vec<String>>(json_str) {
+                        let table = lua.create_table()?;
+                        for (i, p) in perms.into_iter().enumerate() {
+                            table.set(i + 1, p)?;
+                        }
+                        return Ok(table);
                     }
-                    return Ok(table);
                 }
             }
-        }
-        let empty_tbl = lua.create_table()?;
-        Ok(empty_tbl)
-    })?)?;
+            let empty_tbl = lua.create_table()?;
+            Ok(empty_tbl)
+        })?,
+    )?;
 
     let db_store_has_perm = db_store.clone();
     let node_hex_str_clone = node_hex_str.clone();
-    session.set("has_permission", lua.create_function(move |_, perm: String| {
-        let store = db_store_has_perm.lock().unwrap();
-        if let Some(perms_table) = store.get("permissions") {
-            if let Some(json_str) = perms_table.get(&node_hex_str_clone) {
-                if let Ok(perms) = serde_json::from_str::<Vec<String>>(json_str) {
-                    return Ok(perms.contains(&perm));
+    session.set(
+        "has_permission",
+        lua.create_function(move |_, perm: String| {
+            let store = db_store_has_perm.lock().unwrap();
+            if let Some(perms_table) = store.get("permissions") {
+                if let Some(json_str) = perms_table.get(&node_hex_str_clone) {
+                    if let Ok(perms) = serde_json::from_str::<Vec<String>>(json_str) {
+                        return Ok(perms.contains(&perm));
+                    }
                 }
             }
-        }
-        Ok(false)
-    })?)?;
+            Ok(false)
+        })?,
+    )?;
 
     let active_app_clone = active_app.clone();
     let load_app = lua.create_function(move |lua, app_name: String| {
@@ -640,8 +777,13 @@ fn run_session_task(
         }
 
         if let Some(msg) = rx.blocking_recv() {
-            log::debug!("Got input message: opcode={}, len={}", msg.opcode, msg.payload.len());
-            if msg.opcode == 0x02 { // Keystroke/Input message
+            log::debug!(
+                "Got input message: opcode={}, len={}",
+                msg.opcode,
+                msg.payload.len()
+            );
+            if msg.opcode == 0x02 {
+                // Keystroke/Input message
                 if let Ok(input_str) = String::from_utf8(msg.payload) {
                     let cb_opt = {
                         let mut store = callback_store.lock().unwrap();
@@ -651,7 +793,9 @@ fn run_session_task(
                     if let Some((_max_len, reg_key)) = cb_opt {
                         let cb: mlua::Function = lua.registry_value(&reg_key)?;
                         if input_str.starts_with('{') {
-                            if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(&input_str) {
+                            if let Ok(json_val) =
+                                serde_json::from_str::<serde_json::Value>(&input_str)
+                            {
                                 if let Ok(lua_val) = lua.to_value(&json_val) {
                                     cb.call::<_, ()>(lua_val)?;
                                 } else {
@@ -706,7 +850,7 @@ mod tests {
         let globals = lua.globals();
         globals.set("os", mlua::Value::Nil).unwrap();
         globals.set("io", mlua::Value::Nil).unwrap();
-        
+
         assert!(globals.get::<_, mlua::Value>("os").unwrap().is_nil());
         assert!(globals.get::<_, mlua::Value>("io").unwrap().is_nil());
     }
@@ -765,19 +909,24 @@ max_asset_broadcast_duty_cycle = 0.1
     async fn test_bbs_server_connection_and_lua_execution() {
         let _ = env_logger::builder().is_test(true).try_init();
         let config = default_config();
-        let server_transport = Arc::new(MockSocketTransport::new_server("127.0.0.1:9095".to_string(), 0.0, 0, 200));
-        
-        let server_handle = tokio::spawn(async move {
-            start_server(config, server_transport, Some(1)).await
-        });
-        
+        let server_transport = Arc::new(MockSocketTransport::new_server(
+            "127.0.0.1:9095".to_string(),
+            0.0,
+            0,
+            200,
+        ));
+
+        let server_handle =
+            tokio::spawn(async move { start_server(config, server_transport, Some(1)).await });
+
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-        let client_transport = MockSocketTransport::new_client("127.0.0.1:9095".to_string(), 0.0, 0, 200);
-        
+        let client_transport =
+            MockSocketTransport::new_client("127.0.0.1:9095".to_string(), 0.0, 0, 200);
+
         let client_key = [5u8; 32];
         let handshake_msg = MeshBbsMessage::new(0x03, 0x01, 0x00, Vec::new());
         let handshake_payloads = handshake_msg.to_fragments(200).unwrap();
-        
+
         let mut sent = false;
         for _ in 0..10 {
             if !handshake_payloads.is_empty() {
@@ -797,15 +946,23 @@ max_asset_broadcast_duty_cycle = 0.1
             tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
         }
         assert!(sent, "Failed to send handshake from client");
-        
+
         // Reassemble the server welcome menu fragments
         let mut client_reassembler = MessageReassembler::new();
         let mut assembled_msg = None;
         let start_time = tokio::time::Instant::now();
         while start_time.elapsed() < tokio::time::Duration::from_millis(1500) {
-            match tokio::time::timeout(tokio::time::Duration::from_millis(100), client_transport.receive_packet()).await {
+            match tokio::time::timeout(
+                tokio::time::Duration::from_millis(100),
+                client_transport.receive_packet(),
+            )
+            .await
+            {
                 Ok(Ok(packet)) => {
-                    if let Some(msg) = client_reassembler.process_packet([0; 32], &packet.payload).unwrap() {
+                    if let Some(msg) = client_reassembler
+                        .process_packet([0; 32], &packet.payload)
+                        .unwrap()
+                    {
                         assembled_msg = Some(msg);
                         break;
                     }
@@ -813,14 +970,18 @@ max_asset_broadcast_duty_cycle = 0.1
                 _ => {}
             }
         }
-        
+
         let response = assembled_msg.expect("Failed to reassemble server response welcome screen");
         assert_eq!(response.opcode, 0x03);
-        assert!(!response.payload.is_empty(), "Server response payload is empty");
+        assert!(
+            !response.payload.is_empty(),
+            "Server response payload is empty"
+        );
 
         // Send simulated Form Submission (tab nickname to action button, then press enter)
         let form_submit_json = r#"{"nickname":"TestUser","submit":"read_boards"}"#;
-        let submit_msg = MeshBbsMessage::new(0x02, 0x02, 0x00, form_submit_json.as_bytes().to_vec());
+        let submit_msg =
+            MeshBbsMessage::new(0x02, 0x02, 0x00, form_submit_json.as_bytes().to_vec());
         let submit_payloads = submit_msg.to_fragments(200).unwrap();
         assert!(!submit_payloads.is_empty());
 
@@ -838,9 +999,17 @@ max_asset_broadcast_duty_cycle = 0.1
         let mut board_msg = None;
         let start_time = tokio::time::Instant::now();
         while start_time.elapsed() < tokio::time::Duration::from_millis(1500) {
-            match tokio::time::timeout(tokio::time::Duration::from_millis(100), client_transport.receive_packet()).await {
+            match tokio::time::timeout(
+                tokio::time::Duration::from_millis(100),
+                client_transport.receive_packet(),
+            )
+            .await
+            {
                 Ok(Ok(packet)) => {
-                    if let Some(msg) = client_reassembler.process_packet([0; 32], &packet.payload).unwrap() {
+                    if let Some(msg) = client_reassembler
+                        .process_packet([0; 32], &packet.payload)
+                        .unwrap()
+                    {
                         board_msg = Some(msg);
                         break;
                     }
@@ -849,9 +1018,10 @@ max_asset_broadcast_duty_cycle = 0.1
             }
         }
 
-        let board_response = board_msg.expect("Failed to reassemble discussion boards screen response");
+        let board_response =
+            board_msg.expect("Failed to reassemble discussion boards screen response");
         assert_eq!(board_response.opcode, 0x03);
-        
+
         let _ = server_handle.await;
     }
 
@@ -874,7 +1044,10 @@ max_asset_broadcast_duty_cycle = 0.1
 
         let config: AppConfig = toml::from_str(config_str).unwrap();
         assert_eq!(config.admin_nodes.len(), 1);
-        assert_eq!(config.admin_nodes[0], "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890");
+        assert_eq!(
+            config.admin_nodes[0],
+            "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"
+        );
         assert_eq!(config.rate_limiter.max_packets_per_minute, 30);
     }
 
@@ -947,7 +1120,8 @@ submit_bg = 5
         // Simulates the permissions initialization logic for the first user
         let db_store: HashMap<String, HashMap<String, String>> = HashMap::new();
         let admin_nodes: Vec<String> = Vec::new();
-        let node_hex = "0505050505050505050505050505050505050505050505050505050505050505".to_string();
+        let node_hex =
+            "0505050505050505050505050505050505050505050505050505050505050505".to_string();
 
         let is_configured_admin = admin_nodes.contains(&node_hex);
         let is_first_user = match db_store.get("users") {
@@ -967,7 +1141,8 @@ submit_bg = 5
 
     #[test]
     fn test_permissions_configured_admin_node() {
-        let node_hex = "aabbccdd00000000000000000000000000000000000000000000000000000000".to_string();
+        let node_hex =
+            "aabbccdd00000000000000000000000000000000000000000000000000000000".to_string();
         let admin_nodes = vec![node_hex.clone()];
 
         let mut db_store: HashMap<String, HashMap<String, String>> = HashMap::new();
@@ -994,7 +1169,8 @@ submit_bg = 5
 
     #[test]
     fn test_permissions_regular_user() {
-        let node_hex = "1111111111111111111111111111111111111111111111111111111111111111".to_string();
+        let node_hex =
+            "1111111111111111111111111111111111111111111111111111111111111111".to_string();
         let admin_nodes: Vec<String> = Vec::new();
 
         let mut db_store: HashMap<String, HashMap<String, String>> = HashMap::new();
@@ -1025,7 +1201,9 @@ submit_bg = 5
         let perms = vec!["read".to_string(), "write".to_string(), "admin".to_string()];
         let json_str = serde_json::to_string(&perms).unwrap();
 
-        let perms_table = db_store.entry("permissions".to_string()).or_insert_with(HashMap::new);
+        let perms_table = db_store
+            .entry("permissions".to_string())
+            .or_insert_with(HashMap::new);
         perms_table.insert(node_hex.clone(), json_str);
 
         // Verify we can read them back
@@ -1043,7 +1221,9 @@ submit_bg = 5
         let original_perms = vec!["read".to_string()];
         let json_str = serde_json::to_string(&original_perms).unwrap();
 
-        let perms_table = db_store.entry("permissions".to_string()).or_insert_with(HashMap::new);
+        let perms_table = db_store
+            .entry("permissions".to_string())
+            .or_insert_with(HashMap::new);
         perms_table.insert(node_hex.clone(), json_str);
 
         // Simulate reconnect logic: only insert if not present
@@ -1134,9 +1314,8 @@ max_asset_broadcast_duty_cycle = 0.15
     async fn test_server_with_admin_nodes_config() {
         let _ = env_logger::builder().is_test(true).try_init();
         let mut config = default_config();
-        config.admin_nodes = vec![
-            "0505050505050505050505050505050505050505050505050505050505050505".to_string()
-        ];
+        config.admin_nodes =
+            vec!["0505050505050505050505050505050505050505050505050505050505050505".to_string()];
         let transport = Arc::new(MockSocketTransport::new(0.0, 10, 200));
         let result = start_server(config, transport, Some(1)).await;
         assert!(result.is_ok());
@@ -1146,21 +1325,26 @@ max_asset_broadcast_duty_cycle = 0.15
     async fn test_session_reconnect_preserves_nickname() {
         let _ = env_logger::builder().is_test(true).try_init();
         let config = default_config();
-        let server_transport = Arc::new(MockSocketTransport::new_server("127.0.0.1:9096".to_string(), 0.0, 0, 200));
-        
-        let server_handle = tokio::spawn(async move {
-            start_server(config, server_transport, Some(3)).await
-        });
-        
+        let server_transport = Arc::new(MockSocketTransport::new_server(
+            "127.0.0.1:9096".to_string(),
+            0.0,
+            0,
+            200,
+        ));
+
+        let server_handle =
+            tokio::spawn(async move { start_server(config, server_transport, Some(3)).await });
+
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-        let client_transport = MockSocketTransport::new_client("127.0.0.1:9096".to_string(), 0.0, 0, 200);
-        
+        let client_transport =
+            MockSocketTransport::new_client("127.0.0.1:9096".to_string(), 0.0, 0, 200);
+
         let client_key = [7u8; 32];
-        
+
         // First connection: handshake
         let handshake_msg = MeshBbsMessage::new(0x03, 0x01, 0x00, Vec::new());
         let handshake_payloads = handshake_msg.to_fragments(200).unwrap();
-        
+
         let mut sent = false;
         for _ in 0..10 {
             let packet = RadioPacket {
@@ -1178,15 +1362,23 @@ max_asset_broadcast_duty_cycle = 0.15
             tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
         }
         assert!(sent, "Failed to send handshake");
-        
+
         // Receive initial welcome (nickname setup form for first user)
         let mut client_reassembler = MessageReassembler::new();
         let mut assembled_msg = None;
         let start_time = tokio::time::Instant::now();
         while start_time.elapsed() < tokio::time::Duration::from_millis(1500) {
-            match tokio::time::timeout(tokio::time::Duration::from_millis(100), client_transport.receive_packet()).await {
+            match tokio::time::timeout(
+                tokio::time::Duration::from_millis(100),
+                client_transport.receive_packet(),
+            )
+            .await
+            {
                 Ok(Ok(packet)) => {
-                    if let Some(msg) = client_reassembler.process_packet([0; 32], &packet.payload).unwrap() {
+                    if let Some(msg) = client_reassembler
+                        .process_packet([0; 32], &packet.payload)
+                        .unwrap()
+                    {
                         assembled_msg = Some(msg);
                         break;
                     }
@@ -1194,16 +1386,16 @@ max_asset_broadcast_duty_cycle = 0.15
                 _ => {}
             }
         }
-        
+
         assert!(assembled_msg.is_some(), "Should receive welcome screen");
         let welcome = assembled_msg.unwrap();
         assert_eq!(welcome.opcode, 0x03);
-        
+
         // Register nickname
         let register_json = r#"{"nickname":"ReconnectTestUser","submit":"register"}"#;
         let register_msg = MeshBbsMessage::new(0x02, 0x02, 0x00, register_json.as_bytes().to_vec());
         let register_payloads = register_msg.to_fragments(200).unwrap();
-        
+
         let packet = RadioPacket {
             is_broadcast: false,
             src_node: client_key,
@@ -1213,14 +1405,22 @@ max_asset_broadcast_duty_cycle = 0.15
             signal_snr: 10,
         };
         client_transport.send_packet(packet).await.unwrap();
-        
+
         // After registering, server should send back the main menu with "Hello ReconnectTestUser"
         let mut hello_msg = None;
         let start_time = tokio::time::Instant::now();
         while start_time.elapsed() < tokio::time::Duration::from_millis(1500) {
-            match tokio::time::timeout(tokio::time::Duration::from_millis(100), client_transport.receive_packet()).await {
+            match tokio::time::timeout(
+                tokio::time::Duration::from_millis(100),
+                client_transport.receive_packet(),
+            )
+            .await
+            {
                 Ok(Ok(packet)) => {
-                    if let Some(msg) = client_reassembler.process_packet([0; 32], &packet.payload).unwrap() {
+                    if let Some(msg) = client_reassembler
+                        .process_packet([0; 32], &packet.payload)
+                        .unwrap()
+                    {
                         hello_msg = Some(msg);
                         break;
                     }
@@ -1228,13 +1428,18 @@ max_asset_broadcast_duty_cycle = 0.15
                 _ => {}
             }
         }
-        
-        let hello_response = hello_msg.expect("Should receive Hello screen after nickname registration");
+
+        let hello_response =
+            hello_msg.expect("Should receive Hello screen after nickname registration");
         assert_eq!(hello_response.opcode, 0x03);
         // The payload should contain the user's nickname in the hello greeting
         let payload_str = String::from_utf8_lossy(&hello_response.payload);
-        assert!(payload_str.contains("ReconnectTestUser"), "Hello screen should contain user nickname, got: {}", payload_str);
-        
+        assert!(
+            payload_str.contains("ReconnectTestUser"),
+            "Hello screen should contain user nickname, got: {}",
+            payload_str
+        );
+
         let _ = server_handle.await;
     }
 }
