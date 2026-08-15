@@ -1,76 +1,442 @@
--- Simple Turn-Based Combat Door Game for MeshBBS
 local app = {}
 
-function app.on_start(session)
-    term.clear()
-    -- Renders public cached banner (0 airtime if pre-cached via broadcast)
-    term.render_asset("ASSET_DUNGEON_BANNER")
-    term.move_to(2, 8)
-    term.set_color(14, 0) -- Yellow on Black
-    term.print("=== THE LORA CATACOMBS ===\n")
-    
-    local player = db.get("dungeon_players", session.node_id()) or { hp = 20, gold = 0, level = 1 }
-    term.move_to(2, 10)
-    term.set_color(7, 0)
-    term.print(string.format("Hero: %s | HP: %d/20 | Gold: %d\n", session.callsign(), player.hp, player.gold))
-    
-    term.define_form(4)
-    term.add_submit_button("explore", 2, 12)
-    term.add_submit_button("rest", 18, 12)
-    term.add_submit_button("exit", 32, 12)
-    term.flush_form()
-    
-    session.await_input(4, function(submission)
-        if type(submission) == "string" then
-            app.on_start(session)
-            return
-        end
+local MONSTER_TYPES = {
+    { name = "Mesh Goblin", hp_base = 15, str_base = 8, dex_base = 10, xp_base = 15 },
+    { name = "LoRa Orc", hp_base = 25, str_base = 12, dex_base = 8, xp_base = 25 },
+    { name = "Packet Loss Wraith", hp_base = 18, str_base = 6, dex_base = 16, xp_base = 30 },
+    { name = "Bytecode Behemoth", hp_base = 40, str_base = 16, dex_base = 6, xp_base = 50 },
+    { name = "Antenna Mimic", hp_base = 20, str_base = 10, dex_base = 12, xp_base = 20 }
+}
 
-        local action = submission.submit
-        log.info("Dungeon game option selected: " .. tostring(action))
-        if action == "explore" then
-            app.battle(session, player)
-        elseif action == "rest" then
-            player.hp = 20
-            db.set("dungeon_players", session.node_id(), player)
-            
-            term.clear()
-            term.render_asset("ASSET_DUNGEON_BANNER")
-            term.move_to(2, 8)
-            term.set_color(10, 0) -- Green
-            term.print("You rested and restored your HP!\n\n")
-            
-            term.define_form(5)
-            term.add_submit_button("continue", 2, 11)
-            term.flush_form()
-            
-            session.await_input(5, function() app.on_start(session) end)
-        else
+local EVENT_TYPES = {
+    "EMPTY", "EMPTY", "MONSTER", "MONSTER", "MONSTER", "TREASURE", "TRAP", "NPC", "FOUNTAIN", "EASTER_EGG"
+}
+
+local function xp_needed(level)
+    return level * 50
+end
+
+local function generate_map(dungeon_level)
+    local map = {}
+    for y = 1, 5 do
+        map[y] = {}
+        for x = 1, 5 do
+            map[y][x] = {
+                type = EVENT_TYPES[math.random(1, #EVENT_TYPES)],
+                cleared = false
+            }
+        end
+    end
+    local start_x, start_y = math.random(1, 5), math.random(1, 5)
+    local exit_x, exit_y
+    repeat
+        exit_x, exit_y = math.random(1, 5), math.random(1, 5)
+    until exit_x ~= start_x or exit_y ~= start_y
+
+    map[start_y][start_x].type = "ENTRANCE"
+    map[start_y][start_x].cleared = true
+    map[exit_y][exit_x].type = "EXIT"
+
+    return map, start_x, start_y
+end
+
+local function init_player(session)
+    local map, sx, sy = generate_map(1)
+    return {
+        hp = 25,
+        max_hp = 25,
+        str = 10,
+        dex = 10,
+        con = 10,
+        int = 10,
+        wis = 10,
+        cha = 10,
+        xp = 0,
+        level = 1,
+        gold = 0,
+        potions = 2,
+        dungeon_level = 1,
+        x = sx,
+        y = sy,
+        map = map
+    }
+end
+
+local function save_player(session, player)
+    db.set("dungeon_players", session.node_id(), player)
+end
+
+function app.on_start(session)
+    local player = db.get("dungeon_players", session.node_id())
+    if not player or player.hp <= 0 then
+        player = init_player(session)
+        save_player(session, player)
+    end
+    app.view_room(session, player, "Welcome to the LoRa Catacombs, Level " .. player.dungeon_level .. "!")
+end
+
+function app.view_room(session, player, msg)
+    term.clear()
+    term.render_asset("ASSET_DUNGEON_BANNER")
+    term.move_to(2, 6)
+    term.set_color(14, 0)
+    term.print(string.format("Level %d - Lvl %d %s", player.dungeon_level, player.level, session.callsign()))
+    term.move_to(2, 7)
+    term.set_color(7, 0)
+    term.print(string.format("HP: %d/%d | Gold: %d | XP: %d/%d | Pots: %d", player.hp, player.max_hp, player.gold, player.xp, xp_needed(player.level), player.potions))
+
+    term.move_to(2, 9)
+    term.set_color(11, 0)
+    term.print(msg or "")
+
+    -- Draw minimap
+    local map_start_x = 40
+    local map_start_y = 6
+    term.set_color(8, 0)
+    for y = 1, 5 do
+        term.move_to(map_start_x, map_start_y + y - 1)
+        local row_str = ""
+        for x = 1, 5 do
+            if player.x == x and player.y == y then
+                row_str = row_str .. "[@]"
+            else
+                local rm = player.map[y][x]
+                if not rm.cleared then
+                    row_str = row_str .. "[?]"
+                elseif rm.type == "ENTRANCE" then
+                    row_str = row_str .. "[E]"
+                elseif rm.type == "EXIT" then
+                    row_str = row_str .. "[X]"
+                else
+                    row_str = row_str .. "[.]"
+                end
+            end
+        end
+        term.print(row_str)
+    end
+
+    term.define_form(10)
+    local btn_y = 12
+    if player.y > 1 then term.add_submit_button("north", 2, btn_y) end
+    if player.y < 5 then term.add_submit_button("south", 10, btn_y) end
+    if player.x < 5 then term.add_submit_button("east", 18, btn_y) end
+    if player.x > 1 then term.add_submit_button("west", 26, btn_y) end
+
+    btn_y = 14
+    local current_room = player.map[player.y][player.x]
+    if current_room.type == "EXIT" then
+        term.add_submit_button("descend", 2, btn_y)
+    end
+    term.add_submit_button("rest", 12, btn_y)
+    term.add_submit_button("quit", 22, btn_y)
+    
+    term.flush_form()
+
+    session.await_input(10, function(sub)
+        if type(sub) == "string" then app.view_room(session, player, "") return end
+        local act = sub.submit
+
+        if act == "north" then player.y = player.y - 1; app.do_event(session, player)
+        elseif act == "south" then player.y = player.y + 1; app.do_event(session, player)
+        elseif act == "east" then player.x = player.x + 1; app.do_event(session, player)
+        elseif act == "west" then player.x = player.x - 1; app.do_event(session, player)
+        elseif act == "descend" then app.descend(session, player)
+        elseif act == "rest" then
+            if player.gold >= 10 then
+                player.gold = player.gold - 10
+                player.hp = player.max_hp
+                save_player(session, player)
+                app.view_room(session, player, "You rested for 10 Gold. HP fully restored!")
+            else
+                app.view_room(session, player, "Not enough Gold to rest! Need 10G.")
+            end
+        elseif act == "quit" then
+            save_player(session, player)
             session.load_app("00_main_menu")
+        else
+            app.view_room(session, player, "Invalid action.")
         end
     end)
 end
 
-function app.battle(session, player)
-    local monster_hp = math.random(5, 12)
+function app.do_event(session, player)
+    local room = player.map[player.y][player.x]
+    if room.cleared then
+        save_player(session, player)
+        app.view_room(session, player, "You enter a cleared room.")
+        return
+    end
+
+    room.cleared = true
+    save_player(session, player)
+    
+    local rtype = room.type
+    if rtype == "EMPTY" then
+        app.view_room(session, player, "The room is empty. Dust settles softly.")
+    elseif rtype == "TREASURE" then
+        local amt = math.random(5, 20) + (player.dungeon_level * 5)
+        player.gold = player.gold + amt
+        local has_pot = math.random(1, 100) > 70
+        local msg = "You found a chest with " .. amt .. " Gold!"
+        if has_pot then
+            player.potions = player.potions + 1
+            msg = msg .. " And a potion!"
+        end
+        save_player(session, player)
+        app.msg_view(session, player, 20, msg, 10) -- green
+    elseif rtype == "TRAP" then
+        local dmg = math.random(2, 6) + player.dungeon_level
+        player.hp = player.hp - dmg
+        save_player(session, player)
+        if player.hp <= 0 then
+            app.game_over(session, player, "You stepped on a trap and perished!")
+        else
+            app.msg_view(session, player, 21, "You triggered a trap and took " .. dmg .. " damage!", 12)
+        end
+    elseif rtype == "FOUNTAIN" then
+        local heal = math.random(5, 15)
+        player.hp = math.min(player.max_hp, player.hp + heal)
+        save_player(session, player)
+        app.msg_view(session, player, 22, "You drink from a glowing fountain and restore " .. heal .. " HP.", 11)
+    elseif rtype == "NPC" then
+        local msgs = {
+            "A wandering merchant gives you a potion!",
+            "An old wizard casts a minor heal on you.",
+            "A friendly goblin offers you 10 gold."
+        }
+        local choice = math.random(1, #msgs)
+        if choice == 1 then player.potions = player.potions + 1
+        elseif choice == 2 then player.hp = math.min(player.max_hp, player.hp + 10)
+        elseif choice == 3 then player.gold = player.gold + 10 end
+        save_player(session, player)
+        app.msg_view(session, player, 23, msgs[choice], 14)
+    elseif rtype == "EASTER_EGG" then
+        local eggs = {
+            "You found a teapot. It whispers: '418 I'm a teapot'.",
+            "It is pitch black. You are likely to be eaten by a grue.",
+            "There's a note: 'Try finger, but hole.'",
+            "A terminal flashes: 'Guru Meditation #00000004.0000AAC0'."
+        }
+        app.msg_view(session, player, 24, eggs[math.random(1, #eggs)], 13)
+    elseif rtype == "EXIT" then
+        app.view_room(session, player, "You found the stairs leading down!")
+    elseif rtype == "MONSTER" then
+        local m_base = MONSTER_TYPES[math.random(1, #MONSTER_TYPES)]
+        local scale = player.dungeon_level
+        local monster = {
+            name = m_base.name,
+            hp = m_base.hp_base + (scale * 5) + math.random(-2, 5),
+            max_hp = m_base.hp_base + (scale * 5) + math.random(-2, 5),
+            str = m_base.str_base + scale,
+            dex = m_base.dex_base + scale,
+            xp = m_base.xp_base + (scale * 5)
+        }
+        app.battle_round(session, player, monster, "A wild " .. monster.name .. " attacks!")
+    else
+        app.view_room(session, player, "You enter a strange room...")
+    end
+end
+
+function app.msg_view(session, player, form_id, msg, color)
+    term.clear()
+    term.render_asset("ASSET_DUNGEON_BANNER")
+    term.move_to(2, 10)
+    term.set_color(color or 7, 0)
+    term.print(msg)
+    term.define_form(form_id)
+    term.add_submit_button("continue", 2, 13)
+    term.flush_form()
+    session.await_input(form_id, function() app.view_room(session, player, "You continue exploring.") end)
+end
+
+function app.battle_round(session, player, monster, msg)
+    term.clear()
+    term.render_asset("ASSET_DUNGEON_BANNER")
+    term.move_to(2, 6)
+    term.set_color(12, 0)
+    term.print("=== BATTLE ===")
+
+    term.move_to(2, 8)
+    term.set_color(14, 0)
+    term.print(string.format("%s (Lvl %d)", session.callsign(), player.level))
+    term.move_to(2, 9)
+    term.set_color(7, 0)
+    term.print(string.format("HP: %d/%d | Pots: %d", player.hp, player.max_hp, player.potions))
+
+    term.move_to(30, 8)
+    term.set_color(13, 0)
+    term.print(monster.name)
+    term.move_to(30, 9)
+    term.set_color(7, 0)
+    term.print(string.format("HP: %d/%d", monster.hp, monster.max_hp))
+
+    term.move_to(2, 11)
+    term.set_color(15, 0)
+    term.print(msg or "")
+
+    term.define_form(30)
+    term.add_submit_button("attack", 2, 13)
+    term.add_submit_button("potion", 12, 13)
+    term.add_submit_button("flee", 22, 13)
+    term.flush_form()
+
+    session.await_input(30, function(sub)
+        if type(sub) == "string" then app.battle_round(session, player, monster, "") return end
+        local act = sub.submit
+
+        if act == "attack" then
+            -- Player attacks
+            local hit_chance = 50 + (player.dex * 2) - (monster.dex * 2)
+            if hit_chance < 10 then hit_chance = 10 end
+            if hit_chance > 95 then hit_chance = 95 end
+            
+            local result_msg = ""
+            if math.random(1, 100) <= hit_chance then
+                local dmg = math.floor(player.str / 2) + math.random(1, 4)
+                monster.hp = monster.hp - dmg
+                result_msg = "You hit the " .. monster.name .. " for " .. dmg .. " dmg! "
+            else
+                result_msg = "You missed! "
+            end
+            
+            if monster.hp <= 0 then
+                app.victory(session, player, monster)
+                return
+            end
+            
+            -- Monster attacks
+            local m_hit_chance = 50 + (monster.dex * 2) - (player.dex * 2)
+            if m_hit_chance < 10 then m_hit_chance = 10 end
+            if m_hit_chance > 95 then m_hit_chance = 95 end
+
+            if math.random(1, 100) <= m_hit_chance then
+                local mdmg = math.floor(monster.str / 2) + math.random(1, 4) - math.floor(player.con / 4)
+                if mdmg < 1 then mdmg = 1 end
+                player.hp = player.hp - mdmg
+                result_msg = result_msg .. monster.name .. " hits you for " .. mdmg .. " dmg!"
+            else
+                result_msg = result_msg .. monster.name .. " misses you!"
+            end
+
+            save_player(session, player)
+            if player.hp <= 0 then
+                app.game_over(session, player, "You were slain by a " .. monster.name .. "!")
+            else
+                app.battle_round(session, player, monster, result_msg)
+            end
+
+        elseif act == "potion" then
+            if player.potions > 0 then
+                player.potions = player.potions - 1
+                local heal = 20 + math.floor(player.max_hp * 0.2)
+                player.hp = math.min(player.max_hp, player.hp + heal)
+                save_player(session, player)
+                app.battle_round(session, player, monster, "You drank a potion and healed " .. heal .. " HP.")
+            else
+                app.battle_round(session, player, monster, "You don't have any potions!")
+            end
+        elseif act == "flee" then
+            local flee_chance = 50 + (player.dex * 2) - (monster.dex * 2)
+            if math.random(1, 100) <= flee_chance then
+                app.view_room(session, player, "You successfully fled the battle!")
+            else
+                local mdmg = math.floor(monster.str / 2) + math.random(1, 4)
+                player.hp = player.hp - mdmg
+                save_player(session, player)
+                if player.hp <= 0 then
+                    app.game_over(session, player, "You failed to flee and were struck down!")
+                else
+                    app.battle_round(session, player, monster, "Failed to flee! Took " .. mdmg .. " dmg!")
+                end
+            end
+        end
+    end)
+end
+
+function app.victory(session, player, monster)
+    player.xp = player.xp + monster.xp
+    local gold_gained = math.random(2, 8) + player.dungeon_level * 2
+    player.gold = player.gold + gold_gained
+
+    local msg = "Victory! Gained " .. monster.xp .. " XP and " .. gold_gained .. " Gold!"
+    save_player(session, player)
+
+    if player.xp >= xp_needed(player.level) then
+        player.level = player.level + 1
+        app.level_up(session, player)
+    else
+        app.msg_view(session, player, 31, msg, 10)
+    end
+end
+
+function app.level_up(session, player)
+    player.max_hp = player.max_hp + 5 + math.floor(player.con / 2)
+    player.hp = player.max_hp
+    save_player(session, player)
+
     term.clear()
     term.render_asset("ASSET_DUNGEON_BANNER")
     term.move_to(2, 8)
-    term.set_color(12, 0) -- Light Red
-    term.print(string.format("A Wild Mesh Goblin appears! (HP: %d)\n", monster_hp))
-    player.gold = player.gold + 5
-    player.hp = math.max(1, player.hp - 3)
-    db.set("dungeon_players", session.node_id(), player)
-    
-    term.move_to(2, 10)
-    term.set_color(11, 0) -- Cyan
-    term.print("You defeated the Goblin and earned 5 Gold!\n\n")
-    
-    term.define_form(6)
-    term.add_submit_button("continue", 2, 13)
+    term.set_color(14, 0)
+    term.print("LEVEL UP! You are now level " .. player.level .. "!")
+    term.move_to(2, 9)
+    term.set_color(7, 0)
+    term.print("Choose a stat to increase:")
+
+    term.define_form(40)
+    term.add_submit_button("str", 2, 11)
+    term.add_submit_button("dex", 10, 11)
+    term.add_submit_button("con", 18, 11)
+    term.add_submit_button("int", 26, 11)
+    term.add_submit_button("wis", 34, 11)
+    term.add_submit_button("cha", 42, 11)
     term.flush_form()
     
-    session.await_input(6, function() app.on_start(session) end)
+    session.await_input(40, function(sub)
+        if type(sub) == "string" then app.level_up(session, player) return end
+        local act = sub.submit
+        if act == "str" then player.str = player.str + 1
+        elseif act == "dex" then player.dex = player.dex + 1
+        elseif act == "con" then player.con = player.con + 1
+        elseif act == "int" then player.int = player.int + 1
+        elseif act == "wis" then player.wis = player.wis + 1
+        elseif act == "cha" then player.cha = player.cha + 1
+        else player.str = player.str + 1 end
+
+        save_player(session, player)
+        app.view_room(session, player, "You feel stronger! (" .. string.upper(act) .. " increased)")
+    end)
+end
+
+function app.descend(session, player)
+    player.dungeon_level = player.dungeon_level + 1
+    local map, sx, sy = generate_map(player.dungeon_level)
+    player.map = map
+    player.x = sx
+    player.y = sy
+    save_player(session, player)
+
+    app.msg_view(session, player, 50, "You descend deeper into the darkness... Welcome to Level " .. player.dungeon_level .. "!", 13)
+end
+
+function app.game_over(session, player, cause)
+    db.set("dungeon_players", session.node_id(), nil) -- Clear save
+    term.clear()
+    term.render_asset("ASSET_DUNGEON_BANNER")
+    term.move_to(2, 8)
+    term.set_color(12, 0)
+    term.print("=== GAME OVER ===")
+    term.move_to(2, 10)
+    term.set_color(7, 0)
+    term.print(cause)
+    term.move_to(2, 11)
+    term.print(string.format("You reached Dungeon Level %d and Character Level %d.", player.dungeon_level, player.level))
+    
+    term.define_form(60)
+    term.add_submit_button("exit", 2, 14)
+    term.flush_form()
+    
+    session.await_input(60, function() session.load_app("00_main_menu") end)
 end
 
 return app
