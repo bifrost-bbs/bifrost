@@ -10,3 +10,8 @@ path = "assets/dungeon_banner.ans"
 name = "ASSET_MAIN_MENU_BORDER"
 id = 0x0102
 path = "assets/main_menu_border.ans"
+
+[[assets]]
+name = "ASSET_MAIN_MENU_BANNER"
+id = 0x0103
+path = "assets/main_menu_banner.ans"
