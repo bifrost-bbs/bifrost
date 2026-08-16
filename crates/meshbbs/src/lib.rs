@@ -617,6 +617,7 @@ pub async fn start_server_with_stats(
                                 let admin_nodes_config = config.admin_nodes.clone();
                                 let asset_manifest_clone = asset_manifest_map.clone();
                                 let bbs_stats_inner = bbs_stats_clone.clone();
+                                let transport_stats_inner = transport_stats.clone();
                                 std::thread::spawn(move || {
                                     let res = run_session_task(
                                         src,
@@ -627,6 +628,8 @@ pub async fn start_server_with_stats(
                                         form_colors_config,
                                         admin_nodes_config,
                                         asset_manifest_clone,
+                                        bbs_stats_inner.clone(),
+                                        transport_stats_inner,
                                     );
                                     sessions_clone.lock().unwrap().remove(&src);
                                     bbs_stats_inner.record_session_disconnect();
@@ -675,6 +678,8 @@ fn run_session_task(
     form_colors: FormColorsConfig,
     admin_nodes: Vec<String>,
     asset_manifest: Arc<HashMap<u16, (String, String)>>,
+    bbs_stats: Arc<BbsStats>,
+    transport_stats: Option<Arc<TransportStats>>,
 ) -> Result<()> {
     log::debug!("Starting run_session_task for client session");
     let lua = mlua::Lua::new();
@@ -798,6 +803,8 @@ fn run_session_task(
     let transport_clone = transport.clone();
     let node_id_clone = node_id;
     let rt = rt_handle.clone();
+    let bbs_stats_flush = bbs_stats.clone();
+    let transport_stats_flush = transport_stats.clone();
     term.set(
         "flush",
         lua.create_function(move |_, (): ()| {
@@ -808,10 +815,24 @@ fn run_session_task(
             );
             if !buf.is_empty() {
                 buf.push(0x04); // EndOfFrame
-                let payload = buf.clone();
+                let raw_len = buf.len();
+                let (flags, payload) = match meshansi::compress_bytecode(&buf) {
+                    Ok(comp) => {
+                        let comp_len = comp.len();
+                        bbs_stats_flush.record_compression(raw_len, comp_len);
+                        if let Some(ref ts) = transport_stats_flush {
+                            ts.record_compression(raw_len, comp_len);
+                        }
+                        (0x02, comp)
+                    }
+                    Err(e) => {
+                        log::warn!("Compression failed, sending uncompressed: {:?}", e);
+                        (0x00, buf.clone())
+                    }
+                };
                 buf.clear();
 
-                let msg = MeshBbsMessage::new(0x01, 0x03, 0x00, payload);
+                let msg = MeshBbsMessage::new(0x01, 0x03, flags, payload);
                 let mtu = transport_clone.get_mtu();
                 match msg.to_fragments(mtu) {
                     Ok(fragments) => {
@@ -952,6 +973,8 @@ fn run_session_task(
     let transport_clone = transport.clone();
     let node_id_clone = node_id.clone();
     let rt = rt_handle.clone();
+    let bbs_stats_form = bbs_stats.clone();
+    let transport_stats_form = transport_stats.clone();
     term.set(
         "flush_form",
         lua.create_function(move |_, (): ()| {
@@ -962,10 +985,24 @@ fn run_session_task(
             );
             buf.push(0xD3); // OP_FORM_END
             buf.push(0x04); // EndOfFrame
-            let payload = buf.clone();
+            let raw_len = buf.len();
+            let (flags, payload) = match meshansi::compress_bytecode(&buf) {
+                Ok(comp) => {
+                    let comp_len = comp.len();
+                    bbs_stats_form.record_compression(raw_len, comp_len);
+                    if let Some(ref ts) = transport_stats_form {
+                        ts.record_compression(raw_len, comp_len);
+                    }
+                    (0x02, comp)
+                }
+                Err(e) => {
+                    log::warn!("Compression failed, sending uncompressed: {:?}", e);
+                    (0x00, buf.clone())
+                }
+            };
             buf.clear();
 
-            let msg = MeshBbsMessage::new(0x01, 0x03, 0x00, payload);
+            let msg = MeshBbsMessage::new(0x01, 0x03, flags, payload);
             let mtu = transport_clone.get_mtu();
             match msg.to_fragments(mtu) {
                 Ok(fragments) => {
@@ -2015,7 +2052,12 @@ max_asset_broadcast_duty_cycle = 0.15
             hello_msg.expect("Should receive Hello screen after nickname registration");
         assert_eq!(hello_response.opcode, 0x03);
         // The payload should contain the user's nickname in the hello greeting
-        let payload_str = String::from_utf8_lossy(&hello_response.payload);
+        let uncompressed_payload = if (hello_response.flags & 0x02) != 0 {
+            meshansi::decompress_bytecode(&hello_response.payload).unwrap_or(hello_response.payload)
+        } else {
+            hello_response.payload
+        };
+        let payload_str = String::from_utf8_lossy(&uncompressed_payload);
         assert!(
             payload_str.contains("ReconnectTestUser"),
             "Hello screen should contain user nickname, got: {}",
@@ -2589,7 +2631,12 @@ max_asset_broadcast_duty_cycle = 0.15
 
         let resp = market_screen.expect("Should receive Marketplace screen");
         assert_eq!(resp.opcode, 0x03);
-        let screen_text = String::from_utf8_lossy(&resp.payload);
+        let uncompressed_payload = if (resp.flags & 0x02) != 0 {
+            meshansi::decompress_bytecode(&resp.payload).unwrap_or(resp.payload)
+        } else {
+            resp.payload
+        };
+        let screen_text = String::from_utf8_lossy(&uncompressed_payload);
         assert!(screen_text.contains("MARKETPLACE"), "Should contain MARKETPLACE header, got: {}", screen_text);
 
         let _ = server_handle.await;
