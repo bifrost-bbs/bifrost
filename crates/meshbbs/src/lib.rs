@@ -126,9 +126,15 @@ pub struct FormColorsConfig {
     pub submit_bg: u8,
 }
 
+fn default_log_level() -> String {
+    "info".to_string()
+}
+
 /// MeshBBS Server Configuration Loaded from config.toml
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct AppConfig {
+    #[serde(default = "default_log_level")]
+    pub log_level: String,
     pub rate_limiter: RateLimiterConfig,
     pub asset_broadcaster: AssetBroadcasterConfig,
     #[serde(default = "default_form_colors")]
@@ -166,6 +172,7 @@ struct AirtimeRegulator {
 /// Returns the default fallback configuration parameters.
 pub fn default_config() -> AppConfig {
     AppConfig {
+        log_level: "info".to_string(),
         rate_limiter: RateLimiterConfig {
             max_packets_per_minute: 45,
             max_burst_packets: 4,
@@ -1543,6 +1550,28 @@ max_asset_broadcast_duty_cycle = 0.15
 
         let config: AppConfig = toml::from_str(config_str).unwrap();
         assert!(config.admin_nodes.is_empty());
+        assert_eq!(config.log_level, "info");
+    }
+
+    #[test]
+    fn test_config_deserialization_with_log_level() {
+        let config_str = r#"
+log_level = "debug"
+
+[rate_limiter]
+max_packets_per_minute = 45
+max_burst_packets = 4
+inter_packet_guard_ms = 350
+max_duty_cycle_percent = 1.0
+duty_cycle_window_secs = 3600
+
+[asset_broadcaster]
+enable_on_demand_broadcast = true
+max_asset_broadcast_duty_cycle = 0.15
+        "#;
+
+        let config: AppConfig = toml::from_str(config_str).unwrap();
+        assert_eq!(config.log_level, "debug");
     }
 
     #[test]

@@ -71,8 +71,41 @@ impl Default for FormState {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize logger with warnings/errors only to avoid cluttering raw stdout
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
+    let mut cli_log_level: Option<String> = None;
+    let args: Vec<String> = std::env::args().collect();
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--log-level" | "-l" => {
+                if i + 1 < args.len() {
+                    cli_log_level = Some(args[i + 1].clone());
+                    i += 1;
+                }
+            }
+            "--debug" | "-v" | "--verbose" => {
+                cli_log_level = Some("debug".to_string());
+            }
+            "--trace" => {
+                cli_log_level = Some("trace".to_string());
+            }
+            "--help" | "-h" => {
+                println!("Usage: meshclient [OPTIONS]");
+                println!();
+                println!("Options:");
+                println!("  -l, --log-level <LEVEL>  Set log level (trace, debug, info, warn, error)");
+                println!("  -v, --debug, --verbose   Enable debug logging");
+                println!("      --trace              Enable trace logging");
+                println!("  -h, --help               Print help");
+                return Ok(());
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+
+    // Default to warn for client unless configured via CLI or RUST_LOG
+    let default_level = cli_log_level.unwrap_or_else(|| "warn".to_string());
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(default_level)).init();
 
     println!("Connecting to virtual radio transport at 127.0.0.1:8088...");
     // Create client transport connecting to port 8088
