@@ -10,12 +10,17 @@ function menu.on_start(session)
     term.move_to(2, 7)
     term.set_color(7, 0) -- White on Black
 
-    if not user then
+    if not user or not user.nickname then
+        local default_nick = "Operator"
+        if user and user.node_name then
+            default_nick = user.node_name
+        end
+
         -- Force register nickname on very first connection
         term.print("Welcome to Bifrost! Please set a nickname:\n\n")
         term.define_form(1)
         term.print("  Your Nickname: ")
-        term.add_input_field("nickname", 18, 9, 15, "Operator")
+        term.add_input_field("nickname", 18, 9, 15, default_nick)
         term.print("\n\n")
         term.add_submit_button("register", 2, 12)
         term.flush_form()
@@ -25,8 +30,10 @@ function menu.on_start(session)
                 menu.on_start(session)
                 return
             end
-            local nick = submission.nickname or "Operator"
-            db.set("users", user_id, { nickname = nick })
+            local nick = submission.nickname or default_nick
+            local updated_user = user or {}
+            updated_user.nickname = nick
+            db.set("users", user_id, updated_user)
             log.info("New user registered nickname: " .. nick)
             menu.on_start(session)
         end)

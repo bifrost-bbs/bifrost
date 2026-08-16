@@ -275,6 +275,122 @@ pub async fn broadcast_asset(
     Ok(())
 }
 
+/// Parses a MeshCore node advertisement payload.
+/// Supports both full MeshCore packet framing (PAYLOAD_TYPE_ADVERT = 0x04)
+/// and bare 100+ byte advertisement payloads.
+pub fn parse_meshcore_advert(
+    payload: &[u8],
+    src_node: [u8; 32],
+) -> Option<([u8; 32], serde_json::Map<String, serde_json::Value>)> {
+    let advert_slice: &[u8] = if !payload.is_empty() && ((payload[0] >> 2) & 0x0F) == 0x04 {
+        // Full MeshCore Packet header: 0bVVPPPPRR
+        let route_type = payload[0] & 0x03;
+        let mut offset = 1;
+        // Transport codes (4 bytes) if ROUTE_TYPE_TRANSPORT_FLOOD (0) or ROUTE_TYPE_TRANSPORT_DIRECT (3)
+        if route_type == 0 || route_type == 3 {
+            if payload.len() < offset + 4 {
+                return None;
+            }
+            offset += 4;
+        }
+        if payload.len() < offset + 1 {
+            return None;
+        }
+        let path_len = payload[offset] as usize;
+        offset += 1;
+        if payload.len() < offset + path_len {
+            return None;
+        }
+        offset += path_len;
+        if payload.len() < offset {
+            return None;
+        }
+        &payload[offset..]
+    } else if payload.len() >= 100 {
+        // Bare advert payload
+        payload
+    } else {
+        return None;
+    };
+
+    if advert_slice.len() < 100 {
+        return None;
+    }
+
+    let pubkey: [u8; 32] = advert_slice[0..32].try_into().ok()?;
+    let timestamp = u32::from_le_bytes(advert_slice[32..36].try_into().ok()?);
+    // signature is advert_slice[36..100] (64 bytes)
+
+    let mut metadata = serde_json::Map::new();
+    let pubkey_hex: String = pubkey.iter().map(|b| format!("{:02x}", b)).collect();
+    metadata.insert("public_key".to_string(), serde_json::json!(pubkey_hex));
+    metadata.insert("advert_timestamp".to_string(), serde_json::json!(timestamp));
+
+    if advert_slice.len() > 100 {
+        let flags = advert_slice[100];
+        let mut offset = 101;
+
+        // Node type from lower 4 bits (flags & 0x0F)
+        let node_type = match flags & 0x0F {
+            0x01 => "chat_node",
+            0x02 => "repeater",
+            0x03 => "room_server",
+            0x04 => "sensor",
+            _ => "unknown",
+        };
+        metadata.insert("node_type".to_string(), serde_json::json!(node_type));
+
+        // Location (flags & 0x10)
+        if (flags & 0x10) != 0 && advert_slice.len() >= offset + 8 {
+            let lat_int = i32::from_le_bytes([
+                advert_slice[offset],
+                advert_slice[offset + 1],
+                advert_slice[offset + 2],
+                advert_slice[offset + 3],
+            ]);
+            let lon_int = i32::from_le_bytes([
+                advert_slice[offset + 4],
+                advert_slice[offset + 5],
+                advert_slice[offset + 6],
+                advert_slice[offset + 7],
+            ]);
+            offset += 8;
+            let lat = lat_int as f64 / 1_000_000.0;
+            let lon = lon_int as f64 / 1_000_000.0;
+            metadata.insert("latitude".to_string(), serde_json::json!(lat));
+            metadata.insert("longitude".to_string(), serde_json::json!(lon));
+            metadata.insert(
+                "last_known_location".to_string(),
+                serde_json::json!(format!("{:.4}, {:.4}", lat, lon)),
+            );
+        }
+
+        // Feature 1 (flags & 0x20)
+        if (flags & 0x20) != 0 && advert_slice.len() >= offset + 2 {
+            let feat1 = u16::from_le_bytes([advert_slice[offset], advert_slice[offset + 1]]);
+            metadata.insert("feature1".to_string(), serde_json::json!(feat1));
+            offset += 2;
+        }
+
+        // Feature 2 (flags & 0x40)
+        if (flags & 0x40) != 0 && advert_slice.len() >= offset + 2 {
+            let feat2 = u16::from_le_bytes([advert_slice[offset], advert_slice[offset + 1]]);
+            metadata.insert("feature2".to_string(), serde_json::json!(feat2));
+            offset += 2;
+        }
+
+        // Node name (flags & 0x80)
+        if (flags & 0x80) != 0 && advert_slice.len() > offset {
+            if let Ok(name_str) = String::from_utf8(advert_slice[offset..].to_vec()) {
+                metadata.insert("node_name".to_string(), serde_json::json!(name_str));
+            }
+        }
+    }
+
+    let target_node = if pubkey != [0; 32] { pubkey } else { src_node };
+    Some((target_node, metadata))
+}
+
 struct Session {
     input_tx: mpsc::Sender<MeshBbsMessage>,
 }
@@ -331,22 +447,20 @@ pub async fn start_server_with_stats(
                         break;
                     }
                 }
-
-                let active = bbs_stats_clone.active_sessions();
-                let unique_24h = bbs_stats_clone.unique_users_24h();
-                let tx_total = ts_clone.total_packets_sent();
-                let rx_total = ts_clone.total_packets_received();
-                let tx_bytes = ts_clone.total_bytes_sent();
-                let rx_bytes = ts_clone.total_bytes_received();
-                let uptime = ts_clone.uptime_secs();
-                let (tx_ppm_1h, rx_ppm_1h) = ts_clone.packets_per_minute_last(3600);
-                let (tx_ppm_24h, rx_ppm_24h) = ts_clone.packets_per_minute_last(86400);
-
-                info!("=== BBS Stats (uptime {}s) ===", uptime);
-                info!("  Active sessions: {}  |  Unique users (24h): {}", active, unique_24h);
-                info!("  Packets TX: {} ({} bytes)  |  Packets RX: {} ({} bytes)", tx_total, tx_bytes, rx_total, rx_bytes);
-                info!("  Avg TX/min (1h): {:.1}  |  Avg RX/min (1h): {:.1}", tx_ppm_1h, rx_ppm_1h);
-                info!("  Avg TX/min (24h): {:.1}  |  Avg RX/min (24h): {:.1}", tx_ppm_24h, rx_ppm_24h);
+                let (send_ppm, recv_ppm) = ts_clone.packets_per_minute_last(3600);
+                let (send_ppm_24h, recv_ppm_24h) = ts_clone.packets_per_minute_last(86400);
+                info!(
+                    "[BBS STATS] Active Users 24h: {} | Current Sessions: {} | Pkts Sent: {} | Pkts Recv: {} | Avg PPM 1h: {:.1}/{:.1} | Avg PPM 24h: {:.1}/{:.1} | Uptime: {}s",
+                    bbs_stats_clone.unique_users_24h(),
+                    bbs_stats_clone.active_sessions(),
+                    ts_clone.total_packets_sent(),
+                    ts_clone.total_packets_received(),
+                    send_ppm,
+                    recv_ppm,
+                    send_ppm_24h,
+                    recv_ppm_24h,
+                    ts_clone.uptime_secs()
+                );
             }
         }))
     } else {
@@ -374,6 +488,33 @@ pub async fn start_server_with_stats(
             {
                 Ok(Ok(packet)) => {
                     let src = packet.src_node;
+
+                    // Intercept and parse MeshCore advert packets
+                    if let Some((target_node, metadata)) = parse_meshcore_advert(&packet.payload, src) {
+                        let mut store = db_store.lock().unwrap();
+                        let users_table = store.entry("users".to_string()).or_insert_with(HashMap::new);
+                        let node_hex: String = target_node.iter().map(|b| format!("{:02x}", b)).collect();
+
+                        let mut existing_user = if let Some(existing_json) = users_table.get(&node_hex) {
+                            serde_json::from_str::<serde_json::Value>(existing_json).unwrap_or(serde_json::json!({}))
+                        } else {
+                            serde_json::json!({})
+                        };
+
+                        if let Some(obj) = existing_user.as_object_mut() {
+                            for (k, v) in metadata {
+                                obj.insert(k, v);
+                            }
+                        }
+
+                        if let Ok(merged_json) = serde_json::to_string(&existing_user) {
+                            log::info!("Processed advert packet for node {}: {}", node_hex, merged_json);
+                            users_table.insert(node_hex, merged_json);
+                        }
+
+                        continue;
+                    }
+
                     match reassembler.process_packet(src, &packet.payload) {
                         Ok(Some(msg)) => {
                             if msg.opcode == 0x05 && msg.payload.len() >= 2 {
@@ -949,9 +1090,23 @@ fn run_session_task(
         lua.create_function(move |_, (): ()| Ok(node_hex_str_clone.clone()))?,
     )?;
 
+    let db_store_callsign = db_store.clone();
+    let node_hex_str_clone = node_hex_str.clone();
     session.set(
         "callsign",
-        lua.create_function(|_, (): ()| Ok("RadioOperator".to_string()))?,
+        lua.create_function(move |_, (): ()| {
+            let store = db_store_callsign.lock().unwrap();
+            if let Some(users_table) = store.get("users") {
+                if let Some(user_json) = users_table.get(&node_hex_str_clone) {
+                    if let Ok(user_obj) = serde_json::from_str::<serde_json::Value>(user_json) {
+                        if let Some(nickname) = user_obj.get("nickname").and_then(|v| v.as_str()) {
+                            return Ok(nickname.to_string());
+                        }
+                    }
+                }
+            }
+            Ok("RadioOperator".to_string())
+        })?,
     )?;
 
     let callback_store = Arc::new(StdMutex::new(None));
@@ -1592,6 +1747,84 @@ max_asset_broadcast_duty_cycle = 0.15
         let transport = Arc::new(MockSocketTransport::new(0.0, 10, 200));
         let result = start_server(config, transport, Some(1)).await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_advert_packet_processing() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let config = default_config();
+        let server_transport = Arc::new(MockSocketTransport::new_server("127.0.0.1:9097".to_string(), 0.0, 0, 200));
+
+        let server_handle = tokio::spawn(async move {
+            start_server(config, server_transport, Some(2)).await
+        });
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        let client_transport = MockSocketTransport::new_client("127.0.0.1:9097".to_string(), 0.0, 0, 200);
+
+        let client_key = [8u8; 32];
+
+        // Send advert packet
+        let mut advert_payload = Vec::new();
+        advert_payload.extend_from_slice(&client_key); // 32 bytes public key
+        advert_payload.extend_from_slice(&0u32.to_le_bytes()); // 4 bytes timestamp
+        advert_payload.extend_from_slice(&[0u8; 64]); // 64 bytes signature
+
+        let flags: u8 = 0x80 | 0x10; // has name | has location
+        advert_payload.push(flags);
+
+        let lat_int: i32 = 47606200; // Seattle lat
+        advert_payload.extend_from_slice(&lat_int.to_le_bytes());
+        let lon_int: i32 = -122332100; // Seattle lon
+        advert_payload.extend_from_slice(&lon_int.to_le_bytes());
+
+        let node_name = "AdvertUser";
+        advert_payload.extend_from_slice(node_name.as_bytes());
+
+        let advert_packet = RadioPacket {
+            is_broadcast: true,
+            src_node: client_key,
+            dst_node: [0; 32],
+            payload: advert_payload,
+            signal_rssi: -40,
+            signal_snr: 12,
+        };
+        client_transport.send_packet(advert_packet).await.unwrap();
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+        // Send handshake
+        let handshake_msg = MeshBbsMessage::new(0x03, 0x01, 0x00, Vec::new());
+        let handshake_payloads = handshake_msg.to_fragments(200).unwrap();
+        let handshake = RadioPacket {
+            is_broadcast: false,
+            src_node: client_key,
+            dst_node: [0; 32],
+            payload: handshake_payloads[0].clone(),
+            signal_rssi: -50,
+            signal_snr: 10,
+        };
+        client_transport.send_packet(handshake).await.unwrap();
+
+        let mut client_reassembler = MessageReassembler::new();
+        let mut assembled_msg = None;
+        let start_time = tokio::time::Instant::now();
+        while start_time.elapsed() < tokio::time::Duration::from_millis(1500) {
+            match tokio::time::timeout(tokio::time::Duration::from_millis(100), client_transport.receive_packet()).await {
+                Ok(Ok(packet)) => {
+                    if let Some(msg) = client_reassembler.process_packet([0; 32], &packet.payload).unwrap() {
+                        assembled_msg = Some(msg);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        assert!(assembled_msg.is_some(), "Should receive welcome screen");
+
+        // Wait for server to shutdown
+        let _ = server_handle.await;
     }
 
     #[tokio::test]
@@ -2272,6 +2505,86 @@ max_asset_broadcast_duty_cycle = 0.15
         assert!(screen_text.contains("MARKETPLACE"), "Should contain MARKETPLACE header, got: {}", screen_text);
 
         let _ = server_handle.await;
+    }
+
+    #[test]
+    fn test_parse_meshcore_advert_full_packet_framing() {
+        let node_key = [0x42u8; 32];
+        let mut packet_bytes = Vec::new();
+
+        // 1. Packet Header: Version=0, PayloadType=0x04 (ADVERT), RouteType=0x01 (FLOOD) -> 0b00010001 = 0x11
+        packet_bytes.push(0x11);
+        // 2. Path length: 2 hops
+        packet_bytes.push(2);
+        // 3. Path bytes
+        packet_bytes.push(0xAA);
+        packet_bytes.push(0xBB);
+
+        // 4. Advert payload:
+        // Pubkey (32B)
+        packet_bytes.extend_from_slice(&node_key);
+        // Timestamp (4B LE)
+        packet_bytes.extend_from_slice(&1700000000u32.to_le_bytes());
+        // Signature (64B)
+        packet_bytes.extend_from_slice(&[0x77u8; 64]);
+
+        // Appdata:
+        // Flags: 0x80 (name) | 0x40 (feature2) | 0x20 (feature1) | 0x10 (location) | 0x01 (chat node) = 0xF1
+        packet_bytes.push(0xF1);
+        // Lat: 37.7749 * 1_000_000 = 37774900
+        packet_bytes.extend_from_slice(&37774900i32.to_le_bytes());
+        // Lon: -122.4194 * 1_000_000 = -122419400
+        packet_bytes.extend_from_slice(&(-122419400i32).to_le_bytes());
+        // Feature1: 100
+        packet_bytes.extend_from_slice(&100u16.to_le_bytes());
+        // Feature2: 200
+        packet_bytes.extend_from_slice(&200u16.to_le_bytes());
+        // Node name
+        packet_bytes.extend_from_slice(b"MeshGateway-Alpha");
+
+        let (parsed_node, metadata) = parse_meshcore_advert(&packet_bytes, [0; 32]).expect("Should parse valid framed advert");
+        assert_eq!(parsed_node, node_key);
+        assert_eq!(metadata.get("node_name").and_then(|v| v.as_str()), Some("MeshGateway-Alpha"));
+        assert_eq!(metadata.get("node_type").and_then(|v| v.as_str()), Some("chat_node"));
+        assert_eq!(metadata.get("feature1").and_then(|v| v.as_u64()), Some(100));
+        assert_eq!(metadata.get("feature2").and_then(|v| v.as_u64()), Some(200));
+        assert_eq!(metadata.get("advert_timestamp").and_then(|v| v.as_u64()), Some(1700000000));
+        let lat = metadata.get("latitude").and_then(|v| v.as_f64()).unwrap();
+        assert!((lat - 37.7749).abs() < 0.0001);
+    }
+
+    #[test]
+    fn test_parse_meshcore_advert_transport_direct() {
+        let node_key = [0x55u8; 32];
+        let mut packet_bytes = Vec::new();
+
+        // Packet Header: Version=0, PayloadType=0x04, RouteType=0x03 (TRANSPORT_DIRECT) -> 0b00010011 = 0x13
+        packet_bytes.push(0x13);
+        // Transport codes (4 bytes)
+        packet_bytes.extend_from_slice(&[0x12, 0x34, 0x56, 0x78]);
+        // Path length: 0
+        packet_bytes.push(0);
+
+        // Advert payload:
+        packet_bytes.extend_from_slice(&node_key);
+        packet_bytes.extend_from_slice(&12345u32.to_le_bytes());
+        packet_bytes.extend_from_slice(&[0u8; 64]);
+
+        // Flags: 0x82 (is repeater + has name)
+        packet_bytes.push(0x82);
+        packet_bytes.extend_from_slice(b"HilltopRepeater");
+
+        let (parsed_node, metadata) = parse_meshcore_advert(&packet_bytes, [0; 32]).expect("Should parse transport direct advert");
+        assert_eq!(parsed_node, node_key);
+        assert_eq!(metadata.get("node_name").and_then(|v| v.as_str()), Some("HilltopRepeater"));
+        assert_eq!(metadata.get("node_type").and_then(|v| v.as_str()), Some("repeater"));
+    }
+
+    #[test]
+    fn test_parse_meshcore_advert_malformed() {
+        assert!(parse_meshcore_advert(&[], [0; 32]).is_none());
+        assert!(parse_meshcore_advert(&[0x11, 0x00], [0; 32]).is_none());
+        assert!(parse_meshcore_advert(&[0u8; 50], [0; 32]).is_none());
     }
 }
 
