@@ -29,3 +29,5 @@ database.db-journal
 
 # Lua cache / compiled files
 *.luac
+**/.client_cache/
+
