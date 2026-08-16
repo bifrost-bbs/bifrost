@@ -13,7 +13,7 @@ use std::time::Instant;
 use tokio::sync::mpsc;
 
 // Pull from sibling workspace crates
-use meshcore_transport::{
+use bifrost_transport::{
     MeshBbsMessage, MessageReassembler, MockSocketTransport, RadioPacket, RadioTransport,
     TransportStats,
 };
@@ -266,7 +266,7 @@ pub async fn broadcast_asset(
     if let Some((name, rel_path)) = manifest_map.get(&asset_id) {
         let full_path = find_workspace_path(rel_path);
         if let Ok(content_bytes) = std::fs::read(&full_path) {
-            let master_crc = meshcore_transport::crc32(&content_bytes);
+            let master_crc = bifrost_transport::crc32(&content_bytes);
             let mtu = transport.get_mtu();
             let chunk_capacity = if mtu > 16 { mtu - 12 } else { 32 };
             let total_chunks = ((content_bytes.len() + chunk_capacity - 1) / chunk_capacity) as u8;
@@ -646,7 +646,7 @@ pub async fn start_server_with_stats(
                         }
                     }
                 }
-                Ok(Err(meshcore_transport::TransportError::ConnectionClosed)) => {
+                Ok(Err(bifrost_transport::TransportError::ConnectionClosed)) => {
                     info!("Transport connection closed.");
                     break;
                 }
@@ -816,7 +816,7 @@ fn run_session_task(
             if !buf.is_empty() {
                 buf.push(0x04); // EndOfFrame
                 let raw_len = buf.len();
-                let (flags, payload) = match meshansi::compress_bytecode(&buf) {
+                let (flags, payload) = match bifrost_ansi::compress_bytecode(&buf) {
                     Ok(comp) => {
                         let comp_len = comp.len();
                         bbs_stats_flush.record_compression(raw_len, comp_len);
@@ -986,7 +986,7 @@ fn run_session_task(
             buf.push(0xD3); // OP_FORM_END
             buf.push(0x04); // EndOfFrame
             let raw_len = buf.len();
-            let (flags, payload) = match meshansi::compress_bytecode(&buf) {
+            let (flags, payload) = match bifrost_ansi::compress_bytecode(&buf) {
                 Ok(comp) => {
                     let comp_len = comp.len();
                     bbs_stats_form.record_compression(raw_len, comp_len);
@@ -1345,7 +1345,11 @@ fn find_workspace_path(relative_path: &str) -> PathBuf {
         return path;
     }
     if let Ok(current) = std::env::current_dir() {
-        if current.ends_with("crates/meshbbs") || current.ends_with("meshbbs") {
+        if current.ends_with("crates/bifrost-bbs")
+            || current.ends_with("bifrost-bbs")
+            || current.ends_with("crates/meshbbs")
+            || current.ends_with("meshbbs")
+        {
             if let Some(parent) = current.parent() {
                 if let Some(workspace_root) = parent.parent() {
                     let parent_path = workspace_root.join(relative_path);
@@ -2053,7 +2057,7 @@ max_asset_broadcast_duty_cycle = 0.15
         assert_eq!(hello_response.opcode, 0x03);
         // The payload should contain the user's nickname in the hello greeting
         let uncompressed_payload = if (hello_response.flags & 0x02) != 0 {
-            meshansi::decompress_bytecode(&hello_response.payload).unwrap_or(hello_response.payload)
+            bifrost_ansi::decompress_bytecode(&hello_response.payload).unwrap_or(hello_response.payload)
         } else {
             hello_response.payload
         };
@@ -2191,7 +2195,7 @@ max_asset_broadcast_duty_cycle = 0.15
         }
 
         assert_eq!(
-            meshcore_transport::crc32(&assembled_bytes),
+            bifrost_transport::crc32(&assembled_bytes),
             expected_crc32,
             "CRC32 mismatch on assembled broadcast asset"
         );
@@ -2632,7 +2636,7 @@ max_asset_broadcast_duty_cycle = 0.15
         let resp = market_screen.expect("Should receive Marketplace screen");
         assert_eq!(resp.opcode, 0x03);
         let uncompressed_payload = if (resp.flags & 0x02) != 0 {
-            meshansi::decompress_bytecode(&resp.payload).unwrap_or(resp.payload)
+            bifrost_ansi::decompress_bytecode(&resp.payload).unwrap_or(resp.payload)
         } else {
             resp.payload
         };

@@ -2,7 +2,7 @@
 //! Handles converting ANSI sequences into 1-byte opcodes, differential drawing,
 //! and Heatshrink LZSS compression.
 
-use mesh_compression::{Heatshrink, HeatshrinkError};
+use bifrost_compression::{Heatshrink, HeatshrinkError};
 use thiserror::Error;
 
 #[derive(Debug, Error)]

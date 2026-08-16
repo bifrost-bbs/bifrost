@@ -1,11 +1,12 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/meshansi",
-    "crates/meshcore-transport",
-    "crates/meshbbs",
-    "crates/meshclient"
-, "crates/mesh-compression"]
+    "crates/bifrost-compression",
+    "crates/bifrost-ansi",
+    "crates/bifrost-transport",
+    "crates/bifrost-bbs",
+    "crates/bifrost-client",
+]
 
 [workspace.dependencies]
 tokio = { version = "1.35", features = ["full"] }

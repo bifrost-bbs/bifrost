@@ -1,15 +1,15 @@
 [package]
-name = "meshansi"
+name = "bifrost-ansi"
 version = "0.1.0"
 edition = "2021"
 authors = ["Bifrost Contributors"]
-description = "MeshANSI Bytecode compiler, ANSI tokenization, and Heatshrink LZSS compression/decompression"
+description = "Bifrost ANSI Bytecode compiler, ANSI tokenization, and Heatshrink LZSS compression/decompression"
 
 [dependencies]
 thiserror.workspace = true
 serde.workspace = true
 log.workspace = true
-mesh-compression = { version = "0.1.0", path = "../mesh-compression" }
+bifrost-compression = { version = "0.1.0", path = "../bifrost-compression" }
 
 # heatshrink bindings will go here (or simple pure Rust implementation or dependencies)
 # heatshrink = { version = "..." }

@@ -36,13 +36,19 @@ The project is structured as a Rust Cargo Workspace:
 ├── assets/                          # Static UI screens and assets
 │   └── manifest.toml                # Asset manifest tracking AssetIDs
 └── crates/
-    ├── meshansi/                    # Bytecode encoding, decoding, compression
+    ├── bifrost-compression/        # Heatshrink LZSS algorithm implementation
     │   ├── Cargo.toml
     │   └── src/
-    ├── meshcore-transport/          # Network framing, traits, and mock harness
+    ├── bifrost-ansi/               # Bytecode encoding, decoding, compression
     │   ├── Cargo.toml
     │   └── src/
-    └── meshbbs/                     # Main server host engine (tokio, mlua, sled)
+    ├── bifrost-transport/          # Network framing, traits, and mock harness
+    │   ├── Cargo.toml
+    │   └── src/
+    ├── bifrost-bbs/                # Main server host engine (tokio, mlua, sled)
+    │   ├── Cargo.toml
+    │   └── src/
+    └── bifrost-client/             # Interactive client terminal emulator
         ├── Cargo.toml
         └── src/
 ```
@@ -55,7 +61,7 @@ The project is structured as a Rust Cargo Workspace:
 *   **Rust Edition:** 2021.
 *   **Asynchronous Runtime:** `tokio` (multi-threaded, high-concurrency).
 *   **Safety:** Zero `unsafe` code allowed unless explicitly justified for low-level serial device access.
-*   **Error Handling:** Use `thiserror` for library crates (`meshansi`, `meshcore-transport`) and `anyhow` for the application runner (`meshbbs`).
+*   **Error Handling:** Use `thiserror` for library crates (`bifrost-ansi`, `bifrost-transport`, `bifrost-compression`) and `anyhow` for the application runner (`bifrost-bbs`, `bifrost-client`).
 *   **Data Serialization:** Use `serde` for file/packet serialization where JSON or binary format is needed.
 
 ### 3.2 Lua (Application Framework)

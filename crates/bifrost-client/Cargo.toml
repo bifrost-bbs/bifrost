@@ -1,13 +1,13 @@
 [package]
-name = "meshclient"
+name = "bifrost-client"
 version = "0.1.0"
 edition = "2021"
 authors = ["Bifrost Contributors"]
-description = "Interactive client terminal emulator for MeshBBS testing over mock radio socket"
+description = "Interactive client terminal emulator for Bifrost testing over mock radio socket"
 
 [dependencies]
-meshansi = { path = "../meshansi" }
-meshcore-transport = { path = "../meshcore-transport" }
+bifrost-ansi = { path = "../bifrost-ansi" }
+bifrost-transport = { path = "../bifrost-transport" }
 
 tokio.workspace = true
 serde.workspace = true

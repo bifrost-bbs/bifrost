@@ -11,7 +11,7 @@ use std::io::{self, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use meshcore_transport::{
+use bifrost_transport::{
     MeshBbsMessage, MessageReassembler, MockSocketTransport, RadioPacket, RadioTransport,
 };
 
@@ -89,7 +89,7 @@ async fn main() -> Result<()> {
                 cli_log_level = Some("trace".to_string());
             }
             "--help" | "-h" => {
-                println!("Usage: meshclient [OPTIONS]");
+                println!("Usage: bifrost-client [OPTIONS]");
                 println!();
                 println!("Options:");
                 println!("  -l, --log-level <LEVEL>  Set log level (trace, debug, info, warn, error)");
@@ -494,7 +494,7 @@ async fn main() -> Result<()> {
                                     assembled.extend_from_slice(c);
                                 }
                             }
-                            if meshcore_transport::crc32(&assembled) == master_crc {
+                            if bifrost_transport::crc32(&assembled) == master_crc {
                                 log::info!(
                                     "Promiscuous cache assembled asset 0x{:04X} ({} bytes)",
                                     asset_id,
@@ -513,7 +513,7 @@ async fn main() -> Result<()> {
                 match reassembler.process_packet([0; 32], &packet.payload) {
                     Ok(Some(msg)) => {
                         let payload = if (msg.flags & 0x02) != 0 {
-                            match meshansi::decompress_bytecode(&msg.payload) {
+                            match bifrost_ansi::decompress_bytecode(&msg.payload) {
                                 Ok(decomp) => {
                                     transport.stats.record_decompression(msg.payload.len(), decomp.len());
                                     decomp
@@ -560,7 +560,7 @@ async fn main() -> Result<()> {
                     }
                 }
             }
-            Ok(Err(meshcore_transport::TransportError::ConnectionClosed)) => {
+            Ok(Err(bifrost_transport::TransportError::ConnectionClosed)) => {
                 break;
             }
             Ok(Err(_)) => {}
@@ -1029,7 +1029,11 @@ fn find_workspace_path(relative_path: &str) -> std::path::PathBuf {
         return path;
     }
     if let Ok(current) = std::env::current_dir() {
-        if current.ends_with("crates/meshclient")
+        if current.ends_with("crates/bifrost-client")
+            || current.ends_with("bifrost-client")
+            || current.ends_with("crates/bifrost-bbs")
+            || current.ends_with("bifrost-bbs")
+            || current.ends_with("crates/meshclient")
             || current.ends_with("meshclient")
             || current.ends_with("crates/meshbbs")
             || current.ends_with("meshbbs")

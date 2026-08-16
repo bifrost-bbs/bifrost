@@ -1,13 +1,13 @@
 [package]
-name = "meshbbs"
+name = "bifrost-bbs"
 version = "0.1.0"
 edition = "2021"
 authors = ["Bifrost Contributors"]
-description = "Bifrost MeshBBS Host server daemon kernel, scheduler, and Lua sandbox interpreter"
+description = "Bifrost BBS Host server daemon kernel, scheduler, and Lua sandbox interpreter"
 
 [dependencies]
-meshansi = { path = "../meshansi" }
-meshcore-transport = { path = "../meshcore-transport" }
+bifrost-ansi = { path = "../bifrost-ansi" }
+bifrost-transport = { path = "../bifrost-transport" }
 
 tokio.workspace = true
 serde.workspace = true

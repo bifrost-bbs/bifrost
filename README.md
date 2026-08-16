@@ -33,10 +33,11 @@ The project is managed as a Rust Cargo Workspace:
 ├── assets/                          # Shared visual assets
 │   └── manifest.toml                # Asset registry
 └── crates/
-    ├── meshansi/                    # Bytecode encoding, decoding, and compression
-    ├── meshcore-transport/          # Packet framing, serialization, and mock sockets
-    └── meshbbs/                     # Main host server daemon (kernel, scheduler, Lua runner)
-```
+    ├── bifrost-compression/        # Heatshrink LZSS algorithm implementation
+    ├── bifrost-ansi/               # Bytecode encoding, decoding, and compression
+    ├── bifrost-transport/          # Packet framing, serialization, and mock sockets
+    ├── bifrost-bbs/                # Main host server daemon (kernel, scheduler, Lua runner)
+    └── bifrost-client/             # Interactive client terminal emulator
 
 ---
 
@@ -80,7 +81,12 @@ cargo llvm-cov --html
 
 To launch the BBS server daemon using the simulated TCP socket transport for development:
 ```bash
-cargo run --bin meshbbs -- --config config.toml --mock
+cargo run --bin bifrost-bbs -- --config config.toml --mock
+```
+
+To launch the interactive client emulator:
+```bash
+cargo run --bin bifrost-client
 ```
 
 ---

@@ -35,6 +35,69 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
+name = "bifrost-ansi"
+version = "0.1.0"
+dependencies = [
+ "bifrost-compression",
+ "log",
+ "serde",
+ "thiserror",
+]
+
+[[package]]
+name = "bifrost-bbs"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bifrost-ansi",
+ "bifrost-transport",
+ "env_logger",
+ "log",
+ "mlua",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "toml",
+]
+
+[[package]]
+name = "bifrost-client"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bifrost-ansi",
+ "bifrost-transport",
+ "crossterm",
+ "env_logger",
+ "log",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "bifrost-compression"
+version = "0.1.0"
+dependencies = [
+ "heatshrink",
+ "log",
+ "thiserror",
+]
+
+[[package]]
+name = "bifrost-transport"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "log",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "bitflags"
 version = "2.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -257,69 +320,6 @@ name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
-
-[[package]]
-name = "mesh-compression"
-version = "0.1.0"
-dependencies = [
- "heatshrink",
- "log",
- "thiserror",
-]
-
-[[package]]
-name = "meshansi"
-version = "0.1.0"
-dependencies = [
- "log",
- "mesh-compression",
- "serde",
- "thiserror",
-]
-
-[[package]]
-name = "meshbbs"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "env_logger",
- "log",
- "meshansi",
- "meshcore-transport",
- "mlua",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
- "toml",
-]
-
-[[package]]
-name = "meshclient"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "crossterm",
- "env_logger",
- "log",
- "meshansi",
- "meshcore-transport",
- "serde",
- "serde_json",
- "tokio",
-]
-
-[[package]]
-name = "meshcore-transport"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "log",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
-]
 
 [[package]]
 name = "mio"

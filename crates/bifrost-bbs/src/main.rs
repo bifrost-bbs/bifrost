@@ -1,4 +1,4 @@
-//! MeshBBS Host binary entry point.
+//! Bifrost BBS Host binary entry point.
 
 use anyhow::Result;
 use std::path::PathBuf;
@@ -31,7 +31,7 @@ async fn main() -> Result<()> {
                 cli_log_level = Some("trace".to_string());
             }
             "--help" | "-h" => {
-                println!("Usage: meshbbs [OPTIONS]");
+                println!("Usage: bifrost-bbs [OPTIONS]");
                 println!();
                 println!("Options:");
                 println!("  -c, --config <PATH>      Path to config file [default: config.toml]");
@@ -58,7 +58,7 @@ async fn main() -> Result<()> {
         "".to_string()
     } else if config_path.exists() {
         if let Ok(contents) = std::fs::read_to_string(&config_path) {
-            if let Ok(cfg) = toml::from_str::<meshbbs::AppConfig>(&contents) {
+            if let Ok(cfg) = toml::from_str::<bifrost_bbs::AppConfig>(&contents) {
                 cfg.log_level
             } else {
                 "info".to_string()
@@ -77,5 +77,5 @@ async fn main() -> Result<()> {
     }
 
     // Delegate to the core runner
-    meshbbs::run_bbs(Some(config_path), None).await
+    bifrost_bbs::run_bbs(Some(config_path), None).await
 }
