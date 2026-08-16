@@ -2,6 +2,7 @@
 //! Handles converting ANSI sequences into 1-byte opcodes, differential drawing,
 //! and Heatshrink LZSS compression.
 
+use mesh_compression::{Heatshrink, HeatshrinkError};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -14,6 +15,19 @@ pub enum MeshAnsiError {
     DecompressionError(String),
     #[error("IO error: {0}")]
     Io(String),
+}
+
+impl From<HeatshrinkError> for MeshAnsiError {
+    fn from(err: HeatshrinkError) -> Self {
+        match err {
+            HeatshrinkError::CompressionOutputFull | HeatshrinkError::InvalidParameters(_) => {
+                MeshAnsiError::CompressionError(err.to_string())
+            }
+            HeatshrinkError::DecompressionOutputFull => {
+                MeshAnsiError::DecompressionError(err.to_string())
+            }
+        }
+    }
 }
 
 /// MeshANSI Bytecode Opcode definitions.
@@ -64,7 +78,7 @@ pub fn compile_ansi(raw_ansi: &str) -> Result<Vec<u8>, MeshAnsiError> {
     bytecode.push(Opcode::ClearScreen as u8);
     // Add raw character literals
     for byte in raw_ansi.bytes() {
-        if byte.is_ascii() && byte >= 0x20 && byte <= 0x7E {
+        if byte.is_ascii() && (0x20..=0x7E).contains(&byte) {
             bytecode.push(byte);
         } else {
             // Escape code handling stub
@@ -76,15 +90,14 @@ pub fn compile_ansi(raw_ansi: &str) -> Result<Vec<u8>, MeshAnsiError> {
 
 /// Compresses bytecode using Heatshrink LZSS algorithm (W=8, L=4).
 pub fn compress_bytecode(bytecode: &[u8]) -> Result<Vec<u8>, MeshAnsiError> {
-    // Stub compression logic
-    // Heatshrink configuration: window_bits = 8, lookahead_bits = 4
-    Ok(bytecode.to_vec()) // Stub: returning uncompressed copy for setup
+    let hs = Heatshrink::new(8, 4)?;
+    Ok(hs.compress(bytecode)?)
 }
 
 /// Decompresses Heatshrink compressed bytecode.
 pub fn decompress_bytecode(compressed: &[u8]) -> Result<Vec<u8>, MeshAnsiError> {
-    // Stub decompression logic
-    Ok(compressed.to_vec()) // Stub: returning uncompressed copy for setup
+    let hs = Heatshrink::new(8, 4)?;
+    Ok(hs.decompress(compressed)?)
 }
 
 #[cfg(test)]

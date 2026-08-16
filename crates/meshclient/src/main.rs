@@ -62,7 +62,7 @@ impl Default for FormState {
             fields: Vec::new(),
             active_idx: 0,
             field_fg: 15,
-            field_bg: 1,
+            field_bg: 4,
             submit_fg: 0,
             submit_bg: 7,
         }
@@ -71,8 +71,41 @@ impl Default for FormState {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize logger with warnings/errors only to avoid cluttering raw stdout
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
+    let mut cli_log_level: Option<String> = None;
+    let args: Vec<String> = std::env::args().collect();
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--log-level" | "-l" => {
+                if i + 1 < args.len() {
+                    cli_log_level = Some(args[i + 1].clone());
+                    i += 1;
+                }
+            }
+            "--debug" | "-v" | "--verbose" => {
+                cli_log_level = Some("debug".to_string());
+            }
+            "--trace" => {
+                cli_log_level = Some("trace".to_string());
+            }
+            "--help" | "-h" => {
+                println!("Usage: meshclient [OPTIONS]");
+                println!();
+                println!("Options:");
+                println!("  -l, --log-level <LEVEL>  Set log level (trace, debug, info, warn, error)");
+                println!("  -v, --debug, --verbose   Enable debug logging");
+                println!("      --trace              Enable trace logging");
+                println!("  -h, --help               Print help");
+                return Ok(());
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+
+    // Default to warn for client unless configured via CLI or RUST_LOG
+    let default_level = cli_log_level.unwrap_or_else(|| "warn".to_string());
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(default_level)).init();
 
     println!("Connecting to virtual radio transport at 127.0.0.1:8088...");
     // Create client transport connecting to port 8088
@@ -479,21 +512,36 @@ async fn main() -> Result<()> {
 
                 match reassembler.process_packet([0; 32], &packet.payload) {
                     Ok(Some(msg)) => {
-                        append_to_history(&mut bytecode_history, &msg.payload);
+                        let payload = if (msg.flags & 0x02) != 0 {
+                            match meshansi::decompress_bytecode(&msg.payload) {
+                                Ok(decomp) => {
+                                    transport.stats.record_decompression(msg.payload.len(), decomp.len());
+                                    decomp
+                                }
+                                Err(e) => {
+                                    log::error!("Failed to decompress bytecode: {:?}", e);
+                                    msg.payload
+                                }
+                            }
+                        } else {
+                            msg.payload
+                        };
+
+                        append_to_history(&mut bytecode_history, &payload);
 
                         let (term_w, term_h) = crossterm::terminal::size().unwrap_or((80, 25));
                         let layout_val = *layout.lock().unwrap();
                         let (col_offset, row_offset, w, h) =
                             get_viewport_offsets(layout_val, term_w, term_h);
 
-                        if msg.payload.first() == Some(&0x01) {
+                        if payload.first() == Some(&0x01) {
                             print!("\x1b[2J\x1b[H");
                             draw_viewport_border(col_offset, row_offset, w, h);
                         }
 
                         let mut form_lock = form_state.lock().unwrap();
                         interpret_bytecode(
-                            &msg.payload,
+                            &payload,
                             &mut form_lock,
                             layout_val,
                             col_offset,
