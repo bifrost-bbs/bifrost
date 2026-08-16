@@ -9,7 +9,7 @@ function admin.on_start(session)
     end
 
     term.clear()
-    term.set_color(12, 0) -- Light Red on Black
+    term.set_color(9, 0) -- Bright Red on Black
     term.print("=== ADMIN PANEL ===\n\n")
     term.set_color(7, 0)
 

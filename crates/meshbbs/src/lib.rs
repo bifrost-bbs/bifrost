@@ -112,7 +112,7 @@ impl BbsStats {
 fn default_form_colors() -> FormColorsConfig {
     FormColorsConfig {
         field_fg: 15,
-        field_bg: 1,
+        field_bg: 4,
         submit_fg: 0,
         submit_bg: 7,
     }
@@ -186,7 +186,7 @@ pub fn default_config() -> AppConfig {
         },
         form_colors: FormColorsConfig {
             field_fg: 15,
-            field_bg: 1,
+            field_bg: 4,
             submit_fg: 0,
             submit_bg: 7,
         },
@@ -1643,7 +1643,7 @@ submit_bg = 5
     fn test_default_form_colors() {
         let fc = default_form_colors();
         assert_eq!(fc.field_fg, 15);
-        assert_eq!(fc.field_bg, 1);
+        assert_eq!(fc.field_bg, 4);
         assert_eq!(fc.submit_fg, 0);
         assert_eq!(fc.submit_bg, 7);
     }
@@ -1653,7 +1653,7 @@ submit_bg = 5
         let config = default_config();
         assert!(config.admin_nodes.is_empty());
         assert_eq!(config.form_colors.field_fg, 15);
-        assert_eq!(config.form_colors.field_bg, 1);
+        assert_eq!(config.form_colors.field_bg, 4);
     }
 
     #[test]

@@ -62,7 +62,7 @@ impl Default for FormState {
             fields: Vec::new(),
             active_idx: 0,
             field_fg: 15,
-            field_bg: 1,
+            field_bg: 4,
             submit_fg: 0,
             submit_bg: 7,
         }

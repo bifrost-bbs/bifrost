@@ -30,11 +30,11 @@ enable_on_demand_broadcast = true
 max_asset_broadcast_duty_cycle = 0.15
 
 [form_colors]
-# Default styling attributes for interactive forms
-field_fg = 15      # White
-field_bg = 1       # Blue
+# Default styling attributes for interactive forms (Standard ANSI 0-15 color codes)
+field_fg = 15      # Bright White
+field_bg = 4       # Blue
 submit_fg = 0      # Black
-submit_bg = 7      # Light Gray
+submit_bg = 7      # White / Light Gray
 
 # List of node hex IDs (32 bytes = 64 hex characters) that should always have admin privileges
 admin_nodes = [
