@@ -1,8 +1,9 @@
 [package]
 name = "mesh-compression"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 
 [dependencies]
 heatshrink = "0.2.0"
 thiserror.workspace = true
+

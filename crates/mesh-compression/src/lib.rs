@@ -18,6 +18,12 @@ pub struct Heatshrink {
 
 impl Heatshrink {
     pub fn new(window_sz2: u8, lookahead_sz2: u8) -> Result<Self, HeatshrinkError> {
+        if !(4..=14).contains(&window_sz2) {
+            return Err(HeatshrinkError::InvalidParameters("window size must be between 4 and 14"));
+        }
+        if lookahead_sz2 < 3 || lookahead_sz2 > window_sz2 {
+            return Err(HeatshrinkError::InvalidParameters("lookahead size must be between 3 and window size"));
+        }
         let config = Config::new(window_sz2, lookahead_sz2)
             .map_err(HeatshrinkError::InvalidParameters)?;
         Ok(Self { config })
@@ -42,3 +48,60 @@ impl Heatshrink {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_heatshrink_compress_decompress_roundtrip() {
+        let hs = Heatshrink::new(8, 4).expect("Config 8, 4 should be valid");
+        let original = b"The quick brown fox jumps over the lazy dog. The quick brown fox jumps again!";
+        let compressed = hs.compress(original).expect("Compression should succeed");
+        let decompressed = hs.decompress(&compressed).expect("Decompression should succeed");
+        assert_eq!(original.to_vec(), decompressed);
+    }
+
+    #[test]
+    fn test_heatshrink_repetitive_data_compression() {
+        let hs = Heatshrink::new(8, 4).unwrap();
+        let original = vec![0xAB; 256];
+        let compressed = hs.compress(&original).unwrap();
+        assert!(compressed.len() < original.len(), "Repetitive data should compress significantly");
+        let decompressed = hs.decompress(&compressed).unwrap();
+        assert_eq!(original, decompressed);
+    }
+
+    #[test]
+    fn test_heatshrink_empty_data() {
+        let hs = Heatshrink::new(8, 4).unwrap();
+        let original = b"";
+        let compressed = hs.compress(original).unwrap();
+        let decompressed = hs.decompress(&compressed).unwrap();
+        assert_eq!(original.to_vec(), decompressed);
+    }
+
+    #[test]
+    fn test_heatshrink_invalid_parameters() {
+        // lookahead > window or window out of range
+        let hs_err = Heatshrink::new(4, 5);
+        assert!(hs_err.is_err(), "lookahead > window should fail");
+    }
+
+    #[test]
+    fn test_heatshrink_error_display() {
+        assert_eq!(
+            HeatshrinkError::CompressionOutputFull.to_string(),
+            "Output buffer full during compression"
+        );
+        assert_eq!(
+            HeatshrinkError::DecompressionOutputFull.to_string(),
+            "Output buffer full during decompression"
+        );
+        assert_eq!(
+            HeatshrinkError::InvalidParameters("bad window").to_string(),
+            "Invalid parameters: bad window"
+        );
+    }
+}
+

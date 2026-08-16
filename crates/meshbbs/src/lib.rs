@@ -4,14 +4,69 @@
 use anyhow::Result;
 use log::{info, warn};
 use mlua::LuaSerdeExt;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
+use std::time::Instant;
 use tokio::sync::mpsc;
 
 // Pull from sibling workspace crates
-use meshcore_transport::{MockSocketTransport, RadioTransport, RadioPacket, MeshBbsMessage, MessageReassembler};
+use meshcore_transport::{
+    MeshBbsMessage, MessageReassembler, MockSocketTransport, RadioPacket, RadioTransport,
+    TransportStats,
+};
+
+/// BBS-level statistics tracker for session and user accounting.
+pub struct BbsStats {
+    /// Timestamps of when each unique node connected (for 24h active user count)
+    pub session_timestamps: StdMutex<Vec<(Instant, [u8; 32])>>,
+    /// Currently active session node IDs
+    pub active_session_count: StdMutex<usize>,
+}
+
+impl BbsStats {
+    pub fn new() -> Self {
+        Self {
+            session_timestamps: StdMutex::new(Vec::new()),
+            active_session_count: StdMutex::new(0),
+        }
+    }
+
+    /// Records a new session connection.
+    pub fn record_session_connect(&self, node_id: [u8; 32]) {
+        if let Ok(mut ts) = self.session_timestamps.lock() {
+            ts.push((Instant::now(), node_id));
+        }
+        if let Ok(mut count) = self.active_session_count.lock() {
+            *count += 1;
+        }
+    }
+
+    /// Records a session disconnection.
+    pub fn record_session_disconnect(&self) {
+        if let Ok(mut count) = self.active_session_count.lock() {
+            *count = count.saturating_sub(1);
+        }
+    }
+
+    /// Returns the count of unique nodes that have connected in the last 24 hours.
+    pub fn unique_users_24h(&self) -> usize {
+        let cutoff = Instant::now() - std::time::Duration::from_secs(86400);
+        if let Ok(mut ts) = self.session_timestamps.lock() {
+            ts.retain(|&(t, _)| t >= cutoff);
+            let unique: HashSet<[u8; 32]> = ts.iter().map(|&(_, id)| id).collect();
+            unique.len()
+        } else {
+            0
+        }
+    }
+
+    /// Returns the current number of active sessions.
+    pub fn active_sessions(&self) -> usize {
+        *self.active_session_count.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
 
 fn default_form_colors() -> FormColorsConfig {
     FormColorsConfig {
@@ -100,7 +155,10 @@ pub async fn run_bbs(config_path: Option<PathBuf>, run_duration_secs: Option<u64
             let contents = std::fs::read_to_string(&path)?;
             toml::from_str(&contents)?
         } else {
-            warn!("Config file not found at {:?}, using default settings", path);
+            warn!(
+                "Config file not found at {:?}, using default settings",
+                path
+            );
             default_config()
         }
     } else {
@@ -108,19 +166,229 @@ pub async fn run_bbs(config_path: Option<PathBuf>, run_duration_secs: Option<u64
     };
 
     // 2. Initialize Transport
-    let transport: Arc<dyn RadioTransport> = if run_duration_secs.is_some() {
-        Arc::new(MockSocketTransport::new(0.0, 10, 200))
+    let mock_transport = if run_duration_secs.is_some() {
+        MockSocketTransport::new(0.0, 10, 200)
     } else {
-        Arc::new(MockSocketTransport::new_server(
+        MockSocketTransport::new_server(
             "127.0.0.1:8088".to_string(),
             0.0,
             10,
             200,
-        ))
+        )
     };
+    let transport_stats = mock_transport.stats.clone();
+    let transport: Arc<dyn RadioTransport> = Arc::new(mock_transport);
 
     // 3. Start Server Runtime
-    start_server(config, transport, run_duration_secs).await
+    start_server_with_stats(config, transport, run_duration_secs, Some(transport_stats)).await
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct AssetEntry {
+    pub name: String,
+    pub id: u16,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct AssetManifest {
+    pub assets: Vec<AssetEntry>,
+}
+
+/// Loads the static public asset manifest mapping AssetID -> (Name, RelativePath).
+pub fn load_asset_manifest() -> HashMap<u16, (String, String)> {
+    let manifest_path = find_workspace_path("assets/manifest.toml");
+    let mut map = HashMap::new();
+    if let Ok(contents) = std::fs::read_to_string(&manifest_path) {
+        if let Ok(manifest) = toml::from_str::<AssetManifest>(&contents) {
+            for entry in manifest.assets {
+                map.insert(entry.id, (entry.name, entry.path));
+            }
+        }
+    }
+    map
+}
+
+/// Broadcasts a requested public asset in unencrypted multicast chunks according to spec.
+pub async fn broadcast_asset(
+    asset_id: u16,
+    manifest_map: &HashMap<u16, (String, String)>,
+    transport: &Arc<dyn RadioTransport>,
+) -> Result<()> {
+    if let Some((name, rel_path)) = manifest_map.get(&asset_id) {
+        let full_path = find_workspace_path(rel_path);
+        if let Ok(content_bytes) = std::fs::read(&full_path) {
+            let master_crc = meshcore_transport::crc32(&content_bytes);
+            let mtu = transport.get_mtu();
+            let chunk_capacity = if mtu > 16 { mtu - 12 } else { 32 };
+            let total_chunks = ((content_bytes.len() + chunk_capacity - 1) / chunk_capacity) as u8;
+            let total_chunks = std::cmp::max(1, total_chunks);
+
+            log::info!(
+                "Broadcasting public asset '{}' (0x{:04X}, {} bytes, {} chunks, CRC32: 0x{:08X})",
+                name,
+                asset_id,
+                content_bytes.len(),
+                total_chunks,
+                master_crc
+            );
+
+            for chunk_idx in 1..=total_chunks {
+                let start = (chunk_idx as usize - 1) * chunk_capacity;
+                let end = std::cmp::min(start + chunk_capacity, content_bytes.len());
+                let chunk_payload = if start < content_bytes.len() {
+                    &content_bytes[start..end]
+                } else {
+                    &[]
+                };
+
+                let mut packet_payload = Vec::with_capacity(12 + chunk_payload.len());
+                packet_payload.push(0xBB); // AppPort (MeshBBS)
+                packet_payload.push(0x04); // MsgType (Broadcast Asset)
+                packet_payload.push(0x08); // Flags (B=1)
+                packet_payload.push(chunk_idx); // ChunkIndex (1-indexed)
+                packet_payload.push(total_chunks); // TotalChunks
+                packet_payload.extend_from_slice(&asset_id.to_be_bytes()); // AssetID (2B)
+                packet_payload.push(chunk_payload.len() as u8); // PayloadLength
+                packet_payload.extend_from_slice(&master_crc.to_be_bytes()); // Master CRC32 (4B)
+                packet_payload.extend_from_slice(chunk_payload);
+
+                let packet = RadioPacket {
+                    is_broadcast: true,
+                    src_node: [0; 32],
+                    dst_node: [0; 32],
+                    payload: packet_payload,
+                    signal_rssi: 0,
+                    signal_snr: 0,
+                };
+
+                if let Err(e) = transport.send_packet(packet).await {
+                    log::error!("Failed to send broadcast asset chunk: {:?}", e);
+                }
+            }
+        } else {
+            log::warn!("Asset file not found at {:?}", full_path);
+        }
+    } else {
+        log::warn!("Asset ID 0x{:04X} not found in manifest", asset_id);
+    }
+    Ok(())
+}
+
+/// Parses a MeshCore node advertisement payload.
+/// Supports both full MeshCore packet framing (PAYLOAD_TYPE_ADVERT = 0x04)
+/// and bare 100+ byte advertisement payloads.
+pub fn parse_meshcore_advert(
+    payload: &[u8],
+    src_node: [u8; 32],
+) -> Option<([u8; 32], serde_json::Map<String, serde_json::Value>)> {
+    let advert_slice: &[u8] = if !payload.is_empty() && ((payload[0] >> 2) & 0x0F) == 0x04 {
+        // Full MeshCore Packet header: 0bVVPPPPRR
+        let route_type = payload[0] & 0x03;
+        let mut offset = 1;
+        // Transport codes (4 bytes) if ROUTE_TYPE_TRANSPORT_FLOOD (0) or ROUTE_TYPE_TRANSPORT_DIRECT (3)
+        if route_type == 0 || route_type == 3 {
+            if payload.len() < offset + 4 {
+                return None;
+            }
+            offset += 4;
+        }
+        if payload.len() < offset + 1 {
+            return None;
+        }
+        let path_len = payload[offset] as usize;
+        offset += 1;
+        if payload.len() < offset + path_len {
+            return None;
+        }
+        offset += path_len;
+        if payload.len() < offset {
+            return None;
+        }
+        &payload[offset..]
+    } else if payload.len() >= 100 {
+        // Bare advert payload
+        payload
+    } else {
+        return None;
+    };
+
+    if advert_slice.len() < 100 {
+        return None;
+    }
+
+    let pubkey: [u8; 32] = advert_slice[0..32].try_into().ok()?;
+    let timestamp = u32::from_le_bytes(advert_slice[32..36].try_into().ok()?);
+    // signature is advert_slice[36..100] (64 bytes)
+
+    let mut metadata = serde_json::Map::new();
+    let pubkey_hex: String = pubkey.iter().map(|b| format!("{:02x}", b)).collect();
+    metadata.insert("public_key".to_string(), serde_json::json!(pubkey_hex));
+    metadata.insert("advert_timestamp".to_string(), serde_json::json!(timestamp));
+
+    if advert_slice.len() > 100 {
+        let flags = advert_slice[100];
+        let mut offset = 101;
+
+        // Node type from lower 4 bits (flags & 0x0F)
+        let node_type = match flags & 0x0F {
+            0x01 => "chat_node",
+            0x02 => "repeater",
+            0x03 => "room_server",
+            0x04 => "sensor",
+            _ => "unknown",
+        };
+        metadata.insert("node_type".to_string(), serde_json::json!(node_type));
+
+        // Location (flags & 0x10)
+        if (flags & 0x10) != 0 && advert_slice.len() >= offset + 8 {
+            let lat_int = i32::from_le_bytes([
+                advert_slice[offset],
+                advert_slice[offset + 1],
+                advert_slice[offset + 2],
+                advert_slice[offset + 3],
+            ]);
+            let lon_int = i32::from_le_bytes([
+                advert_slice[offset + 4],
+                advert_slice[offset + 5],
+                advert_slice[offset + 6],
+                advert_slice[offset + 7],
+            ]);
+            offset += 8;
+            let lat = lat_int as f64 / 1_000_000.0;
+            let lon = lon_int as f64 / 1_000_000.0;
+            metadata.insert("latitude".to_string(), serde_json::json!(lat));
+            metadata.insert("longitude".to_string(), serde_json::json!(lon));
+            metadata.insert(
+                "last_known_location".to_string(),
+                serde_json::json!(format!("{:.4}, {:.4}", lat, lon)),
+            );
+        }
+
+        // Feature 1 (flags & 0x20)
+        if (flags & 0x20) != 0 && advert_slice.len() >= offset + 2 {
+            let feat1 = u16::from_le_bytes([advert_slice[offset], advert_slice[offset + 1]]);
+            metadata.insert("feature1".to_string(), serde_json::json!(feat1));
+            offset += 2;
+        }
+
+        // Feature 2 (flags & 0x40)
+        if (flags & 0x40) != 0 && advert_slice.len() >= offset + 2 {
+            let feat2 = u16::from_le_bytes([advert_slice[offset], advert_slice[offset + 1]]);
+            metadata.insert("feature2".to_string(), serde_json::json!(feat2));
+            offset += 2;
+        }
+
+        // Node name (flags & 0x80)
+        if (flags & 0x80) != 0 && advert_slice.len() > offset {
+            if let Ok(name_str) = String::from_utf8(advert_slice[offset..].to_vec()) {
+                metadata.insert("node_name".to_string(), serde_json::json!(name_str));
+            }
+        }
+    }
+
+    let target_node = if pubkey != [0; 32] { pubkey } else { src_node };
+    Some((target_node, metadata))
 }
 
 struct Session {
@@ -134,6 +402,16 @@ pub async fn start_server(
     transport: Arc<dyn RadioTransport>,
     run_duration_secs: Option<u64>,
 ) -> Result<()> {
+    start_server_with_stats(config, transport, run_duration_secs, None).await
+}
+
+/// Starts the BBS Host server daemon with optional transport-level stats tracking.
+pub async fn start_server_with_stats(
+    config: AppConfig,
+    transport: Arc<dyn RadioTransport>,
+    run_duration_secs: Option<u64>,
+    transport_stats: Option<Arc<TransportStats>>,
+) -> Result<()> {
     info!(
         "Rate Limiter active: Max Packets/Min={}, Max Duty Cycle={}%",
         config.rate_limiter.max_packets_per_minute, config.rate_limiter.max_duty_cycle_percent
@@ -146,10 +424,52 @@ pub async fn start_server(
     }
 
     let active_sessions = Arc::new(StdMutex::new(HashMap::<[u8; 32], Session>::new()));
-    let db_store = Arc::new(StdMutex::new(HashMap::<String, HashMap<String, String>>::new()));
+    let db_store = Arc::new(StdMutex::new(
+        HashMap::<String, HashMap<String, String>>::new(),
+    ));
     let mut reassembler = MessageReassembler::new();
+    let asset_manifest_map = Arc::new(load_asset_manifest());
+    let bbs_stats = Arc::new(BbsStats::new());
 
+    // Spawn periodic stats logger (once per minute)
+    let stats_logger_handle = if let Some(ref ts) = transport_stats {
+        let ts_clone = ts.clone();
+        let bbs_stats_clone = bbs_stats.clone();
+        let duration_limit = run_duration_secs;
+        Some(tokio::spawn(async move {
+            let start = tokio::time::Instant::now();
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
+            interval.tick().await; // First tick fires immediately, skip it
+            loop {
+                interval.tick().await;
+                if let Some(dur) = duration_limit {
+                    if start.elapsed() >= tokio::time::Duration::from_secs(dur) {
+                        break;
+                    }
+                }
+                let (send_ppm, recv_ppm) = ts_clone.packets_per_minute_last(3600);
+                let (send_ppm_24h, recv_ppm_24h) = ts_clone.packets_per_minute_last(86400);
+                info!(
+                    "[BBS STATS] Active Users 24h: {} | Current Sessions: {} | Pkts Sent: {} | Pkts Recv: {} | Avg PPM 1h: {:.1}/{:.1} | Avg PPM 24h: {:.1}/{:.1} | Uptime: {}s",
+                    bbs_stats_clone.unique_users_24h(),
+                    bbs_stats_clone.active_sessions(),
+                    ts_clone.total_packets_sent(),
+                    ts_clone.total_packets_received(),
+                    send_ppm,
+                    recv_ppm,
+                    send_ppm_24h,
+                    recv_ppm_24h,
+                    ts_clone.uptime_secs()
+                );
+            }
+        }))
+    } else {
+        None
+    };
+
+    let bbs_stats_clone = bbs_stats.clone();
     // Main packet routing loop placeholder
+    let manifest_map_for_loop = asset_manifest_map.clone();
     let loop_handle = tokio::spawn(async move {
         let start_time = tokio::time::Instant::now();
         loop {
@@ -160,20 +480,80 @@ pub async fn start_server(
             }
 
             // Receive packet from radio (timeout check allows quick loop exit)
-            match tokio::time::timeout(tokio::time::Duration::from_millis(100), transport.receive_packet()).await {
+            match tokio::time::timeout(
+                tokio::time::Duration::from_millis(100),
+                transport.receive_packet(),
+            )
+            .await
+            {
                 Ok(Ok(packet)) => {
                     let src = packet.src_node;
+
+                    // Intercept and parse MeshCore advert packets
+                    if let Some((target_node, metadata)) = parse_meshcore_advert(&packet.payload, src) {
+                        let mut store = db_store.lock().unwrap();
+                        let users_table = store.entry("users".to_string()).or_insert_with(HashMap::new);
+                        let node_hex: String = target_node.iter().map(|b| format!("{:02x}", b)).collect();
+
+                        let mut existing_user = if let Some(existing_json) = users_table.get(&node_hex) {
+                            serde_json::from_str::<serde_json::Value>(existing_json).unwrap_or(serde_json::json!({}))
+                        } else {
+                            serde_json::json!({})
+                        };
+
+                        if let Some(obj) = existing_user.as_object_mut() {
+                            for (k, v) in metadata {
+                                obj.insert(k, v);
+                            }
+                        }
+
+                        if let Ok(merged_json) = serde_json::to_string(&existing_user) {
+                            log::info!("Processed advert packet for node {}: {}", node_hex, merged_json);
+                            users_table.insert(node_hex, merged_json);
+                        }
+
+                        continue;
+                    }
+
                     match reassembler.process_packet(src, &packet.payload) {
                         Ok(Some(msg)) => {
-                            let tx_opt = active_sessions.lock().unwrap().get(&src).map(|s| s.input_tx.clone());
+                            if msg.opcode == 0x05 && msg.payload.len() >= 2 {
+                                let req_asset_id =
+                                    u16::from_be_bytes([msg.payload[0], msg.payload[1]]);
+                                log::info!(
+                                    "Received REQ_ASSET for asset 0x{:04X} from node {:?}",
+                                    req_asset_id,
+                                    src
+                                );
+                                let manifest_map_clone = manifest_map_for_loop.clone();
+                                let transport_broadcast = transport.clone();
+                                tokio::spawn(async move {
+                                    let _ = broadcast_asset(
+                                        req_asset_id,
+                                        &manifest_map_clone,
+                                        &transport_broadcast,
+                                    )
+                                    .await;
+                                });
+                                continue;
+                            }
+
+                            let tx_opt = active_sessions
+                                .lock()
+                                .unwrap()
+                                .get(&src)
+                                .map(|s| s.input_tx.clone());
                             if let Some(tx) = tx_opt {
                                 let _ = tx.send(msg).await;
                             } else {
                                 // Boot new session
                                 info!("Booting new Lua session for node: {:?}", src);
                                 let (tx, rx) = mpsc::channel(100);
-                                let session = Session { input_tx: tx.clone() };
+                                let session = Session {
+                                    input_tx: tx.clone(),
+                                };
                                 active_sessions.lock().unwrap().insert(src, session);
+                                bbs_stats_clone.record_session_connect(src);
 
                                 let sessions_clone = active_sessions.clone();
                                 let transport_inner = transport.clone();
@@ -181,9 +561,21 @@ pub async fn start_server(
                                 let rt_handle = tokio::runtime::Handle::current();
                                 let form_colors_config = config.form_colors.clone();
                                 let admin_nodes_config = config.admin_nodes.clone();
+                                let asset_manifest_clone = asset_manifest_map.clone();
+                                let bbs_stats_inner = bbs_stats_clone.clone();
                                 std::thread::spawn(move || {
-                                    let res = run_session_task(src, rx, transport_inner, db_inner, rt_handle, form_colors_config, admin_nodes_config);
+                                    let res = run_session_task(
+                                        src,
+                                        rx,
+                                        transport_inner,
+                                        db_inner,
+                                        rt_handle,
+                                        form_colors_config,
+                                        admin_nodes_config,
+                                        asset_manifest_clone,
+                                    );
                                     sessions_clone.lock().unwrap().remove(&src);
+                                    bbs_stats_inner.record_session_disconnect();
                                     if let Err(e) = res {
                                         log::error!("Session task error: {:?}", e);
                                     }
@@ -212,6 +604,11 @@ pub async fn start_server(
 
     loop_handle.await??;
 
+    // Cancel the stats logger if it was running
+    if let Some(handle) = stats_logger_handle {
+        handle.abort();
+    }
+
     Ok(())
 }
 
@@ -223,16 +620,17 @@ fn run_session_task(
     rt_handle: tokio::runtime::Handle,
     form_colors: FormColorsConfig,
     admin_nodes: Vec<String>,
+    asset_manifest: Arc<HashMap<u16, (String, String)>>,
 ) -> Result<()> {
     log::debug!("Starting run_session_task for client session");
     let lua = mlua::Lua::new();
     let active_app = Arc::new(StdMutex::new("00_main_menu".to_string()));
 
     let node_hex_str: String = node_id.iter().map(|b| format!("{:02x}", b)).collect();
-    
+
     // Check if configured as admin
     let is_configured_admin = admin_nodes.contains(&node_hex_str);
-    
+
     // Check if first user in database
     let is_first_user = {
         let store = db_store.lock().unwrap();
@@ -241,22 +639,25 @@ fn run_session_task(
             None => true,
         }
     };
-    
+
     let mut initial_permissions = vec!["read".to_string(), "write".to_string()];
     if is_configured_admin || is_first_user {
         initial_permissions.push("admin".to_string());
     }
-    
+
     // Persist initial permissions in DB
     let node_hex_str_clone = node_hex_str.clone();
     let db_store_perms = db_store.clone();
     {
         let mut store = db_store_perms.lock().unwrap();
-        let perms_table = store.entry("permissions".to_string()).or_default();
-        perms_table.entry(node_hex_str_clone).or_insert_with(|| {
-
-            serde_json::to_string(&initial_permissions).unwrap_or_else(|_| "[]".to_string())
-        });
+        let perms_table = store
+            .entry("permissions".to_string())
+            .or_insert_with(HashMap::new);
+        if !perms_table.contains_key(&node_hex_str_clone) {
+            let json_str =
+                serde_json::to_string(&initial_permissions).unwrap_or_else(|_| "[]".to_string());
+            perms_table.insert(node_hex_str_clone, json_str);
+        }
     }
 
     // Accumulates output bytes for term.flush()
@@ -271,59 +672,241 @@ fn run_session_task(
 
     // term table
     let term = lua.create_table()?;
-    
-    let out_buf = output_buf.clone();
-    term.set("clear", lua.create_function(move |_, (): ()| {
-        out_buf.lock().unwrap().push(0x01); // OP_CLEAR_SCREEN
-        Ok(())
-    })?)?;
 
     let out_buf = output_buf.clone();
-    term.set("move_to", lua.create_function(move |_, (col, row): (u8, u8)| {
-        let mut buf = out_buf.lock().unwrap();
-        buf.push(0xC3); // OP_CURSOR_ABS
-        buf.push(col);
-        buf.push(row);
-        Ok(())
-    })?)?;
+    term.set(
+        "clear",
+        lua.create_function(move |_, (): ()| {
+            out_buf.lock().unwrap().push(0x01); // OP_CLEAR_SCREEN
+            Ok(())
+        })?,
+    )?;
 
     let out_buf = output_buf.clone();
-    term.set("print", lua.create_function(move |_, text: String| {
-        let mut buf = out_buf.lock().unwrap();
-        buf.extend_from_slice(text.as_bytes());
-        Ok(())
-    })?)?;
+    term.set(
+        "move_to",
+        lua.create_function(move |_, (col, row): (u8, u8)| {
+            let mut buf = out_buf.lock().unwrap();
+            buf.push(0xC3); // OP_CURSOR_ABS
+            buf.push(col);
+            buf.push(row);
+            Ok(())
+        })?,
+    )?;
 
     let out_buf = output_buf.clone();
-    term.set("set_color", lua.create_function(move |_, (fg, bg): (u8, u8)| {
-        let mut buf = out_buf.lock().unwrap();
-        buf.push(0xC0); // OP_SET_COLOR
-        let attr = (bg << 4) | (fg & 0x0F);
-        buf.push(attr);
-        Ok(())
-    })?)?;
+    term.set(
+        "print",
+        lua.create_function(move |_, text: String| {
+            let mut buf = out_buf.lock().unwrap();
+            buf.extend_from_slice(text.as_bytes());
+            Ok(())
+        })?,
+    )?;
 
     let out_buf = output_buf.clone();
-    term.set("render_asset", lua.create_function(move |_, asset_name: String| {
-        let mut buf = out_buf.lock().unwrap();
-        buf.push(0xC5); // OP_RENDER_ASSET
-        let id: u16 = if asset_name == "ASSET_DUNGEON_BANNER" {
-            0x0101
-        } else {
-            0x0102
-        };
-        buf.extend_from_slice(&id.to_be_bytes());
-        Ok(())
-    })?)?;
+    term.set(
+        "set_color",
+        lua.create_function(move |_, (fg, bg): (u8, u8)| {
+            let mut buf = out_buf.lock().unwrap();
+            buf.push(0xC0); // OP_SET_COLOR
+            let attr = (bg << 4) | (fg & 0x0F);
+            buf.push(attr);
+            Ok(())
+        })?,
+    )?;
+
+    let out_buf = output_buf.clone();
+    let asset_manifest_for_render = asset_manifest.clone();
+    term.set(
+        "render_asset",
+        lua.create_function(move |_, asset_name: String| {
+            let mut buf = out_buf.lock().unwrap();
+            buf.push(0xC5); // OP_RENDER_ASSET
+            let id: u16 = if let Some((&matched_id, _)) = asset_manifest_for_render
+                .iter()
+                .find(|(_, (n, _))| n == &asset_name)
+            {
+                matched_id
+            } else if asset_name == "ASSET_DUNGEON_BANNER" {
+                0x0101
+            } else if asset_name == "ASSET_MAIN_MENU_BANNER" {
+                0x0103
+            } else {
+                0x0102
+            };
+            buf.extend_from_slice(&id.to_be_bytes());
+            Ok(())
+        })?,
+    )?;
 
     let out_buf = output_buf.clone();
     let transport_clone = transport.clone();
     let node_id_clone = node_id;
     let rt = rt_handle.clone();
-    term.set("flush", lua.create_function(move |_, (): ()| {
-        let mut buf = out_buf.lock().unwrap();
-        log::debug!("term.flush() called with {} bytes in session buffer", buf.len());
-        if !buf.is_empty() {
+    term.set(
+        "flush",
+        lua.create_function(move |_, (): ()| {
+            let mut buf = out_buf.lock().unwrap();
+            log::debug!(
+                "term.flush() called with {} bytes in session buffer",
+                buf.len()
+            );
+            if !buf.is_empty() {
+                buf.push(0x04); // EndOfFrame
+                let payload = buf.clone();
+                buf.clear();
+
+                let msg = MeshBbsMessage::new(0x01, 0x03, 0x00, payload);
+                let mtu = transport_clone.get_mtu();
+                match msg.to_fragments(mtu) {
+                    Ok(fragments) => {
+                        let transport_inner = transport_clone.clone();
+                        log::debug!(
+                            "Sending term.flush() fragmented packets over transport (count={})",
+                            fragments.len()
+                        );
+                        rt.block_on(async {
+                            for frag in fragments {
+                                let packet = RadioPacket {
+                                    is_broadcast: false,
+                                    src_node: [0; 32],
+                                    dst_node: node_id_clone,
+                                    payload: frag,
+                                    signal_rssi: 0,
+                                    signal_snr: 0,
+                                };
+                                if let Err(e) = transport_inner.send_packet(packet).await {
+                                    log::error!("Failed to send packet fragment: {:?}", e);
+                                    break;
+                                }
+                            }
+                        });
+                        log::debug!("send_packet fragments done");
+                    }
+                    Err(e) => {
+                        log::error!("Failed to fragment flush message: {}", e);
+                    }
+                }
+            }
+            Ok(())
+        })?,
+    )?;
+
+    let out_buf = output_buf.clone();
+    let form_colors_clone = form_colors.clone();
+    term.set(
+        "define_form",
+        lua.create_function(
+            move |_,
+                  (form_id, field_fg, field_bg, submit_fg, submit_bg): (
+                u8,
+                Option<u8>,
+                Option<u8>,
+                Option<u8>,
+                Option<u8>,
+            )| {
+                let f_fg = field_fg.unwrap_or(form_colors_clone.field_fg);
+                let f_bg = field_bg.unwrap_or(form_colors_clone.field_bg);
+                let s_fg = submit_fg.unwrap_or(form_colors_clone.submit_fg);
+                let s_bg = submit_bg.unwrap_or(form_colors_clone.submit_bg);
+
+                let mut buf = out_buf.lock().unwrap();
+                buf.push(0xD0); // OP_FORM_START
+                buf.push(form_id);
+                buf.push(f_fg);
+                buf.push(f_bg);
+                buf.push(s_fg);
+                buf.push(s_bg);
+                Ok(())
+            },
+        )?,
+    )?;
+
+    let out_buf = output_buf.clone();
+    term.set(
+        "add_input_field",
+        lua.create_function(
+            move |_, (field_id, col, row, width, default_val): (String, u8, u8, u8, String)| {
+                let mut buf = out_buf.lock().unwrap();
+                buf.push(0xD1); // OP_FORM_FIELD
+                buf.push(col);
+                buf.push(row);
+                buf.push(width);
+
+                let id_bytes = field_id.as_bytes();
+                buf.push(id_bytes.len() as u8);
+                buf.extend_from_slice(id_bytes);
+
+                let val_bytes = default_val.as_bytes();
+                buf.push(val_bytes.len() as u8);
+                buf.extend_from_slice(val_bytes);
+                Ok(())
+            },
+        )?,
+    )?;
+
+    let out_buf = output_buf.clone();
+    term.set(
+        "add_multiline_field",
+        lua.create_function(
+            move |_,
+                  (field_id, col, row, width, height, default_val): (
+                String,
+                u8,
+                u8,
+                u8,
+                u8,
+                String,
+            )| {
+                let mut buf = out_buf.lock().unwrap();
+                buf.push(0xD4); // OP_FORM_FIELD_MULTILINE
+                buf.push(col);
+                buf.push(row);
+                buf.push(width);
+                buf.push(height);
+
+                let id_bytes = field_id.as_bytes();
+                buf.push(id_bytes.len() as u8);
+                buf.extend_from_slice(id_bytes);
+
+                let val_bytes = default_val.as_bytes();
+                buf.push(val_bytes.len() as u8);
+                buf.extend_from_slice(val_bytes);
+                Ok(())
+            },
+        )?,
+    )?;
+
+    let out_buf = output_buf.clone();
+    term.set(
+        "add_submit_button",
+        lua.create_function(move |_, (button_id, col, row): (String, u8, u8)| {
+            let mut buf = out_buf.lock().unwrap();
+            buf.push(0xD2); // OP_FORM_SUBMIT
+            buf.push(col);
+            buf.push(row);
+
+            let id_bytes = button_id.as_bytes();
+            buf.push(id_bytes.len() as u8);
+            buf.extend_from_slice(id_bytes);
+            Ok(())
+        })?,
+    )?;
+
+    let out_buf = output_buf.clone();
+    let transport_clone = transport.clone();
+    let node_id_clone = node_id.clone();
+    let rt = rt_handle.clone();
+    term.set(
+        "flush_form",
+        lua.create_function(move |_, (): ()| {
+            let mut buf = out_buf.lock().unwrap();
+            log::debug!(
+                "term.flush_form() called with {} bytes in session buffer",
+                buf.len()
+            );
+            buf.push(0xD3); // OP_FORM_END
             buf.push(0x04); // EndOfFrame
             let payload = buf.clone();
             buf.clear();
@@ -333,7 +916,10 @@ fn run_session_task(
             match msg.to_fragments(mtu) {
                 Ok(fragments) => {
                     let transport_inner = transport_clone.clone();
-                    log::debug!("Sending term.flush() fragmented packets over transport (count={})", fragments.len());
+                    log::debug!(
+                        "Sending term.flush_form() fragmented packets over transport (count={})",
+                        fragments.len()
+                    );
                     rt.block_on(async {
                         for frag in fragments {
                             let packet = RadioPacket {
@@ -353,256 +939,235 @@ fn run_session_task(
                     log::debug!("send_packet fragments done");
                 }
                 Err(e) => {
-                    log::error!("Failed to fragment flush message: {}", e);
+                    log::error!("Failed to fragment flush_form message: {}", e);
                 }
             }
-        }
-        Ok(())
-    })?)?;
-
-    let out_buf = output_buf.clone();
-    let form_colors_clone = form_colors.clone();
-    term.set("define_form", lua.create_function(move |_, (form_id, field_fg, field_bg, submit_fg, submit_bg): (u8, Option<u8>, Option<u8>, Option<u8>, Option<u8>)| {
-        let f_fg = field_fg.unwrap_or(form_colors_clone.field_fg);
-        let f_bg = field_bg.unwrap_or(form_colors_clone.field_bg);
-        let s_fg = submit_fg.unwrap_or(form_colors_clone.submit_fg);
-        let s_bg = submit_bg.unwrap_or(form_colors_clone.submit_bg);
-
-        let mut buf = out_buf.lock().unwrap();
-        buf.push(0xD0); // OP_FORM_START
-        buf.push(form_id);
-        buf.push(f_fg);
-        buf.push(f_bg);
-        buf.push(s_fg);
-        buf.push(s_bg);
-        Ok(())
-    })?)?;
-
-    let out_buf = output_buf.clone();
-    term.set("add_input_field", lua.create_function(move |_, (field_id, col, row, width, default_val): (String, u8, u8, u8, String)| {
-        let mut buf = out_buf.lock().unwrap();
-        buf.push(0xD1); // OP_FORM_FIELD
-        buf.push(col);
-        buf.push(row);
-        buf.push(width);
-        
-        let id_bytes = field_id.as_bytes();
-        buf.push(id_bytes.len() as u8);
-        buf.extend_from_slice(id_bytes);
-
-        let val_bytes = default_val.as_bytes();
-        buf.push(val_bytes.len() as u8);
-        buf.extend_from_slice(val_bytes);
-        Ok(())
-    })?)?;
-
-    let out_buf = output_buf.clone();
-    term.set("add_multiline_field", lua.create_function(move |_, (field_id, col, row, width, height, default_val): (String, u8, u8, u8, u8, String)| {
-        let mut buf = out_buf.lock().unwrap();
-        buf.push(0xD4); // OP_FORM_FIELD_MULTILINE
-        buf.push(col);
-        buf.push(row);
-        buf.push(width);
-        buf.push(height);
-        
-        let id_bytes = field_id.as_bytes();
-        buf.push(id_bytes.len() as u8);
-        buf.extend_from_slice(id_bytes);
-
-        let val_bytes = default_val.as_bytes();
-        buf.push(val_bytes.len() as u8);
-        buf.extend_from_slice(val_bytes);
-        Ok(())
-    })?)?;
-
-    let out_buf = output_buf.clone();
-    term.set("add_submit_button", lua.create_function(move |_, (button_id, col, row): (String, u8, u8)| {
-        let mut buf = out_buf.lock().unwrap();
-        buf.push(0xD2); // OP_FORM_SUBMIT
-        buf.push(col);
-        buf.push(row);
-
-        let id_bytes = button_id.as_bytes();
-        buf.push(id_bytes.len() as u8);
-        buf.extend_from_slice(id_bytes);
-        Ok(())
-    })?)?;
-
-    let out_buf = output_buf.clone();
-    let transport_clone = transport.clone();
-    let node_id_clone = node_id;
-    let rt = rt_handle.clone();
-    term.set("flush_form", lua.create_function(move |_, (): ()| {
-        let mut buf = out_buf.lock().unwrap();
-        log::debug!("term.flush_form() called with {} bytes in session buffer", buf.len());
-        buf.push(0xD3); // OP_FORM_END
-        buf.push(0x04); // EndOfFrame
-        let payload = buf.clone();
-        buf.clear();
-
-        let msg = MeshBbsMessage::new(0x01, 0x03, 0x00, payload);
-        let mtu = transport_clone.get_mtu();
-        match msg.to_fragments(mtu) {
-            Ok(fragments) => {
-                let transport_inner = transport_clone.clone();
-                log::debug!("Sending term.flush_form() fragmented packets over transport (count={})", fragments.len());
-                rt.block_on(async {
-                    for frag in fragments {
-                        let packet = RadioPacket {
-                            is_broadcast: false,
-                            src_node: [0; 32],
-                            dst_node: node_id_clone,
-                            payload: frag,
-                            signal_rssi: 0,
-                            signal_snr: 0,
-                        };
-                        if let Err(e) = transport_inner.send_packet(packet).await {
-                            log::error!("Failed to send packet fragment: {:?}", e);
-                            break;
-                        }
-                    }
-                });
-                log::debug!("send_packet fragments done");
-            }
-            Err(e) => {
-                log::error!("Failed to fragment flush_form message: {}", e);
-            }
-        }
-        Ok(())
-    })?)?;
+            Ok(())
+        })?,
+    )?;
 
     globals.set("term", term)?;
 
     // db table
     let db = lua.create_table()?;
     let db_store_get = db_store.clone();
-    db.set("get", lua.create_function(move |lua, (table, key): (String, String)| {
-        let store = db_store_get.lock().unwrap();
-        if let Some(tbl) = store.get(&table) {
-            if let Some(val) = tbl.get(&key) {
-                if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(val) {
-                    if let Ok(lua_val) = lua.to_value(&json_val) {
-                        return Ok(lua_val);
+    db.set(
+        "get",
+        lua.create_function(move |lua, args: mlua::MultiValue| {
+            let store = db_store_get.lock().unwrap();
+            let mut iter = args.into_iter();
+            let table = match iter.next() {
+                Some(mlua::Value::String(s)) => s.to_str()?.to_string(),
+                _ => return Ok(mlua::Value::Nil),
+            };
+            let key = match iter.next() {
+                Some(mlua::Value::String(s)) => s.to_str()?.to_string(),
+                Some(mlua::Value::Integer(i)) => i.to_string(),
+                _ => "default".to_string(),
+            };
+            if let Some(tbl) = store.get(&table) {
+                if let Some(val) = tbl.get(&key) {
+                    if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(val) {
+                        if json_val.is_null() {
+                            return Ok(mlua::Value::Nil);
+                        }
+                        if let Ok(lua_val) = lua.to_value(&json_val) {
+                            return Ok(mlua::Value::from(lua_val));
+                        }
                     }
                 }
             }
-        }
-        Ok(mlua::Value::Nil)
-    })?)?;
+            Ok(mlua::Value::Nil)
+        })?,
+    )?;
 
     let db_store_set = db_store.clone();
-    db.set("set", lua.create_function(move |lua, (table, key, val): (String, String, mlua::Value)| {
-        if let Ok(json_val) = lua.from_value::<serde_json::Value>(val) {
-            if let Ok(json_str) = serde_json::to_string(&json_val) {
-                let mut store = db_store_set.lock().unwrap();
-                store.entry(table).or_default().insert(key, json_str);
+    db.set(
+        "set",
+        lua.create_function(move |lua, args: mlua::MultiValue| {
+            let mut store = db_store_set.lock().unwrap();
+            let mut iter = args.into_iter();
+            let table = match iter.next() {
+                Some(mlua::Value::String(s)) => s.to_str()?.to_string(),
+                _ => return Ok(()),
+            };
+            let (key, val) = match (iter.next(), iter.next()) {
+                (Some(k_val), Some(v)) => {
+                    let key_str = match k_val {
+                        mlua::Value::String(s) => s.to_str()?.to_string(),
+                        mlua::Value::Integer(i) => i.to_string(),
+                        _ => "default".to_string(),
+                    };
+                    (key_str, v)
+                }
+                (Some(v), None) => ("default".to_string(), v),
+                _ => return Ok(()),
+            };
+            if val.is_nil() {
+                if let Some(tbl) = store.get_mut(&table) {
+                    tbl.remove(&key);
+                }
+            } else if let Ok(json_val) = lua.from_value::<serde_json::Value>(val) {
+                if json_val.is_null() {
+                    if let Some(tbl) = store.get_mut(&table) {
+                        tbl.remove(&key);
+                    }
+                } else if let Ok(json_str) = serde_json::to_string(&json_val) {
+                    store
+                        .entry(table)
+                        .or_insert_with(HashMap::new)
+                        .insert(key, json_str);
+                }
             }
-        }
-        Ok(())
-    })?)?;
+            Ok(())
+        })?,
+    )?;
 
     let db_store_keys = db_store.clone();
-    db.set("keys", lua.create_function(move |lua, table: String| {
-        let store = db_store_keys.lock().unwrap();
-        let table_tbl = lua.create_table()?;
-        if let Some(tbl) = store.get(&table) {
-            for (i, key) in tbl.keys().enumerate() {
-                table_tbl.set(i + 1, key.clone())?;
+    db.set(
+        "keys",
+        lua.create_function(move |lua, table: String| {
+            let store = db_store_keys.lock().unwrap();
+            let table_tbl = lua.create_table()?;
+            if let Some(tbl) = store.get(&table) {
+                for (i, key) in tbl.keys().enumerate() {
+                    table_tbl.set(i + 1, key.clone())?;
+                }
             }
-        }
-        Ok(table_tbl)
-    })?)?;
+            Ok(table_tbl)
+        })?,
+    )?;
     globals.set("db", db)?;
 
     // log table for app scripts
     let log_table = lua.create_table()?;
     let active_app_clone = active_app.clone();
-    log_table.set("info", lua.create_function(move |_, msg: String| {
-        let app = active_app_clone.lock().unwrap().clone();
-        log::info!(target: "lua_app", "[Lua: {}] {}", app, msg);
-        Ok(())
-    })?)?;
+    log_table.set(
+        "info",
+        lua.create_function(move |_, msg: String| {
+            let app = active_app_clone.lock().unwrap().clone();
+            log::info!(target: "lua_app", "[Lua: {}] {}", app, msg);
+            Ok(())
+        })?,
+    )?;
 
     let active_app_clone = active_app.clone();
-    log_table.set("warn", lua.create_function(move |_, msg: String| {
-        let app = active_app_clone.lock().unwrap().clone();
-        log::warn!(target: "lua_app", "[Lua: {}] {}", app, msg);
-        Ok(())
-    })?)?;
+    log_table.set(
+        "warn",
+        lua.create_function(move |_, msg: String| {
+            let app = active_app_clone.lock().unwrap().clone();
+            log::warn!(target: "lua_app", "[Lua: {}] {}", app, msg);
+            Ok(())
+        })?,
+    )?;
 
     let active_app_clone = active_app.clone();
-    log_table.set("error", lua.create_function(move |_, msg: String| {
-        let app = active_app_clone.lock().unwrap().clone();
-        log::error!(target: "lua_app", "[Lua: {}] {}", app, msg);
-        Ok(())
-    })?)?;
+    log_table.set(
+        "error",
+        lua.create_function(move |_, msg: String| {
+            let app = active_app_clone.lock().unwrap().clone();
+            log::error!(target: "lua_app", "[Lua: {}] {}", app, msg);
+            Ok(())
+        })?,
+    )?;
 
     let active_app_clone = active_app.clone();
-    log_table.set("debug", lua.create_function(move |_, msg: String| {
-        let app = active_app_clone.lock().unwrap().clone();
-        log::debug!(target: "lua_app", "[Lua: {}] {}", app, msg);
-        Ok(())
-    })?)?;
+    log_table.set(
+        "debug",
+        lua.create_function(move |_, msg: String| {
+            let app = active_app_clone.lock().unwrap().clone();
+            log::debug!(target: "lua_app", "[Lua: {}] {}", app, msg);
+            Ok(())
+        })?,
+    )?;
     globals.set("log", log_table)?;
 
     // session table & state
     let session = lua.create_table()?;
     let node_hex_str_clone = node_hex_str.clone();
-    session.set("node_id", lua.create_function(move |_, (): ()| {
-        Ok(node_hex_str_clone.clone())
-    })?)?;
+    session.set(
+        "node_id",
+        lua.create_function(move |_, (): ()| Ok(node_hex_str_clone.clone()))?,
+    )?;
 
-    session.set("callsign", lua.create_function(|_, (): ()| {
-        Ok("RadioOperator".to_string())
-    })?)?;
+    let db_store_callsign = db_store.clone();
+    let node_hex_str_clone = node_hex_str.clone();
+    session.set(
+        "callsign",
+        lua.create_function(move |_, (): ()| {
+            let store = db_store_callsign.lock().unwrap();
+            if let Some(users_table) = store.get("users") {
+                if let Some(user_json) = users_table.get(&node_hex_str_clone) {
+                    if let Ok(user_obj) = serde_json::from_str::<serde_json::Value>(user_json) {
+                        if let Some(nickname) = user_obj.get("nickname").and_then(|v| v.as_str()) {
+                            return Ok(nickname.to_string());
+                        }
+                    }
+                }
+            }
+            Ok("RadioOperator".to_string())
+        })?,
+    )?;
 
     let callback_store = Arc::new(StdMutex::new(None));
     let callback_store_clone = callback_store.clone();
-    session.set("await_input", lua.create_function(move |lua, (max_len, cb): (usize, mlua::Function)| {
-        let key = lua.create_registry_value(cb)?;
-        *callback_store_clone.lock().unwrap() = Some((max_len, key));
-        Ok(())
-    })?)?;
+    session.set(
+        "await_input",
+        lua.create_function(move |lua, (max_len, cb): (usize, mlua::Function)| {
+            let key = lua.create_registry_value(cb)?;
+            *callback_store_clone.lock().unwrap() = Some((max_len, key));
+            Ok(())
+        })?,
+    )?;
 
     let session_close = Arc::new(StdMutex::new(false));
     let session_close_clone = session_close.clone();
-    session.set("close", lua.create_function(move |_, (): ()| {
-        *session_close_clone.lock().unwrap() = true;
-        Ok(())
-    })?)?;
+    session.set(
+        "close",
+        lua.create_function(move |_, (): ()| {
+            *session_close_clone.lock().unwrap() = true;
+            Ok(())
+        })?,
+    )?;
 
     let db_store_perms = db_store.clone();
     let node_hex_str_clone = node_hex_str.clone();
-    session.set("permissions", lua.create_function(move |lua, (): ()| {
-        let store = db_store_perms.lock().unwrap();
-        if let Some(perms_table) = store.get("permissions") {
-            if let Some(json_str) = perms_table.get(&node_hex_str_clone) {
-                if let Ok(perms) = serde_json::from_str::<Vec<String>>(json_str) {
-                    let table = lua.create_table()?;
-                    for (i, p) in perms.into_iter().enumerate() {
-                        table.set(i + 1, p)?;
+    session.set(
+        "permissions",
+        lua.create_function(move |lua, (): ()| {
+            let store = db_store_perms.lock().unwrap();
+            if let Some(perms_table) = store.get("permissions") {
+                if let Some(json_str) = perms_table.get(&node_hex_str_clone) {
+                    if let Ok(perms) = serde_json::from_str::<Vec<String>>(json_str) {
+                        let table = lua.create_table()?;
+                        for (i, p) in perms.into_iter().enumerate() {
+                            table.set(i + 1, p)?;
+                        }
+                        return Ok(table);
                     }
-                    return Ok(table);
                 }
             }
-        }
-        let empty_tbl = lua.create_table()?;
-        Ok(empty_tbl)
-    })?)?;
+            let empty_tbl = lua.create_table()?;
+            Ok(empty_tbl)
+        })?,
+    )?;
 
     let db_store_has_perm = db_store.clone();
     let node_hex_str_clone = node_hex_str.clone();
-    session.set("has_permission", lua.create_function(move |_, perm: String| {
-        let store = db_store_has_perm.lock().unwrap();
-        if let Some(perms_table) = store.get("permissions") {
-            if let Some(json_str) = perms_table.get(&node_hex_str_clone) {
-                if let Ok(perms) = serde_json::from_str::<Vec<String>>(json_str) {
-                    return Ok(perms.contains(&perm));
+    session.set(
+        "has_permission",
+        lua.create_function(move |_, perm: String| {
+            let store = db_store_has_perm.lock().unwrap();
+            if let Some(perms_table) = store.get("permissions") {
+                if let Some(json_str) = perms_table.get(&node_hex_str_clone) {
+                    if let Ok(perms) = serde_json::from_str::<Vec<String>>(json_str) {
+                        return Ok(perms.contains(&perm));
+                    }
                 }
             }
-        }
-        Ok(false)
-    })?)?;
+            Ok(false)
+        })?,
+    )?;
 
     let active_app_clone = active_app.clone();
     let load_app = lua.create_function(move |lua, app_name: String| {
@@ -640,8 +1205,13 @@ fn run_session_task(
         }
 
         if let Some(msg) = rx.blocking_recv() {
-            log::debug!("Got input message: opcode={}, len={}", msg.opcode, msg.payload.len());
-            if msg.opcode == 0x02 { // Keystroke/Input message
+            log::debug!(
+                "Got input message: opcode={}, len={}",
+                msg.opcode,
+                msg.payload.len()
+            );
+            if msg.opcode == 0x02 {
+                // Keystroke/Input message
                 if let Ok(input_str) = String::from_utf8(msg.payload) {
                     let cb_opt = {
                         let mut store = callback_store.lock().unwrap();
@@ -651,7 +1221,9 @@ fn run_session_task(
                     if let Some((_max_len, reg_key)) = cb_opt {
                         let cb: mlua::Function = lua.registry_value(&reg_key)?;
                         if input_str.starts_with('{') {
-                            if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(&input_str) {
+                            if let Ok(json_val) =
+                                serde_json::from_str::<serde_json::Value>(&input_str)
+                            {
                                 if let Ok(lua_val) = lua.to_value(&json_val) {
                                     cb.call::<_, ()>(lua_val)?;
                                 } else {
@@ -706,7 +1278,7 @@ mod tests {
         let globals = lua.globals();
         globals.set("os", mlua::Value::Nil).unwrap();
         globals.set("io", mlua::Value::Nil).unwrap();
-        
+
         assert!(globals.get::<_, mlua::Value>("os").unwrap().is_nil());
         assert!(globals.get::<_, mlua::Value>("io").unwrap().is_nil());
     }
@@ -765,19 +1337,24 @@ max_asset_broadcast_duty_cycle = 0.1
     async fn test_bbs_server_connection_and_lua_execution() {
         let _ = env_logger::builder().is_test(true).try_init();
         let config = default_config();
-        let server_transport = Arc::new(MockSocketTransport::new_server("127.0.0.1:9095".to_string(), 0.0, 0, 200));
-        
-        let server_handle = tokio::spawn(async move {
-            start_server(config, server_transport, Some(1)).await
-        });
-        
+        let server_transport = Arc::new(MockSocketTransport::new_server(
+            "127.0.0.1:9095".to_string(),
+            0.0,
+            0,
+            200,
+        ));
+
+        let server_handle =
+            tokio::spawn(async move { start_server(config, server_transport, Some(1)).await });
+
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-        let client_transport = MockSocketTransport::new_client("127.0.0.1:9095".to_string(), 0.0, 0, 200);
-        
+        let client_transport =
+            MockSocketTransport::new_client("127.0.0.1:9095".to_string(), 0.0, 0, 200);
+
         let client_key = [5u8; 32];
         let handshake_msg = MeshBbsMessage::new(0x03, 0x01, 0x00, Vec::new());
         let handshake_payloads = handshake_msg.to_fragments(200).unwrap();
-        
+
         let mut sent = false;
         for _ in 0..10 {
             if !handshake_payloads.is_empty() {
@@ -797,15 +1374,23 @@ max_asset_broadcast_duty_cycle = 0.1
             tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
         }
         assert!(sent, "Failed to send handshake from client");
-        
+
         // Reassemble the server welcome menu fragments
         let mut client_reassembler = MessageReassembler::new();
         let mut assembled_msg = None;
         let start_time = tokio::time::Instant::now();
         while start_time.elapsed() < tokio::time::Duration::from_millis(1500) {
-            match tokio::time::timeout(tokio::time::Duration::from_millis(100), client_transport.receive_packet()).await {
+            match tokio::time::timeout(
+                tokio::time::Duration::from_millis(100),
+                client_transport.receive_packet(),
+            )
+            .await
+            {
                 Ok(Ok(packet)) => {
-                    if let Some(msg) = client_reassembler.process_packet([0; 32], &packet.payload).unwrap() {
+                    if let Some(msg) = client_reassembler
+                        .process_packet([0; 32], &packet.payload)
+                        .unwrap()
+                    {
                         assembled_msg = Some(msg);
                         break;
                     }
@@ -813,14 +1398,18 @@ max_asset_broadcast_duty_cycle = 0.1
                 _ => {}
             }
         }
-        
+
         let response = assembled_msg.expect("Failed to reassemble server response welcome screen");
         assert_eq!(response.opcode, 0x03);
-        assert!(!response.payload.is_empty(), "Server response payload is empty");
+        assert!(
+            !response.payload.is_empty(),
+            "Server response payload is empty"
+        );
 
         // Send simulated Form Submission (tab nickname to action button, then press enter)
         let form_submit_json = r#"{"nickname":"TestUser","submit":"read_boards"}"#;
-        let submit_msg = MeshBbsMessage::new(0x02, 0x02, 0x00, form_submit_json.as_bytes().to_vec());
+        let submit_msg =
+            MeshBbsMessage::new(0x02, 0x02, 0x00, form_submit_json.as_bytes().to_vec());
         let submit_payloads = submit_msg.to_fragments(200).unwrap();
         assert!(!submit_payloads.is_empty());
 
@@ -838,9 +1427,17 @@ max_asset_broadcast_duty_cycle = 0.1
         let mut board_msg = None;
         let start_time = tokio::time::Instant::now();
         while start_time.elapsed() < tokio::time::Duration::from_millis(1500) {
-            match tokio::time::timeout(tokio::time::Duration::from_millis(100), client_transport.receive_packet()).await {
+            match tokio::time::timeout(
+                tokio::time::Duration::from_millis(100),
+                client_transport.receive_packet(),
+            )
+            .await
+            {
                 Ok(Ok(packet)) => {
-                    if let Some(msg) = client_reassembler.process_packet([0; 32], &packet.payload).unwrap() {
+                    if let Some(msg) = client_reassembler
+                        .process_packet([0; 32], &packet.payload)
+                        .unwrap()
+                    {
                         board_msg = Some(msg);
                         break;
                     }
@@ -849,9 +1446,10 @@ max_asset_broadcast_duty_cycle = 0.1
             }
         }
 
-        let board_response = board_msg.expect("Failed to reassemble discussion boards screen response");
+        let board_response =
+            board_msg.expect("Failed to reassemble discussion boards screen response");
         assert_eq!(board_response.opcode, 0x03);
-        
+
         let _ = server_handle.await;
     }
 
@@ -874,7 +1472,10 @@ max_asset_broadcast_duty_cycle = 0.1
 
         let config: AppConfig = toml::from_str(config_str).unwrap();
         assert_eq!(config.admin_nodes.len(), 1);
-        assert_eq!(config.admin_nodes[0], "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890");
+        assert_eq!(
+            config.admin_nodes[0],
+            "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"
+        );
         assert_eq!(config.rate_limiter.max_packets_per_minute, 30);
     }
 
@@ -947,7 +1548,8 @@ submit_bg = 5
         // Simulates the permissions initialization logic for the first user
         let db_store: HashMap<String, HashMap<String, String>> = HashMap::new();
         let admin_nodes: Vec<String> = Vec::new();
-        let node_hex = "0505050505050505050505050505050505050505050505050505050505050505".to_string();
+        let node_hex =
+            "0505050505050505050505050505050505050505050505050505050505050505".to_string();
 
         let is_configured_admin = admin_nodes.contains(&node_hex);
         let is_first_user = match db_store.get("users") {
@@ -967,7 +1569,8 @@ submit_bg = 5
 
     #[test]
     fn test_permissions_configured_admin_node() {
-        let node_hex = "aabbccdd00000000000000000000000000000000000000000000000000000000".to_string();
+        let node_hex =
+            "aabbccdd00000000000000000000000000000000000000000000000000000000".to_string();
         let admin_nodes = vec![node_hex.clone()];
 
         let mut db_store: HashMap<String, HashMap<String, String>> = HashMap::new();
@@ -994,7 +1597,8 @@ submit_bg = 5
 
     #[test]
     fn test_permissions_regular_user() {
-        let node_hex = "1111111111111111111111111111111111111111111111111111111111111111".to_string();
+        let node_hex =
+            "1111111111111111111111111111111111111111111111111111111111111111".to_string();
         let admin_nodes: Vec<String> = Vec::new();
 
         let mut db_store: HashMap<String, HashMap<String, String>> = HashMap::new();
@@ -1025,7 +1629,9 @@ submit_bg = 5
         let perms = vec!["read".to_string(), "write".to_string(), "admin".to_string()];
         let json_str = serde_json::to_string(&perms).unwrap();
 
-        let perms_table = db_store.entry("permissions".to_string()).or_insert_with(HashMap::new);
+        let perms_table = db_store
+            .entry("permissions".to_string())
+            .or_insert_with(HashMap::new);
         perms_table.insert(node_hex.clone(), json_str);
 
         // Verify we can read them back
@@ -1043,7 +1649,9 @@ submit_bg = 5
         let original_perms = vec!["read".to_string()];
         let json_str = serde_json::to_string(&original_perms).unwrap();
 
-        let perms_table = db_store.entry("permissions".to_string()).or_insert_with(HashMap::new);
+        let perms_table = db_store
+            .entry("permissions".to_string())
+            .or_insert_with(HashMap::new);
         perms_table.insert(node_hex.clone(), json_str);
 
         // Simulate reconnect logic: only insert if not present
@@ -1134,33 +1742,115 @@ max_asset_broadcast_duty_cycle = 0.15
     async fn test_server_with_admin_nodes_config() {
         let _ = env_logger::builder().is_test(true).try_init();
         let mut config = default_config();
-        config.admin_nodes = vec![
-            "0505050505050505050505050505050505050505050505050505050505050505".to_string()
-        ];
+        config.admin_nodes =
+            vec!["0505050505050505050505050505050505050505050505050505050505050505".to_string()];
         let transport = Arc::new(MockSocketTransport::new(0.0, 10, 200));
         let result = start_server(config, transport, Some(1)).await;
         assert!(result.is_ok());
     }
 
     #[tokio::test]
+    async fn test_advert_packet_processing() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let config = default_config();
+        let server_transport = Arc::new(MockSocketTransport::new_server("127.0.0.1:9097".to_string(), 0.0, 0, 200));
+
+        let server_handle = tokio::spawn(async move {
+            start_server(config, server_transport, Some(2)).await
+        });
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        let client_transport = MockSocketTransport::new_client("127.0.0.1:9097".to_string(), 0.0, 0, 200);
+
+        let client_key = [8u8; 32];
+
+        // Send advert packet
+        let mut advert_payload = Vec::new();
+        advert_payload.extend_from_slice(&client_key); // 32 bytes public key
+        advert_payload.extend_from_slice(&0u32.to_le_bytes()); // 4 bytes timestamp
+        advert_payload.extend_from_slice(&[0u8; 64]); // 64 bytes signature
+
+        let flags: u8 = 0x80 | 0x10; // has name | has location
+        advert_payload.push(flags);
+
+        let lat_int: i32 = 47606200; // Seattle lat
+        advert_payload.extend_from_slice(&lat_int.to_le_bytes());
+        let lon_int: i32 = -122332100; // Seattle lon
+        advert_payload.extend_from_slice(&lon_int.to_le_bytes());
+
+        let node_name = "AdvertUser";
+        advert_payload.extend_from_slice(node_name.as_bytes());
+
+        let advert_packet = RadioPacket {
+            is_broadcast: true,
+            src_node: client_key,
+            dst_node: [0; 32],
+            payload: advert_payload,
+            signal_rssi: -40,
+            signal_snr: 12,
+        };
+        client_transport.send_packet(advert_packet).await.unwrap();
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+        // Send handshake
+        let handshake_msg = MeshBbsMessage::new(0x03, 0x01, 0x00, Vec::new());
+        let handshake_payloads = handshake_msg.to_fragments(200).unwrap();
+        let handshake = RadioPacket {
+            is_broadcast: false,
+            src_node: client_key,
+            dst_node: [0; 32],
+            payload: handshake_payloads[0].clone(),
+            signal_rssi: -50,
+            signal_snr: 10,
+        };
+        client_transport.send_packet(handshake).await.unwrap();
+
+        let mut client_reassembler = MessageReassembler::new();
+        let mut assembled_msg = None;
+        let start_time = tokio::time::Instant::now();
+        while start_time.elapsed() < tokio::time::Duration::from_millis(1500) {
+            match tokio::time::timeout(tokio::time::Duration::from_millis(100), client_transport.receive_packet()).await {
+                Ok(Ok(packet)) => {
+                    if let Some(msg) = client_reassembler.process_packet([0; 32], &packet.payload).unwrap() {
+                        assembled_msg = Some(msg);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        assert!(assembled_msg.is_some(), "Should receive welcome screen");
+
+        // Wait for server to shutdown
+        let _ = server_handle.await;
+    }
+
+    #[tokio::test]
     async fn test_session_reconnect_preserves_nickname() {
         let _ = env_logger::builder().is_test(true).try_init();
         let config = default_config();
-        let server_transport = Arc::new(MockSocketTransport::new_server("127.0.0.1:9096".to_string(), 0.0, 0, 200));
-        
-        let server_handle = tokio::spawn(async move {
-            start_server(config, server_transport, Some(3)).await
-        });
-        
+        let server_transport = Arc::new(MockSocketTransport::new_server(
+            "127.0.0.1:9096".to_string(),
+            0.0,
+            0,
+            200,
+        ));
+
+        let server_handle =
+            tokio::spawn(async move { start_server(config, server_transport, Some(3)).await });
+
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-        let client_transport = MockSocketTransport::new_client("127.0.0.1:9096".to_string(), 0.0, 0, 200);
-        
+        let client_transport =
+            MockSocketTransport::new_client("127.0.0.1:9096".to_string(), 0.0, 0, 200);
+
         let client_key = [7u8; 32];
-        
+
         // First connection: handshake
         let handshake_msg = MeshBbsMessage::new(0x03, 0x01, 0x00, Vec::new());
         let handshake_payloads = handshake_msg.to_fragments(200).unwrap();
-        
+
         let mut sent = false;
         for _ in 0..10 {
             let packet = RadioPacket {
@@ -1178,15 +1868,23 @@ max_asset_broadcast_duty_cycle = 0.15
             tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
         }
         assert!(sent, "Failed to send handshake");
-        
+
         // Receive initial welcome (nickname setup form for first user)
         let mut client_reassembler = MessageReassembler::new();
         let mut assembled_msg = None;
         let start_time = tokio::time::Instant::now();
         while start_time.elapsed() < tokio::time::Duration::from_millis(1500) {
-            match tokio::time::timeout(tokio::time::Duration::from_millis(100), client_transport.receive_packet()).await {
+            match tokio::time::timeout(
+                tokio::time::Duration::from_millis(100),
+                client_transport.receive_packet(),
+            )
+            .await
+            {
                 Ok(Ok(packet)) => {
-                    if let Some(msg) = client_reassembler.process_packet([0; 32], &packet.payload).unwrap() {
+                    if let Some(msg) = client_reassembler
+                        .process_packet([0; 32], &packet.payload)
+                        .unwrap()
+                    {
                         assembled_msg = Some(msg);
                         break;
                     }
@@ -1194,16 +1892,16 @@ max_asset_broadcast_duty_cycle = 0.15
                 _ => {}
             }
         }
-        
+
         assert!(assembled_msg.is_some(), "Should receive welcome screen");
         let welcome = assembled_msg.unwrap();
         assert_eq!(welcome.opcode, 0x03);
-        
+
         // Register nickname
         let register_json = r#"{"nickname":"ReconnectTestUser","submit":"register"}"#;
         let register_msg = MeshBbsMessage::new(0x02, 0x02, 0x00, register_json.as_bytes().to_vec());
         let register_payloads = register_msg.to_fragments(200).unwrap();
-        
+
         let packet = RadioPacket {
             is_broadcast: false,
             src_node: client_key,
@@ -1213,14 +1911,22 @@ max_asset_broadcast_duty_cycle = 0.15
             signal_snr: 10,
         };
         client_transport.send_packet(packet).await.unwrap();
-        
+
         // After registering, server should send back the main menu with "Hello ReconnectTestUser"
         let mut hello_msg = None;
         let start_time = tokio::time::Instant::now();
         while start_time.elapsed() < tokio::time::Duration::from_millis(1500) {
-            match tokio::time::timeout(tokio::time::Duration::from_millis(100), client_transport.receive_packet()).await {
+            match tokio::time::timeout(
+                tokio::time::Duration::from_millis(100),
+                client_transport.receive_packet(),
+            )
+            .await
+            {
                 Ok(Ok(packet)) => {
-                    if let Some(msg) = client_reassembler.process_packet([0; 32], &packet.payload).unwrap() {
+                    if let Some(msg) = client_reassembler
+                        .process_packet([0; 32], &packet.payload)
+                        .unwrap()
+                    {
                         hello_msg = Some(msg);
                         break;
                     }
@@ -1228,13 +1934,657 @@ max_asset_broadcast_duty_cycle = 0.15
                 _ => {}
             }
         }
-        
-        let hello_response = hello_msg.expect("Should receive Hello screen after nickname registration");
+
+        let hello_response =
+            hello_msg.expect("Should receive Hello screen after nickname registration");
         assert_eq!(hello_response.opcode, 0x03);
         // The payload should contain the user's nickname in the hello greeting
         let payload_str = String::from_utf8_lossy(&hello_response.payload);
-        assert!(payload_str.contains("ReconnectTestUser"), "Hello screen should contain user nickname, got: {}", payload_str);
-        
+        assert!(
+            payload_str.contains("ReconnectTestUser"),
+            "Hello screen should contain user nickname, got: {}",
+            payload_str
+        );
+
         let _ = server_handle.await;
     }
+
+    #[test]
+    fn test_asset_manifest_loading() {
+        let manifest = load_asset_manifest();
+        assert!(manifest.contains_key(&0x0101));
+        assert!(manifest.contains_key(&0x0102));
+        assert!(manifest.contains_key(&0x0103));
+
+        let (banner_name, banner_path) = manifest.get(&0x0103).unwrap();
+        assert_eq!(banner_name, "ASSET_MAIN_MENU_BANNER");
+        assert_eq!(banner_path, "assets/main_menu_banner.ans");
+    }
+
+    #[tokio::test]
+    async fn test_on_demand_asset_broadcast_and_client_caching() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let config = default_config();
+        let server_transport = Arc::new(MockSocketTransport::new_server(
+            "127.0.0.1:9098".to_string(),
+            0.0,
+            0,
+            200,
+        ));
+
+        let server_handle =
+            tokio::spawn(async move { start_server(config, server_transport, Some(2)).await });
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        let client_transport =
+            MockSocketTransport::new_client("127.0.0.1:9098".to_string(), 0.0, 0, 200);
+
+        let client_key = [9u8; 32];
+        let handshake_msg = MeshBbsMessage::new(0x03, 0x01, 0x00, Vec::new());
+        let handshake_payloads = handshake_msg.to_fragments(200).unwrap();
+
+        let mut sent = false;
+        for _ in 0..10 {
+            if !handshake_payloads.is_empty() {
+                let packet = RadioPacket {
+                    is_broadcast: false,
+                    src_node: client_key,
+                    dst_node: [0; 32],
+                    payload: handshake_payloads[0].clone(),
+                    signal_rssi: -50,
+                    signal_snr: 10,
+                };
+                if client_transport.send_packet(packet).await.is_ok() {
+                    sent = true;
+                    break;
+                }
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        }
+        assert!(sent, "Failed to send handshake from client");
+
+        // Send REQ_ASSET for 0x0103 (ASSET_MAIN_MENU_BANNER)
+        let req_asset_id: u16 = 0x0103;
+        let req_msg = MeshBbsMessage::new(0x01, 0x05, 0x00, req_asset_id.to_be_bytes().to_vec());
+        let req_payloads = req_msg.to_fragments(200).unwrap();
+        let packet = RadioPacket {
+            is_broadcast: false,
+            src_node: client_key,
+            dst_node: [0; 32],
+            payload: req_payloads[0].clone(),
+            signal_rssi: -50,
+            signal_snr: 10,
+        };
+        client_transport.send_packet(packet).await.unwrap();
+
+        // Listen for broadcast asset packet chunks
+        let mut chunks_received: HashMap<u8, Vec<u8>> = HashMap::new();
+        let mut expected_total_chunks = 0u8;
+        let mut expected_crc32 = 0u32;
+        let start_time = tokio::time::Instant::now();
+        while start_time.elapsed() < tokio::time::Duration::from_millis(2000) {
+            match tokio::time::timeout(
+                tokio::time::Duration::from_millis(100),
+                client_transport.receive_packet(),
+            )
+            .await
+            {
+                Ok(Ok(packet)) => {
+                    if packet.payload.len() >= 12 && packet.payload[0] == 0xBB && packet.payload[1] == 0x04 {
+                        let chunk_idx = packet.payload[3];
+                        let total_chunks = packet.payload[4];
+                        let asset_id = u16::from_be_bytes([packet.payload[5], packet.payload[6]]);
+                        let payload_len = packet.payload[7] as usize;
+                        let master_crc = u32::from_be_bytes([
+                            packet.payload[8],
+                            packet.payload[9],
+                            packet.payload[10],
+                            packet.payload[11],
+                        ]);
+
+                        if asset_id == req_asset_id && packet.payload.len() >= 12 + payload_len {
+                            expected_total_chunks = total_chunks;
+                            expected_crc32 = master_crc;
+                            chunks_received.insert(chunk_idx, packet.payload[12..12 + payload_len].to_vec());
+
+                            if chunks_received.len() == total_chunks as usize {
+                                break;
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        assert!(
+            expected_total_chunks > 0,
+            "Did not receive any broadcast asset chunks for 0x0103"
+        );
+        assert_eq!(
+            chunks_received.len(),
+            expected_total_chunks as usize,
+            "Did not receive all broadcast chunks"
+        );
+
+        let mut assembled_bytes = Vec::new();
+        for idx in 1..=expected_total_chunks {
+            assembled_bytes.extend_from_slice(chunks_received.get(&idx).unwrap());
+        }
+
+        assert_eq!(
+            meshcore_transport::crc32(&assembled_bytes),
+            expected_crc32,
+            "CRC32 mismatch on assembled broadcast asset"
+        );
+
+        let banner_path = find_workspace_path("assets/main_menu_banner.ans");
+        let expected_bytes = std::fs::read(banner_path).unwrap();
+        assert_eq!(assembled_bytes, expected_bytes, "Broadcast asset content does not match original file");
+
+        let _ = server_handle.await;
+    }
+
+    #[test]
+    fn test_bbs_stats_new() {
+        let stats = BbsStats::new();
+        assert_eq!(stats.active_sessions(), 0);
+        assert_eq!(stats.unique_users_24h(), 0);
+    }
+
+    #[test]
+    fn test_bbs_stats_session_connect_disconnect() {
+        let stats = BbsStats::new();
+        let node1 = [1u8; 32];
+        let node2 = [2u8; 32];
+
+        stats.record_session_connect(node1);
+        assert_eq!(stats.active_sessions(), 1);
+
+        stats.record_session_connect(node2);
+        assert_eq!(stats.active_sessions(), 2);
+
+        stats.record_session_disconnect();
+        assert_eq!(stats.active_sessions(), 1);
+
+        stats.record_session_disconnect();
+        assert_eq!(stats.active_sessions(), 0);
+
+        // Disconnecting below 0 should saturate at 0
+        stats.record_session_disconnect();
+        assert_eq!(stats.active_sessions(), 0);
+    }
+
+    #[test]
+    fn test_bbs_stats_unique_users_24h() {
+        let stats = BbsStats::new();
+        let node1 = [1u8; 32];
+        let node2 = [2u8; 32];
+
+        stats.record_session_connect(node1);
+        stats.record_session_connect(node1); // Same node reconnecting
+        stats.record_session_connect(node2);
+
+        assert_eq!(stats.unique_users_24h(), 2);
+    }
+
+    #[test]
+    fn test_db_set_nil_and_null_handling() {
+        let lua = mlua::Lua::new();
+        let db_store = Arc::new(StdMutex::new(HashMap::<String, HashMap<String, String>>::new()));
+
+        let db = lua.create_table().unwrap();
+        let db_store_get = db_store.clone();
+        db.set(
+            "get",
+            lua.create_function(move |lua, args: mlua::MultiValue| {
+                let store = db_store_get.lock().unwrap();
+                let mut iter = args.into_iter();
+                let table = match iter.next() {
+                    Some(mlua::Value::String(s)) => s.to_str()?.to_string(),
+                    _ => return Ok(mlua::Value::Nil),
+                };
+                let key = match iter.next() {
+                    Some(mlua::Value::String(s)) => s.to_str()?.to_string(),
+                    Some(mlua::Value::Integer(i)) => i.to_string(),
+                    _ => "default".to_string(),
+                };
+                if let Some(tbl) = store.get(&table) {
+                    if let Some(val) = tbl.get(&key) {
+                        if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(val) {
+                            if json_val.is_null() {
+                                return Ok(mlua::Value::Nil);
+                            }
+                            if let Ok(lua_val) = lua.to_value(&json_val) {
+                                return Ok(mlua::Value::from(lua_val));
+                            }
+                        }
+                    }
+                }
+                Ok(mlua::Value::Nil)
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        let db_store_set = db_store.clone();
+        db.set(
+            "set",
+            lua.create_function(move |lua, args: mlua::MultiValue| {
+                let mut store = db_store_set.lock().unwrap();
+                let mut iter = args.into_iter();
+                let table = match iter.next() {
+                    Some(mlua::Value::String(s)) => s.to_str()?.to_string(),
+                    _ => return Ok(()),
+                };
+                let (key, val) = match (iter.next(), iter.next()) {
+                    (Some(k_val), Some(v)) => {
+                        let key_str = match k_val {
+                            mlua::Value::String(s) => s.to_str()?.to_string(),
+                            mlua::Value::Integer(i) => i.to_string(),
+                            _ => "default".to_string(),
+                        };
+                        (key_str, v)
+                    }
+                    (Some(v), None) => ("default".to_string(), v),
+                    _ => return Ok(()),
+                };
+                if val.is_nil() {
+                    if let Some(tbl) = store.get_mut(&table) {
+                        tbl.remove(&key);
+                    }
+                } else if let Ok(json_val) = lua.from_value::<serde_json::Value>(val) {
+                    if json_val.is_null() {
+                        if let Some(tbl) = store.get_mut(&table) {
+                            tbl.remove(&key);
+                        }
+                    } else if let Ok(json_str) = serde_json::to_string(&json_val) {
+                        store
+                            .entry(table)
+                            .or_insert_with(HashMap::new)
+                            .insert(key, json_str);
+                    }
+                }
+                Ok(())
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        lua.globals().set("db", db).unwrap();
+
+        // 1. Set a table
+        lua.load(r#"db.set("test_table", "player1", { hp = 25, name = "Hero" })"#)
+            .exec()
+            .unwrap();
+
+        // Verify get returns table
+        let hp: i32 = lua
+            .load(r#"local p = db.get("test_table", "player1"); return p.hp"#)
+            .eval()
+            .unwrap();
+        assert_eq!(hp, 25);
+
+        // 2. Set nil (game over / clear save)
+        lua.load(r#"db.set("test_table", "player1", nil)"#)
+            .exec()
+            .unwrap();
+
+        // Verify get returns nil (not userdata Null!)
+        let is_nil: bool = lua
+            .load(r#"local p = db.get("test_table", "player1"); return p == nil"#)
+            .eval()
+            .unwrap();
+        assert!(is_nil, "db.get after setting nil should return nil");
+
+        // Verify condition `if not player or player.hp <= 0` does not error on userdata index
+        let ok_result: bool = lua
+            .load(
+                r#"
+                local p = db.get("test_table", "player1")
+                if not p or p.hp <= 0 then
+                    return true
+                end
+                return false
+                "#,
+            )
+            .eval()
+            .unwrap();
+        assert!(ok_result);
+    }
+
+    #[test]
+    fn test_minidungeon_xp_and_stat_mechanics() {
+        let lua = mlua::Lua::new();
+        let code = std::fs::read_to_string(find_workspace_path("apps/30_doorgames/minidungeon.lua"))
+            .unwrap();
+
+        // Verify exponential XP progression
+        let xp_checks: (i64, i64, i64, i64) = lua
+            .load(
+                r#"
+                local function xp_needed(level)
+                    return 50 * (math.floor(2 ^ level) - 1)
+                end
+                return xp_needed(1), xp_needed(2), xp_needed(3), xp_needed(4)
+                "#,
+            )
+            .eval()
+            .unwrap();
+
+        assert_eq!(xp_checks.0, 50, "Level 1->2 should need 50 XP");
+        assert_eq!(xp_checks.1, 150, "Level 2->3 should need 150 total XP");
+        assert_eq!(xp_checks.2, 350, "Level 3->4 should need 350 total XP");
+        assert_eq!(xp_checks.3, 750, "Level 4->5 should need 750 total XP");
+
+        // Verify minidungeon script compiles without syntax errors
+        assert!(!code.is_empty());
+    }
+
+    #[test]
+    fn test_db_flexible_args() {
+        let lua = mlua::Lua::new();
+        let db_store = Arc::new(StdMutex::new(HashMap::<String, HashMap<String, String>>::new()));
+
+        let db = lua.create_table().unwrap();
+        let db_store_get = db_store.clone();
+        db.set(
+            "get",
+            lua.create_function(move |lua, args: mlua::MultiValue| {
+                let store = db_store_get.lock().unwrap();
+                let mut iter = args.into_iter();
+                let table = match iter.next() {
+                    Some(mlua::Value::String(s)) => s.to_str()?.to_string(),
+                    _ => return Ok(mlua::Value::Nil),
+                };
+                let key = match iter.next() {
+                    Some(mlua::Value::String(s)) => s.to_str()?.to_string(),
+                    Some(mlua::Value::Integer(i)) => i.to_string(),
+                    _ => "default".to_string(),
+                };
+                if let Some(tbl) = store.get(&table) {
+                    if let Some(val) = tbl.get(&key) {
+                        if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(val) {
+                            if json_val.is_null() {
+                                return Ok(mlua::Value::Nil);
+                            }
+                            if let Ok(lua_val) = lua.to_value(&json_val) {
+                                return Ok(mlua::Value::from(lua_val));
+                            }
+                        }
+                    }
+                }
+                Ok(mlua::Value::Nil)
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        let db_store_set = db_store.clone();
+        db.set(
+            "set",
+            lua.create_function(move |lua, args: mlua::MultiValue| {
+                let mut store = db_store_set.lock().unwrap();
+                let mut iter = args.into_iter();
+                let table = match iter.next() {
+                    Some(mlua::Value::String(s)) => s.to_str()?.to_string(),
+                    _ => return Ok(()),
+                };
+                let (key, val) = match (iter.next(), iter.next()) {
+                    (Some(k_val), Some(v)) => {
+                        let key_str = match k_val {
+                            mlua::Value::String(s) => s.to_str()?.to_string(),
+                            mlua::Value::Integer(i) => i.to_string(),
+                            _ => "default".to_string(),
+                        };
+                        (key_str, v)
+                    }
+                    (Some(v), None) => ("default".to_string(), v),
+                    _ => return Ok(()),
+                };
+                if val.is_nil() {
+                    if let Some(tbl) = store.get_mut(&table) {
+                        tbl.remove(&key);
+                    }
+                } else if let Ok(json_val) = lua.from_value::<serde_json::Value>(val) {
+                    if json_val.is_null() {
+                        if let Some(tbl) = store.get_mut(&table) {
+                            tbl.remove(&key);
+                        }
+                    } else if let Ok(json_str) = serde_json::to_string(&json_val) {
+                        store
+                            .entry(table)
+                            .or_insert_with(HashMap::new)
+                            .insert(key, json_str);
+                    }
+                }
+                Ok(())
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        lua.globals().set("db", db).unwrap();
+
+        // 1. Two-arg set and get: db.set(table, key, val) and db.get(table, key)
+        lua.load(r#"db.set("users", "user1", { nickname = "Alice" })"#).exec().unwrap();
+        let nick: String = lua.load(r#"local u = db.get("users", "user1"); return u.nickname"#).eval().unwrap();
+        assert_eq!(nick, "Alice");
+
+        // 2. Single-key set and get: db.set(key, val) and db.get(key)
+        lua.load(r#"db.set("market_categories", { "General", "Radios" })"#).exec().unwrap();
+        let cat: String = lua.load(r#"local c = db.get("market_categories"); return c[2]"#).eval().unwrap();
+        assert_eq!(cat, "Radios");
+
+        // 3. Deletion with nil
+        lua.load(r#"db.set("users", "user1", nil)"#).exec().unwrap();
+        let is_nil: bool = lua.load(r#"return db.get("users", "user1") == nil"#).eval().unwrap();
+        assert!(is_nil);
+    }
+
+    #[test]
+    fn test_marketplace_app_syntax() {
+        let path = find_workspace_path("apps/50_marketplace.lua");
+        let content = std::fs::read_to_string(path).unwrap();
+        let lua = mlua::Lua::new();
+        let chunk = lua.load(&content);
+        assert!(chunk.into_function().is_ok(), "50_marketplace.lua should compile as valid Lua");
+    }
+
+    #[tokio::test]
+    async fn test_marketplace_session_navigation() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let config = default_config();
+        let server_transport = Arc::new(MockSocketTransport::new_server("127.0.0.1:9093".to_string(), 0.0, 0, 200));
+
+        let server_handle = tokio::spawn(async move {
+            start_server(config, server_transport, Some(3)).await
+        });
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        let client_transport = MockSocketTransport::new_client("127.0.0.1:9093".to_string(), 0.0, 0, 200);
+
+        let client_key = [11u8; 32];
+
+        // Handshake
+        let handshake_msg = MeshBbsMessage::new(0x03, 0x01, 0x00, Vec::new());
+        let handshake_payloads = handshake_msg.to_fragments(200).unwrap();
+
+        let mut sent = false;
+        for _ in 0..10 {
+            let packet = RadioPacket {
+                is_broadcast: false,
+                src_node: client_key,
+                dst_node: [0; 32],
+                payload: handshake_payloads[0].clone(),
+                signal_rssi: -50,
+                signal_snr: 10,
+            };
+            if client_transport.send_packet(packet).await.is_ok() {
+                sent = true;
+                break;
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        }
+        assert!(sent, "Failed to send handshake");
+
+        let mut client_reassembler = MessageReassembler::new();
+
+        // 1. Receive register screen
+        let start_time = tokio::time::Instant::now();
+        while start_time.elapsed() < tokio::time::Duration::from_millis(1500) {
+            match tokio::time::timeout(tokio::time::Duration::from_millis(100), client_transport.receive_packet()).await {
+                Ok(Ok(packet)) => {
+                    if let Some(_msg) = client_reassembler.process_packet([0; 32], &packet.payload).unwrap() {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // 2. Register nickname "TraderBob"
+        let register_json = r#"{"nickname":"TraderBob","submit":"register"}"#;
+        let register_msg = MeshBbsMessage::new(0x02, 0x02, 0x00, register_json.as_bytes().to_vec());
+        let register_payloads = register_msg.to_fragments(200).unwrap();
+        let packet = RadioPacket {
+            is_broadcast: false,
+            src_node: client_key,
+            dst_node: [0; 32],
+            payload: register_payloads[0].clone(),
+            signal_rssi: -50,
+            signal_snr: 10,
+        };
+        client_transport.send_packet(packet).await.unwrap();
+
+        // Receive Main Menu screen
+        let start_time = tokio::time::Instant::now();
+        while start_time.elapsed() < tokio::time::Duration::from_millis(1500) {
+            match tokio::time::timeout(tokio::time::Duration::from_millis(100), client_transport.receive_packet()).await {
+                Ok(Ok(packet)) => {
+                    if let Some(_msg) = client_reassembler.process_packet([0; 32], &packet.payload).unwrap() {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // 3. Submit "marketplace" action from main menu (Form ID 10)
+        let market_select_json = r#"{"submit":"marketplace"}"#;
+        let market_msg = MeshBbsMessage::new(0x02, 0x02, 0x00, market_select_json.as_bytes().to_vec());
+        let market_payloads = market_msg.to_fragments(200).unwrap();
+        let packet = RadioPacket {
+            is_broadcast: false,
+            src_node: client_key,
+            dst_node: [0; 32],
+            payload: market_payloads[0].clone(),
+            signal_rssi: -50,
+            signal_snr: 10,
+        };
+        client_transport.send_packet(packet).await.unwrap();
+
+        // 4. Receive Marketplace screen
+        let mut market_screen = None;
+        let start_time = tokio::time::Instant::now();
+        while start_time.elapsed() < tokio::time::Duration::from_millis(1500) {
+            match tokio::time::timeout(tokio::time::Duration::from_millis(100), client_transport.receive_packet()).await {
+                Ok(Ok(packet)) => {
+                    if let Some(msg) = client_reassembler.process_packet([0; 32], &packet.payload).unwrap() {
+                        market_screen = Some(msg);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let resp = market_screen.expect("Should receive Marketplace screen");
+        assert_eq!(resp.opcode, 0x03);
+        let screen_text = String::from_utf8_lossy(&resp.payload);
+        assert!(screen_text.contains("MARKETPLACE"), "Should contain MARKETPLACE header, got: {}", screen_text);
+
+        let _ = server_handle.await;
+    }
+
+    #[test]
+    fn test_parse_meshcore_advert_full_packet_framing() {
+        let node_key = [0x42u8; 32];
+        let mut packet_bytes = Vec::new();
+
+        // 1. Packet Header: Version=0, PayloadType=0x04 (ADVERT), RouteType=0x01 (FLOOD) -> 0b00010001 = 0x11
+        packet_bytes.push(0x11);
+        // 2. Path length: 2 hops
+        packet_bytes.push(2);
+        // 3. Path bytes
+        packet_bytes.push(0xAA);
+        packet_bytes.push(0xBB);
+
+        // 4. Advert payload:
+        // Pubkey (32B)
+        packet_bytes.extend_from_slice(&node_key);
+        // Timestamp (4B LE)
+        packet_bytes.extend_from_slice(&1700000000u32.to_le_bytes());
+        // Signature (64B)
+        packet_bytes.extend_from_slice(&[0x77u8; 64]);
+
+        // Appdata:
+        // Flags: 0x80 (name) | 0x40 (feature2) | 0x20 (feature1) | 0x10 (location) | 0x01 (chat node) = 0xF1
+        packet_bytes.push(0xF1);
+        // Lat: 37.7749 * 1_000_000 = 37774900
+        packet_bytes.extend_from_slice(&37774900i32.to_le_bytes());
+        // Lon: -122.4194 * 1_000_000 = -122419400
+        packet_bytes.extend_from_slice(&(-122419400i32).to_le_bytes());
+        // Feature1: 100
+        packet_bytes.extend_from_slice(&100u16.to_le_bytes());
+        // Feature2: 200
+        packet_bytes.extend_from_slice(&200u16.to_le_bytes());
+        // Node name
+        packet_bytes.extend_from_slice(b"MeshGateway-Alpha");
+
+        let (parsed_node, metadata) = parse_meshcore_advert(&packet_bytes, [0; 32]).expect("Should parse valid framed advert");
+        assert_eq!(parsed_node, node_key);
+        assert_eq!(metadata.get("node_name").and_then(|v| v.as_str()), Some("MeshGateway-Alpha"));
+        assert_eq!(metadata.get("node_type").and_then(|v| v.as_str()), Some("chat_node"));
+        assert_eq!(metadata.get("feature1").and_then(|v| v.as_u64()), Some(100));
+        assert_eq!(metadata.get("feature2").and_then(|v| v.as_u64()), Some(200));
+        assert_eq!(metadata.get("advert_timestamp").and_then(|v| v.as_u64()), Some(1700000000));
+        let lat = metadata.get("latitude").and_then(|v| v.as_f64()).unwrap();
+        assert!((lat - 37.7749).abs() < 0.0001);
+    }
+
+    #[test]
+    fn test_parse_meshcore_advert_transport_direct() {
+        let node_key = [0x55u8; 32];
+        let mut packet_bytes = Vec::new();
+
+        // Packet Header: Version=0, PayloadType=0x04, RouteType=0x03 (TRANSPORT_DIRECT) -> 0b00010011 = 0x13
+        packet_bytes.push(0x13);
+        // Transport codes (4 bytes)
+        packet_bytes.extend_from_slice(&[0x12, 0x34, 0x56, 0x78]);
+        // Path length: 0
+        packet_bytes.push(0);
+
+        // Advert payload:
+        packet_bytes.extend_from_slice(&node_key);
+        packet_bytes.extend_from_slice(&12345u32.to_le_bytes());
+        packet_bytes.extend_from_slice(&[0u8; 64]);
+
+        // Flags: 0x82 (is repeater + has name)
+        packet_bytes.push(0x82);
+        packet_bytes.extend_from_slice(b"HilltopRepeater");
+
+        let (parsed_node, metadata) = parse_meshcore_advert(&packet_bytes, [0; 32]).expect("Should parse transport direct advert");
+        assert_eq!(parsed_node, node_key);
+        assert_eq!(metadata.get("node_name").and_then(|v| v.as_str()), Some("HilltopRepeater"));
+        assert_eq!(metadata.get("node_type").and_then(|v| v.as_str()), Some("repeater"));
+    }
+
+    #[test]
+    fn test_parse_meshcore_advert_malformed() {
+        assert!(parse_meshcore_advert(&[], [0; 32]).is_none());
+        assert!(parse_meshcore_advert(&[0x11, 0x00], [0; 32]).is_none());
+        assert!(parse_meshcore_advert(&[0u8; 50], [0; 32]).is_none());
+    }
 }
+

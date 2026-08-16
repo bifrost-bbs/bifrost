@@ -18,6 +18,8 @@ target/
 # Temporary files & logs
 *.log
 tmp/
+.client_cache/
+**/.client_cache/
 scratch/
 
 # Local configuration overrides
@@ -29,3 +31,9 @@ database.db-journal
 
 # Lua cache / compiled files
 *.luac
+
+# Client asset cache directory
+.client_cache/
+**/.client_cache/
+
+
