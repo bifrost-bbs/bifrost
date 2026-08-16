@@ -34,4 +34,6 @@ database.db-journal
 
 # Client asset cache directory
 .client_cache/
+**/.client_cache/
+
 

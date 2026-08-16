@@ -39,6 +39,7 @@ function menu.on_start(session)
         term.add_submit_button("read_boards", 2, 12)
         term.add_submit_button("door_game", 18, 12)
         term.add_submit_button("profile", 34, 12)
+        term.add_submit_button("marketplace", 2, 13)
         
         -- Show Admin Panel only if the user has admin permission
         local is_admin = session.has_permission("admin")
@@ -62,6 +63,8 @@ function menu.on_start(session)
 
             if action == "read_boards" then
                 session.load_app("10_messages")
+            elseif action == "marketplace" then
+                session.load_app("50_marketplace")
             elseif action == "door_game" then
                 session.load_app("30_doorgames/minidungeon")
             elseif action == "profile" then
