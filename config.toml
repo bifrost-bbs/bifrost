@@ -1,7 +1,7 @@
 # Bifrost MeshBBS Host Configuration
 
 # Default logging level: "error", "warn", "info", "debug", "trace"
-log_level = "info"
+log_level = "debug"
 
 [rate_limiter]
 # Maximum packets per minute across all active BBS sessions
