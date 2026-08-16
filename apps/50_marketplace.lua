@@ -13,7 +13,7 @@ function market.on_start(session)
     term.print("=== BIFROST MARKETPLACE ===\n\n")
     term.set_color(7, 0)
 
-    local categories = db.get("market_categories") or { "General" }
+    local categories = db.get("marketplace", "categories") or { "General" }
 
     term.print("Select a category:\n\n")
     term.define_form(50)
@@ -82,9 +82,9 @@ function market.new_category(session)
         if submission.submit == "save" then
             local new_cat = submission.cat_name or ""
             if new_cat ~= "" then
-                local categories = db.get("market_categories") or { "General" }
+                local categories = db.get("marketplace", "categories") or { "General" }
                 table.insert(categories, new_cat)
-                db.set("market_categories", categories)
+                db.set("marketplace", "categories", categories)
             end
         end
         market.on_start(session)
@@ -97,7 +97,7 @@ function market.view_category(session, cat_name)
     term.print("=== CATEGORY: " .. cat_name .. " ===\n\n")
     term.set_color(7, 0)
 
-    local items = db.get("market_cat_" .. cat_name) or {}
+    local items = db.get("market_items", cat_name) or {}
 
     term.define_form(52)
     local y = 4
@@ -175,7 +175,7 @@ function market.new_item(session, cat_name)
             local price = tonumber(submission.price) or 0
             local desc = submission.desc or ""
             if title ~= "" then
-                local items = db.get("market_cat_" .. cat_name) or {}
+                local items = db.get("market_items", cat_name) or {}
                 table.insert(items, {
                     title = title,
                     price = price,
@@ -183,7 +183,7 @@ function market.new_item(session, cat_name)
                     seller_id = session.node_id(),
                     offers = {}
                 })
-                db.set("market_cat_" .. cat_name, items)
+                db.set("market_items", cat_name, items)
             end
         end
         market.view_category(session, cat_name)
@@ -191,7 +191,7 @@ function market.new_item(session, cat_name)
 end
 
 function market.view_item(session, cat_name, item_idx)
-    local items = db.get("market_cat_" .. cat_name) or {}
+    local items = db.get("market_items", cat_name) or {}
     local item = items[item_idx]
     if not item then
         market.view_category(session, cat_name)
@@ -246,7 +246,7 @@ function market.view_item(session, cat_name, item_idx)
 end
 
 function market.make_offer(session, cat_name, item_idx)
-    local items = db.get("market_cat_" .. cat_name) or {}
+    local items = db.get("market_items", cat_name) or {}
     local item = items[item_idx]
     if not item then
         market.view_category(session, cat_name)
@@ -276,13 +276,13 @@ function market.make_offer(session, cat_name, item_idx)
             local amount = tonumber(submission.amount)
             if amount then
                 -- Must re-fetch in case it changed
-                local current_items = db.get("market_cat_" .. cat_name) or {}
+                local current_items = db.get("market_items", cat_name) or {}
                 if current_items[item_idx] then
                     table.insert(current_items[item_idx].offers, {
                         buyer_id = session.node_id(),
                         amount = amount
                     })
-                    db.set("market_cat_" .. cat_name, current_items)
+                    db.set("market_items", cat_name, current_items)
                 end
             end
         end

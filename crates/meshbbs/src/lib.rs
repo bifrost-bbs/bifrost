@@ -476,30 +476,77 @@ fn run_session_task(
     // db table
     let db = lua.create_table()?;
     let db_store_get = db_store.clone();
-    db.set("get", lua.create_function(move |lua, (table, key): (String, String)| {
-        let store = db_store_get.lock().unwrap();
-        if let Some(tbl) = store.get(&table) {
-            if let Some(val) = tbl.get(&key) {
-                if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(val) {
-                    if let Ok(lua_val) = lua.to_value(&json_val) {
-                        return Ok(mlua::Value::from(lua_val));
+    db.set(
+        "get",
+        lua.create_function(move |lua, args: mlua::MultiValue| {
+            let store = db_store_get.lock().unwrap();
+            let mut iter = args.into_iter();
+            let table = match iter.next() {
+                Some(mlua::Value::String(s)) => s.to_str()?.to_string(),
+                _ => return Ok(mlua::Value::Nil),
+            };
+            let key = match iter.next() {
+                Some(mlua::Value::String(s)) => s.to_str()?.to_string(),
+                Some(mlua::Value::Integer(i)) => i.to_string(),
+                _ => "default".to_string(),
+            };
+            if let Some(tbl) = store.get(&table) {
+                if let Some(val) = tbl.get(&key) {
+                    if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(val) {
+                        if json_val.is_null() {
+                            return Ok(mlua::Value::Nil);
+                        }
+                        if let Ok(lua_val) = lua.to_value(&json_val) {
+                            return Ok(mlua::Value::from(lua_val));
+                        }
                     }
                 }
             }
-        }
-        Ok(mlua::Value::Nil)
-    })?)?;
+            Ok(mlua::Value::Nil)
+        })?,
+    )?;
 
     let db_store_set = db_store.clone();
-    db.set("set", lua.create_function(move |lua, (table, key, val): (String, String, mlua::Value)| {
-        if let Ok(json_val) = lua.from_value::<serde_json::Value>(val) {
-            if let Ok(json_str) = serde_json::to_string(&json_val) {
-                let mut store = db_store_set.lock().unwrap();
-                store.entry(table).or_insert_with(HashMap::new).insert(key, json_str);
+    db.set(
+        "set",
+        lua.create_function(move |lua, args: mlua::MultiValue| {
+            let mut store = db_store_set.lock().unwrap();
+            let mut iter = args.into_iter();
+            let table = match iter.next() {
+                Some(mlua::Value::String(s)) => s.to_str()?.to_string(),
+                _ => return Ok(()),
+            };
+            let (key, val) = match (iter.next(), iter.next()) {
+                (Some(k_val), Some(v)) => {
+                    let key_str = match k_val {
+                        mlua::Value::String(s) => s.to_str()?.to_string(),
+                        mlua::Value::Integer(i) => i.to_string(),
+                        _ => "default".to_string(),
+                    };
+                    (key_str, v)
+                }
+                (Some(v), None) => ("default".to_string(), v),
+                _ => return Ok(()),
+            };
+            if val.is_nil() {
+                if let Some(tbl) = store.get_mut(&table) {
+                    tbl.remove(&key);
+                }
+            } else if let Ok(json_val) = lua.from_value::<serde_json::Value>(val) {
+                if json_val.is_null() {
+                    if let Some(tbl) = store.get_mut(&table) {
+                        tbl.remove(&key);
+                    }
+                } else if let Ok(json_str) = serde_json::to_string(&json_val) {
+                    store
+                        .entry(table)
+                        .or_insert_with(HashMap::new)
+                        .insert(key, json_str);
+                }
             }
-        }
-        Ok(())
-    })?)?;
+            Ok(())
+        })?,
+    )?;
 
     let db_store_keys = db_store.clone();
     db.set("keys", lua.create_function(move |lua, table: String| {
@@ -1235,6 +1282,232 @@ max_asset_broadcast_duty_cycle = 0.15
         let payload_str = String::from_utf8_lossy(&hello_response.payload);
         assert!(payload_str.contains("ReconnectTestUser"), "Hello screen should contain user nickname, got: {}", payload_str);
         
+        let _ = server_handle.await;
+    }
+
+    #[test]
+    fn test_db_flexible_args() {
+        let lua = mlua::Lua::new();
+        let db_store = Arc::new(StdMutex::new(HashMap::<String, HashMap<String, String>>::new()));
+
+        let db = lua.create_table().unwrap();
+        let db_store_get = db_store.clone();
+        db.set(
+            "get",
+            lua.create_function(move |lua, args: mlua::MultiValue| {
+                let store = db_store_get.lock().unwrap();
+                let mut iter = args.into_iter();
+                let table = match iter.next() {
+                    Some(mlua::Value::String(s)) => s.to_str()?.to_string(),
+                    _ => return Ok(mlua::Value::Nil),
+                };
+                let key = match iter.next() {
+                    Some(mlua::Value::String(s)) => s.to_str()?.to_string(),
+                    Some(mlua::Value::Integer(i)) => i.to_string(),
+                    _ => "default".to_string(),
+                };
+                if let Some(tbl) = store.get(&table) {
+                    if let Some(val) = tbl.get(&key) {
+                        if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(val) {
+                            if json_val.is_null() {
+                                return Ok(mlua::Value::Nil);
+                            }
+                            if let Ok(lua_val) = lua.to_value(&json_val) {
+                                return Ok(mlua::Value::from(lua_val));
+                            }
+                        }
+                    }
+                }
+                Ok(mlua::Value::Nil)
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        let db_store_set = db_store.clone();
+        db.set(
+            "set",
+            lua.create_function(move |lua, args: mlua::MultiValue| {
+                let mut store = db_store_set.lock().unwrap();
+                let mut iter = args.into_iter();
+                let table = match iter.next() {
+                    Some(mlua::Value::String(s)) => s.to_str()?.to_string(),
+                    _ => return Ok(()),
+                };
+                let (key, val) = match (iter.next(), iter.next()) {
+                    (Some(k_val), Some(v)) => {
+                        let key_str = match k_val {
+                            mlua::Value::String(s) => s.to_str()?.to_string(),
+                            mlua::Value::Integer(i) => i.to_string(),
+                            _ => "default".to_string(),
+                        };
+                        (key_str, v)
+                    }
+                    (Some(v), None) => ("default".to_string(), v),
+                    _ => return Ok(()),
+                };
+                if val.is_nil() {
+                    if let Some(tbl) = store.get_mut(&table) {
+                        tbl.remove(&key);
+                    }
+                } else if let Ok(json_val) = lua.from_value::<serde_json::Value>(val) {
+                    if json_val.is_null() {
+                        if let Some(tbl) = store.get_mut(&table) {
+                            tbl.remove(&key);
+                        }
+                    } else if let Ok(json_str) = serde_json::to_string(&json_val) {
+                        store
+                            .entry(table)
+                            .or_insert_with(HashMap::new)
+                            .insert(key, json_str);
+                    }
+                }
+                Ok(())
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        lua.globals().set("db", db).unwrap();
+
+        // 1. Two-arg set and get: db.set(table, key, val) and db.get(table, key)
+        lua.load(r#"db.set("users", "user1", { nickname = "Alice" })"#).exec().unwrap();
+        let nick: String = lua.load(r#"local u = db.get("users", "user1"); return u.nickname"#).eval().unwrap();
+        assert_eq!(nick, "Alice");
+
+        // 2. Single-key set and get: db.set(key, val) and db.get(key)
+        lua.load(r#"db.set("market_categories", { "General", "Radios" })"#).exec().unwrap();
+        let cat: String = lua.load(r#"local c = db.get("market_categories"); return c[2]"#).eval().unwrap();
+        assert_eq!(cat, "Radios");
+
+        // 3. Deletion with nil
+        lua.load(r#"db.set("users", "user1", nil)"#).exec().unwrap();
+        let is_nil: bool = lua.load(r#"return db.get("users", "user1") == nil"#).eval().unwrap();
+        assert!(is_nil);
+    }
+
+    #[test]
+    fn test_marketplace_app_syntax() {
+        let path = find_workspace_path("apps/50_marketplace.lua");
+        let content = std::fs::read_to_string(path).unwrap();
+        let lua = mlua::Lua::new();
+        let chunk = lua.load(&content);
+        assert!(chunk.into_function().is_ok(), "50_marketplace.lua should compile as valid Lua");
+    }
+
+    #[tokio::test]
+    async fn test_marketplace_session_navigation() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let config = default_config();
+        let server_transport = Arc::new(MockSocketTransport::new_server("127.0.0.1:9093".to_string(), 0.0, 0, 200));
+
+        let server_handle = tokio::spawn(async move {
+            start_server(config, server_transport, Some(3)).await
+        });
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        let client_transport = MockSocketTransport::new_client("127.0.0.1:9093".to_string(), 0.0, 0, 200);
+
+        let client_key = [11u8; 32];
+
+        // Handshake
+        let handshake_msg = MeshBbsMessage::new(0x03, 0x01, 0x00, Vec::new());
+        let handshake_payloads = handshake_msg.to_fragments(200).unwrap();
+
+        let mut sent = false;
+        for _ in 0..10 {
+            let packet = RadioPacket {
+                is_broadcast: false,
+                src_node: client_key,
+                dst_node: [0; 32],
+                payload: handshake_payloads[0].clone(),
+                signal_rssi: -50,
+                signal_snr: 10,
+            };
+            if client_transport.send_packet(packet).await.is_ok() {
+                sent = true;
+                break;
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        }
+        assert!(sent, "Failed to send handshake");
+
+        let mut client_reassembler = MessageReassembler::new();
+
+        // 1. Receive register screen
+        let start_time = tokio::time::Instant::now();
+        while start_time.elapsed() < tokio::time::Duration::from_millis(1500) {
+            match tokio::time::timeout(tokio::time::Duration::from_millis(100), client_transport.receive_packet()).await {
+                Ok(Ok(packet)) => {
+                    if let Some(_msg) = client_reassembler.process_packet([0; 32], &packet.payload).unwrap() {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // 2. Register nickname "TraderBob"
+        let register_json = r#"{"nickname":"TraderBob","submit":"register"}"#;
+        let register_msg = MeshBbsMessage::new(0x02, 0x02, 0x00, register_json.as_bytes().to_vec());
+        let register_payloads = register_msg.to_fragments(200).unwrap();
+        let packet = RadioPacket {
+            is_broadcast: false,
+            src_node: client_key,
+            dst_node: [0; 32],
+            payload: register_payloads[0].clone(),
+            signal_rssi: -50,
+            signal_snr: 10,
+        };
+        client_transport.send_packet(packet).await.unwrap();
+
+        // Receive Main Menu screen
+        let start_time = tokio::time::Instant::now();
+        while start_time.elapsed() < tokio::time::Duration::from_millis(1500) {
+            match tokio::time::timeout(tokio::time::Duration::from_millis(100), client_transport.receive_packet()).await {
+                Ok(Ok(packet)) => {
+                    if let Some(_msg) = client_reassembler.process_packet([0; 32], &packet.payload).unwrap() {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // 3. Submit "marketplace" action from main menu (Form ID 10)
+        let market_select_json = r#"{"submit":"marketplace"}"#;
+        let market_msg = MeshBbsMessage::new(0x02, 0x02, 0x00, market_select_json.as_bytes().to_vec());
+        let market_payloads = market_msg.to_fragments(200).unwrap();
+        let packet = RadioPacket {
+            is_broadcast: false,
+            src_node: client_key,
+            dst_node: [0; 32],
+            payload: market_payloads[0].clone(),
+            signal_rssi: -50,
+            signal_snr: 10,
+        };
+        client_transport.send_packet(packet).await.unwrap();
+
+        // 4. Receive Marketplace screen
+        let mut market_screen = None;
+        let start_time = tokio::time::Instant::now();
+        while start_time.elapsed() < tokio::time::Duration::from_millis(1500) {
+            match tokio::time::timeout(tokio::time::Duration::from_millis(100), client_transport.receive_packet()).await {
+                Ok(Ok(packet)) => {
+                    if let Some(msg) = client_reassembler.process_packet([0; 32], &packet.payload).unwrap() {
+                        market_screen = Some(msg);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let resp = market_screen.expect("Should receive Marketplace screen");
+        assert_eq!(resp.opcode, 0x03);
+        let screen_text = String::from_utf8_lossy(&resp.payload);
+        assert!(screen_text.contains("MARKETPLACE"), "Should contain MARKETPLACE header, got: {}", screen_text);
+
         let _ = server_handle.await;
     }
 }
