@@ -6,4 +6,6 @@ edition = "2021"
 [dependencies]
 heatshrink = "0.2.0"
 thiserror.workspace = true
+log.workspace = true
+
 

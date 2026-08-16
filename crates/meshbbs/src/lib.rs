@@ -6,6 +6,7 @@ use log::{info, warn};
 use mlua::LuaSerdeExt;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::time::Instant;
@@ -23,6 +24,10 @@ pub struct BbsStats {
     pub session_timestamps: StdMutex<Vec<(Instant, [u8; 32])>>,
     /// Currently active session node IDs
     pub active_session_count: StdMutex<usize>,
+    pub raw_bytes_sent: AtomicU64,
+    pub raw_bytes_received: AtomicU64,
+    pub compressed_bytes_sent: AtomicU64,
+    pub compressed_bytes_received: AtomicU64,
 }
 
 impl BbsStats {
@@ -30,6 +35,10 @@ impl BbsStats {
         Self {
             session_timestamps: StdMutex::new(Vec::new()),
             active_session_count: StdMutex::new(0),
+            raw_bytes_sent: AtomicU64::new(0),
+            raw_bytes_received: AtomicU64::new(0),
+            compressed_bytes_sent: AtomicU64::new(0),
+            compressed_bytes_received: AtomicU64::new(0),
         }
     }
 
@@ -48,6 +57,38 @@ impl BbsStats {
         if let Ok(mut count) = self.active_session_count.lock() {
             *count = count.saturating_sub(1);
         }
+    }
+
+    /// Records raw and compressed byte counts for transmitted data.
+    pub fn record_compression(&self, raw_bytes: usize, compressed_bytes: usize) {
+        self.raw_bytes_sent.fetch_add(raw_bytes as u64, Ordering::Relaxed);
+        self.compressed_bytes_sent.fetch_add(compressed_bytes as u64, Ordering::Relaxed);
+    }
+
+    /// Records raw and compressed byte counts for received data.
+    pub fn record_decompression(&self, compressed_bytes: usize, raw_bytes: usize) {
+        self.compressed_bytes_received.fetch_add(compressed_bytes as u64, Ordering::Relaxed);
+        self.raw_bytes_received.fetch_add(raw_bytes as u64, Ordering::Relaxed);
+    }
+
+    /// Total uncompressed raw bytes sent.
+    pub fn total_raw_bytes_sent(&self) -> u64 {
+        self.raw_bytes_sent.load(Ordering::Relaxed)
+    }
+
+    /// Total uncompressed raw bytes received.
+    pub fn total_raw_bytes_received(&self) -> u64 {
+        self.raw_bytes_received.load(Ordering::Relaxed)
+    }
+
+    /// Total compressed bytes sent.
+    pub fn total_compressed_bytes_sent(&self) -> u64 {
+        self.compressed_bytes_sent.load(Ordering::Relaxed)
+    }
+
+    /// Total compressed bytes received.
+    pub fn total_compressed_bytes_received(&self) -> u64 {
+        self.compressed_bytes_received.load(Ordering::Relaxed)
     }
 
     /// Returns the count of unique nodes that have connected in the last 24 hours.
@@ -450,11 +491,17 @@ pub async fn start_server_with_stats(
                 let (send_ppm, recv_ppm) = ts_clone.packets_per_minute_last(3600);
                 let (send_ppm_24h, recv_ppm_24h) = ts_clone.packets_per_minute_last(86400);
                 info!(
-                    "[BBS STATS] Active Users 24h: {} | Current Sessions: {} | Pkts Sent: {} | Pkts Recv: {} | Avg PPM 1h: {:.1}/{:.1} | Avg PPM 24h: {:.1}/{:.1} | Uptime: {}s",
+                    "[BBS STATS] Active Users 24h: {} | Current Sessions: {} | Pkts Sent: {} | Pkts Recv: {} | Bytes Sent: {} (raw: {}, comp: {}) | Bytes Recv: {} (raw: {}, comp: {}) | Avg PPM 1h: {:.1}/{:.1} | Avg PPM 24h: {:.1}/{:.1} | Uptime: {}s",
                     bbs_stats_clone.unique_users_24h(),
                     bbs_stats_clone.active_sessions(),
                     ts_clone.total_packets_sent(),
                     ts_clone.total_packets_received(),
+                    ts_clone.total_bytes_sent(),
+                    ts_clone.total_raw_bytes_sent(),
+                    ts_clone.total_compressed_bytes_sent(),
+                    ts_clone.total_bytes_received(),
+                    ts_clone.total_raw_bytes_received(),
+                    ts_clone.total_compressed_bytes_received(),
                     send_ppm,
                     recv_ppm,
                     send_ppm_24h,
@@ -2126,6 +2173,18 @@ max_asset_broadcast_duty_cycle = 0.15
         stats.record_session_connect(node2);
 
         assert_eq!(stats.unique_users_24h(), 2);
+    }
+
+    #[test]
+    fn test_bbs_stats_compression_recording() {
+        let stats = BbsStats::new();
+        stats.record_compression(1024, 300);
+        stats.record_decompression(250, 800);
+
+        assert_eq!(stats.total_raw_bytes_sent(), 1024);
+        assert_eq!(stats.total_compressed_bytes_sent(), 300);
+        assert_eq!(stats.total_raw_bytes_received(), 800);
+        assert_eq!(stats.total_compressed_bytes_received(), 250);
     }
 
     #[test]

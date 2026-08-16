@@ -60,6 +60,10 @@ pub struct TransportStats {
     pub packets_received: AtomicU64,
     pub bytes_sent: AtomicU64,
     pub bytes_received: AtomicU64,
+    pub raw_bytes_sent: AtomicU64,
+    pub raw_bytes_received: AtomicU64,
+    pub compressed_bytes_sent: AtomicU64,
+    pub compressed_bytes_received: AtomicU64,
     pub send_errors: AtomicU64,
     pub receive_errors: AtomicU64,
     pub started_at: Instant,
@@ -74,6 +78,10 @@ impl TransportStats {
             packets_received: AtomicU64::new(0),
             bytes_sent: AtomicU64::new(0),
             bytes_received: AtomicU64::new(0),
+            raw_bytes_sent: AtomicU64::new(0),
+            raw_bytes_received: AtomicU64::new(0),
+            compressed_bytes_sent: AtomicU64::new(0),
+            compressed_bytes_received: AtomicU64::new(0),
             send_errors: AtomicU64::new(0),
             receive_errors: AtomicU64::new(0),
             started_at: Instant::now(),
@@ -85,6 +93,7 @@ impl TransportStats {
     pub fn record_send(&self, payload_bytes: usize) {
         self.packets_sent.fetch_add(1, Ordering::Relaxed);
         self.bytes_sent.fetch_add(payload_bytes as u64, Ordering::Relaxed);
+        self.compressed_bytes_sent.fetch_add(payload_bytes as u64, Ordering::Relaxed);
         if let Ok(mut ts) = self.packet_timestamps.lock() {
             ts.push((Instant::now(), true));
         }
@@ -94,9 +103,22 @@ impl TransportStats {
     pub fn record_receive(&self, payload_bytes: usize) {
         self.packets_received.fetch_add(1, Ordering::Relaxed);
         self.bytes_received.fetch_add(payload_bytes as u64, Ordering::Relaxed);
+        self.compressed_bytes_received.fetch_add(payload_bytes as u64, Ordering::Relaxed);
         if let Ok(mut ts) = self.packet_timestamps.lock() {
             ts.push((Instant::now(), false));
         }
+    }
+
+    /// Records raw and compressed byte counts for transmitted data.
+    pub fn record_compression(&self, raw_bytes: usize, compressed_bytes: usize) {
+        self.raw_bytes_sent.fetch_add(raw_bytes as u64, Ordering::Relaxed);
+        self.compressed_bytes_sent.fetch_add(compressed_bytes as u64, Ordering::Relaxed);
+    }
+
+    /// Records raw and compressed byte counts for received data.
+    pub fn record_decompression(&self, compressed_bytes: usize, raw_bytes: usize) {
+        self.compressed_bytes_received.fetch_add(compressed_bytes as u64, Ordering::Relaxed);
+        self.raw_bytes_received.fetch_add(raw_bytes as u64, Ordering::Relaxed);
     }
 
     /// Records a send error.
@@ -162,6 +184,26 @@ impl TransportStats {
     /// Total payload bytes received since creation.
     pub fn total_bytes_received(&self) -> u64 {
         self.bytes_received.load(Ordering::Relaxed)
+    }
+
+    /// Total uncompressed raw bytes sent.
+    pub fn total_raw_bytes_sent(&self) -> u64 {
+        self.raw_bytes_sent.load(Ordering::Relaxed)
+    }
+
+    /// Total uncompressed raw bytes received.
+    pub fn total_raw_bytes_received(&self) -> u64 {
+        self.raw_bytes_received.load(Ordering::Relaxed)
+    }
+
+    /// Total compressed bytes sent.
+    pub fn total_compressed_bytes_sent(&self) -> u64 {
+        self.compressed_bytes_sent.load(Ordering::Relaxed)
+    }
+
+    /// Total compressed bytes received.
+    pub fn total_compressed_bytes_received(&self) -> u64 {
+        self.compressed_bytes_received.load(Ordering::Relaxed)
     }
 
     /// Seconds elapsed since the stats tracker was created.
@@ -922,5 +964,17 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(10));
         // started_at.elapsed() should be > 0 in nanoseconds at least
         assert!(stats.started_at.elapsed().as_nanos() > 0);
+    }
+
+    #[test]
+    fn test_transport_stats_compression_recording() {
+        let stats = TransportStats::new();
+        stats.record_compression(500, 200);
+        stats.record_decompression(150, 400);
+
+        assert_eq!(stats.total_raw_bytes_sent(), 500);
+        assert_eq!(stats.total_compressed_bytes_sent(), 200);
+        assert_eq!(stats.total_raw_bytes_received(), 400);
+        assert_eq!(stats.total_compressed_bytes_received(), 150);
     }
 }
