@@ -173,6 +173,147 @@ pub struct AppConfig {
     pub admin_nodes: Vec<String>,
     #[serde(default = "default_apps_config")]
     pub apps: AppsConfig,
+    #[serde(default = "default_packet_capture_config")]
+    pub packet_capture: PacketCaptureConfig,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq)]
+pub struct PacketCaptureConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_capture_dir")]
+    pub directory: String,
+}
+
+fn default_capture_dir() -> String {
+    "captured_packets".to_string()
+}
+
+pub fn default_packet_capture_config() -> PacketCaptureConfig {
+    PacketCaptureConfig {
+        enabled: false,
+        directory: default_capture_dir(),
+    }
+}
+
+/// Thread-safe packet capture and compression logger for diagnostic & tuning analysis.
+#[derive(Debug)]
+pub struct PacketRecorder {
+    pub base_dir: PathBuf,
+    pub raw_dir: PathBuf,
+    pub comp_dir: PathBuf,
+    csv_file: StdMutex<Option<std::fs::File>>,
+    seq: AtomicU64,
+}
+
+impl PacketRecorder {
+    pub fn new(directory: &str) -> Result<Self> {
+        let base_dir = find_workspace_path(directory);
+        let raw_dir = base_dir.join("raw");
+        let comp_dir = base_dir.join("comp");
+        std::fs::create_dir_all(&raw_dir)?;
+        std::fs::create_dir_all(&comp_dir)?;
+
+        let csv_path = base_dir.join("compression_log.csv");
+        let file_exists = csv_path.exists();
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&csv_path)?;
+
+        let mut csv_file = file;
+        if !file_exists || csv_file.metadata()?.len() == 0 {
+            use std::io::Write;
+            writeln!(
+                csv_file,
+                "timestamp,seq,direction,category,opcode,flags,raw_bytes,compressed_bytes,savings_percent,algorithm,duration_us,raw_file,comp_file"
+            )?;
+        }
+
+        log::info!("Packet capture active, logging to {:?}", base_dir);
+
+        Ok(Self {
+            base_dir,
+            raw_dir,
+            comp_dir,
+            csv_file: StdMutex::new(Some(csv_file)),
+            seq: AtomicU64::new(1),
+        })
+    }
+
+    pub fn record_compression(
+        &self,
+        direction: &str,
+        category: &str,
+        opcode: u8,
+        flags: u8,
+        raw: &[u8],
+        compressed: Option<&[u8]>,
+        algorithm: &str,
+        duration_us: u64,
+    ) {
+        let seq = self.seq.fetch_add(1, Ordering::Relaxed);
+        let epoch_now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs_f64();
+
+        let raw_filename = format!("seq_{:06}_{}_{}.bin", seq, direction.to_lowercase(), category);
+        let raw_path = self.raw_dir.join(&raw_filename);
+        let _ = std::fs::write(&raw_path, raw);
+        let raw_rel = format!("raw/{}", raw_filename);
+
+        let (comp_bytes, savings_pct, comp_rel) = if let Some(comp) = compressed {
+            let comp_filename = format!("seq_{:06}_{}_{}.bin", seq, direction.to_lowercase(), category);
+            let comp_path = self.comp_dir.join(&comp_filename);
+            let _ = std::fs::write(&comp_path, comp);
+            let raw_len = raw.len() as f64;
+            let comp_len = comp.len() as f64;
+            let savings = if raw_len > 0.0 {
+                ((raw_len - comp_len) / raw_len) * 100.0
+            } else {
+                0.0
+            };
+            (comp.len(), savings, format!("comp/{}", comp_filename))
+        } else {
+            (0, 0.0, String::new())
+        };
+
+        if let Ok(mut guard) = self.csv_file.lock() {
+            if let Some(ref mut f) = *guard {
+                use std::io::Write;
+                let _ = writeln!(
+                    f,
+                    "{:.3},{},{},{},0x{:02X},0x{:02X},{},{},{:.2},{},{},{},{}",
+                    epoch_now,
+                    seq,
+                    direction,
+                    category,
+                    opcode,
+                    flags,
+                    raw.len(),
+                    comp_bytes,
+                    savings_pct,
+                    algorithm,
+                    duration_us,
+                    raw_rel,
+                    comp_rel
+                );
+            }
+        }
+
+        log::debug!(
+            "[CAPTURE #{:06}] {} {} (opcode=0x{:02X}): raw={}B, comp={}B ({:+.1}%) in {}µs",
+            seq,
+            direction,
+            category,
+            opcode,
+            raw.len(),
+            comp_bytes,
+            savings_pct,
+            duration_us
+        );
+    }
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -224,13 +365,23 @@ pub fn default_config() -> AppConfig {
         },
         admin_nodes: Vec::new(),
         apps: default_apps_config(),
+        packet_capture: default_packet_capture_config(),
     }
 }
 
 /// Run the BBS server engine, loading configuration and initializing transport.
 pub async fn run_bbs(config_path: Option<PathBuf>, run_duration_secs: Option<u64>) -> Result<()> {
+    run_bbs_with_capture(config_path, run_duration_secs, None).await
+}
+
+/// Run the BBS server engine with optional CLI capture directory override.
+pub async fn run_bbs_with_capture(
+    config_path: Option<PathBuf>,
+    run_duration_secs: Option<u64>,
+    capture_dir: Option<String>,
+) -> Result<()> {
     // 1. Load Config File
-    let config: AppConfig = if let Some(path) = config_path {
+    let mut config: AppConfig = if let Some(path) = config_path {
         let resolved = find_workspace_path(path.to_str().unwrap_or(""));
         if resolved.exists() {
             info!("Loading configuration from {:?}", resolved);
@@ -246,6 +397,11 @@ pub async fn run_bbs(config_path: Option<PathBuf>, run_duration_secs: Option<u64
     } else {
         default_config()
     };
+
+    if let Some(dir) = capture_dir {
+        config.packet_capture.enabled = true;
+        config.packet_capture.directory = dir;
+    }
 
     // 2. Initialize Transport
     let mock_transport = if run_duration_secs.is_some() {
@@ -347,6 +503,7 @@ pub async fn broadcast_asset(
     asset_id: u16,
     manifest_map: &HashMap<u16, (String, String)>,
     transport: &Arc<dyn RadioTransport>,
+    packet_recorder: &Option<Arc<PacketRecorder>>,
 ) -> Result<()> {
     if let Some((name, rel_path)) = manifest_map.get(&asset_id) {
         let full_path = find_workspace_path(rel_path);
@@ -365,6 +522,19 @@ pub async fn broadcast_asset(
                 total_chunks,
                 master_crc
             );
+
+            if let Some(ref recorder) = packet_recorder {
+                recorder.record_compression(
+                    "TX",
+                    "broadcast_asset_full",
+                    0x04,
+                    0x08,
+                    &content_bytes,
+                    None,
+                    "raw",
+                    0,
+                );
+            }
 
             for chunk_idx in 1..=total_chunks {
                 let start = (chunk_idx as usize - 1) * chunk_capacity;
@@ -385,6 +555,19 @@ pub async fn broadcast_asset(
                 packet_payload.push(chunk_payload.len() as u8); // PayloadLength
                 packet_payload.extend_from_slice(&master_crc.to_be_bytes()); // Master CRC32 (4B)
                 packet_payload.extend_from_slice(chunk_payload);
+
+                if let Some(ref recorder) = packet_recorder {
+                    recorder.record_compression(
+                        "TX",
+                        "broadcast_asset_chunk",
+                        0x04,
+                        0x08,
+                        &packet_payload,
+                        None,
+                        "raw",
+                        0,
+                    );
+                }
 
                 let packet = RadioPacket {
                     is_broadcast: true,
@@ -555,7 +738,6 @@ pub async fn start_server_with_stats(
     if config.asset_broadcaster.enable_on_demand_broadcast {
         info!("On-demand public asset broadcasting enabled.");
     }
-
     let active_sessions = Arc::new(StdMutex::new(HashMap::<[u8; 32], Session>::new()));
     let db_store = Arc::new(StdMutex::new(
         HashMap::<String, HashMap<String, String>>::new(),
@@ -563,6 +745,18 @@ pub async fn start_server_with_stats(
     let mut reassembler = MessageReassembler::new();
     let asset_manifest_map = Arc::new(load_app_manifests(&config.apps.enabled));
     let bbs_stats = Arc::new(BbsStats::new());
+
+    let packet_recorder: Option<Arc<PacketRecorder>> = if config.packet_capture.enabled {
+        match PacketRecorder::new(&config.packet_capture.directory) {
+            Ok(rec) => Some(Arc::new(rec)),
+            Err(e) => {
+                log::error!("Failed to initialize packet recorder: {:?}", e);
+                None
+            }
+        }
+    } else {
+        None
+    };
 
     // Spawn periodic stats logger (once per minute)
     let stats_logger_handle = if let Some(ref ts) = transport_stats {
@@ -606,10 +800,10 @@ pub async fn start_server_with_stats(
         None
     };
 
-    let bbs_stats_clone = bbs_stats.clone();
-    // Main packet routing loop placeholder
-    let manifest_map_for_loop = asset_manifest_map.clone();
+    // Main packet routing loop
     let loop_handle = tokio::spawn(async move {
+        let bbs_stats_clone = bbs_stats.clone();
+        let manifest_map_for_loop = asset_manifest_map.clone();
         let start_time = tokio::time::Instant::now();
         loop {
             if let Some(dur) = run_duration_secs {
@@ -618,7 +812,7 @@ pub async fn start_server_with_stats(
                 }
             }
 
-            // Receive packet from radio (timeout check allows quick loop exit)
+            // Receive packet from radio
             match tokio::time::timeout(
                 tokio::time::Duration::from_millis(100),
                 transport.receive_packet(),
@@ -666,11 +860,13 @@ pub async fn start_server_with_stats(
                                 );
                                 let manifest_map_clone = manifest_map_for_loop.clone();
                                 let transport_broadcast = transport.clone();
+                                let packet_recorder_broadcast = packet_recorder.clone();
                                 tokio::spawn(async move {
                                     let _ = broadcast_asset(
                                         req_asset_id,
                                         &manifest_map_clone,
                                         &transport_broadcast,
+                                        &packet_recorder_broadcast,
                                     )
                                     .await;
                                 });
@@ -704,6 +900,7 @@ pub async fn start_server_with_stats(
                                 let apps_config_clone = config.apps.clone();
                                 let bbs_stats_inner = bbs_stats_clone.clone();
                                 let transport_stats_inner = transport_stats.clone();
+                                let packet_recorder_inner = packet_recorder.clone();
                                 std::thread::spawn(move || {
                                     let res = run_session_task(
                                         src,
@@ -717,6 +914,7 @@ pub async fn start_server_with_stats(
                                         apps_config_clone,
                                         bbs_stats_inner.clone(),
                                         transport_stats_inner,
+                                        packet_recorder_inner,
                                     );
                                     sessions_clone.lock().unwrap().remove(&src);
                                     bbs_stats_inner.record_session_disconnect();
@@ -768,6 +966,7 @@ fn run_session_task(
     apps_config: AppsConfig,
     bbs_stats: Arc<BbsStats>,
     transport_stats: Option<Arc<TransportStats>>,
+    packet_recorder: Option<Arc<PacketRecorder>>,
 ) -> Result<()> {
     log::debug!("Starting run_session_task for client session");
     let lua = mlua::Lua::new();
@@ -935,6 +1134,7 @@ fn run_session_task(
     let rt = rt_handle.clone();
     let bbs_stats_flush = bbs_stats.clone();
     let transport_stats_flush = transport_stats.clone();
+    let packet_recorder_flush = packet_recorder.clone();
     term.set(
         "flush",
         lua.create_function(move |_, (): ()| {
@@ -946,6 +1146,7 @@ fn run_session_task(
             if !buf.is_empty() {
                 buf.push(0x04); // EndOfFrame
                 let raw_len = buf.len();
+                let start_comp = std::time::Instant::now();
                 let (flags, payload) = match bifrost_ansi::compress_bytecode(&buf) {
                     Ok(comp) => {
                         let comp_len = comp.len();
@@ -960,6 +1161,24 @@ fn run_session_task(
                         (0x00, buf.clone())
                     }
                 };
+                let comp_duration = start_comp.elapsed().as_micros() as u64;
+                if let Some(ref recorder) = packet_recorder_flush {
+                    let comp_opt = if (flags & 0x02) != 0 {
+                        Some(payload.as_slice())
+                    } else {
+                        None
+                    };
+                    recorder.record_compression(
+                        "TX",
+                        "screen_delta",
+                        0x03,
+                        flags,
+                        &buf,
+                        comp_opt,
+                        "heatshrink_w8_l4",
+                        comp_duration,
+                    );
+                }
                 buf.clear();
 
                 let msg = MeshBbsMessage::new(0x01, 0x03, flags, payload);
@@ -1105,6 +1324,7 @@ fn run_session_task(
     let rt = rt_handle.clone();
     let bbs_stats_form = bbs_stats.clone();
     let transport_stats_form = transport_stats.clone();
+    let packet_recorder_form = packet_recorder.clone();
     term.set(
         "flush_form",
         lua.create_function(move |_, (): ()| {
@@ -1116,6 +1336,7 @@ fn run_session_task(
             buf.push(0xD3); // OP_FORM_END
             buf.push(0x04); // EndOfFrame
             let raw_len = buf.len();
+            let start_comp = std::time::Instant::now();
             let (flags, payload) = match bifrost_ansi::compress_bytecode(&buf) {
                 Ok(comp) => {
                     let comp_len = comp.len();
@@ -1130,6 +1351,24 @@ fn run_session_task(
                     (0x00, buf.clone())
                 }
             };
+            let comp_duration = start_comp.elapsed().as_micros() as u64;
+            if let Some(ref recorder) = packet_recorder_form {
+                let comp_opt = if (flags & 0x02) != 0 {
+                    Some(payload.as_slice())
+                } else {
+                    None
+                };
+                recorder.record_compression(
+                    "TX",
+                    "form_template",
+                    0x03,
+                    flags,
+                    &buf,
+                    comp_opt,
+                    "heatshrink_w8_l4",
+                    comp_duration,
+                );
+            }
             buf.clear();
 
             let msg = MeshBbsMessage::new(0x01, 0x03, flags, payload);
@@ -1470,6 +1709,31 @@ fn run_session_task(
                 msg.opcode,
                 msg.payload.len()
             );
+            if let Some(ref recorder) = packet_recorder {
+                let (raw_data, comp_opt, duration_us) = if (msg.flags & 0x02) != 0 {
+                    let start_decomp = std::time::Instant::now();
+                    let decomp = bifrost_ansi::decompress_bytecode(&msg.payload)
+                        .unwrap_or_else(|_| msg.payload.clone());
+                    let dur = start_decomp.elapsed().as_micros() as u64;
+                    (decomp, Some(msg.payload.as_slice()), dur)
+                } else {
+                    (msg.payload.clone(), None, 0)
+                };
+                recorder.record_compression(
+                    "RX",
+                    "client_input",
+                    msg.opcode,
+                    msg.flags,
+                    &raw_data,
+                    comp_opt,
+                    if (msg.flags & 0x02) != 0 {
+                        "heatshrink_w8_l4"
+                    } else {
+                        "none"
+                    },
+                    duration_us,
+                );
+            }
             if msg.opcode == 0x02 {
                 // Keystroke/Input message
                 if let Ok(input_str) = String::from_utf8(msg.payload) {
@@ -2987,6 +3251,149 @@ max_asset_broadcast_duty_cycle = 0.15
             assert!(path.exists(), "App main.lua must exist at {:?}", path);
         }
     }
+
+    #[test]
+    fn test_packet_capture_config_deserialization() {
+        let toml_str = r#"
+        log_level = "debug"
+
+        [rate_limiter]
+        max_packets_per_minute = 45
+        max_burst_packets = 4
+        inter_packet_guard_ms = 350
+        max_duty_cycle_percent = 1.0
+        duty_cycle_window_secs = 3600
+
+        [asset_broadcaster]
+        enable_on_demand_broadcast = true
+        max_asset_broadcast_duty_cycle = 0.15
+
+        [packet_capture]
+        enabled = true
+        directory = "custom_capture_dir"
+        "#;
+        let config: AppConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.packet_capture.enabled);
+        assert_eq!(config.packet_capture.directory, "custom_capture_dir");
+    }
+
+    #[test]
+    fn test_packet_recorder_record_and_csv_generation() {
+        let temp_dir = std::env::temp_dir().join(format!("bifrost_capture_test_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let dir_str = temp_dir.to_str().unwrap();
+
+        let recorder = PacketRecorder::new(dir_str).expect("Failed to initialize PacketRecorder");
+
+        let raw_data = b"Hello Bifrost Screen Buffer 1234567890";
+        let comp_data = b"CompressedBuffer";
+
+        recorder.record_compression(
+            "TX",
+            "screen_delta",
+            0x03,
+            0x02,
+            raw_data,
+            Some(comp_data),
+            "heatshrink_w8_l4",
+            120,
+        );
+
+        recorder.record_compression(
+            "RX",
+            "client_input",
+            0x02,
+            0x00,
+            b"n",
+            None,
+            "none",
+            0,
+        );
+
+        // Verify CSV file exists and has rows
+        let csv_path = recorder.base_dir.join("compression_log.csv");
+        assert!(csv_path.exists());
+        let csv_content = std::fs::read_to_string(&csv_path).unwrap();
+        assert!(csv_content.contains("timestamp,seq,direction,category,opcode,flags,raw_bytes,compressed_bytes,savings_percent,algorithm,duration_us,raw_file,comp_file"));
+        assert!(csv_content.contains("TX,screen_delta,0x03,0x02,38,16,"));
+        assert!(csv_content.contains("RX,client_input,0x02,0x00,1,0,0.00,none,0,"));
+
+        // Verify binary files exist
+        let raw_file = recorder.raw_dir.join("seq_000001_tx_screen_delta.bin");
+        let comp_file = recorder.comp_dir.join("seq_000001_tx_screen_delta.bin");
+        assert!(raw_file.exists());
+        assert!(comp_file.exists());
+        assert_eq!(std::fs::read(&raw_file).unwrap(), raw_data);
+        assert_eq!(std::fs::read(&comp_file).unwrap(), comp_data);
+
+        // Cleanup
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[tokio::test]
+    async fn test_packet_capture_server_integration() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let temp_dir = std::env::temp_dir().join(format!("bifrost_live_capture_test_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let dir_str = temp_dir.to_str().unwrap().to_string();
+
+        let mut config = default_config();
+        config.packet_capture.enabled = true;
+        config.packet_capture.directory = dir_str.clone();
+
+        let server_transport = Arc::new(MockSocketTransport::new_server("127.0.0.1:9099".to_string(), 0.0, 0, 200));
+
+        let server_handle = tokio::spawn(async move {
+            start_server(config, server_transport, Some(2)).await
+        });
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        let client_transport = MockSocketTransport::new_client("127.0.0.1:9099".to_string(), 0.0, 0, 200);
+
+        let client_node = [0x55; 32];
+        let handshake_msg = MeshBbsMessage::new(0x03, 0x01, 0x00, Vec::new());
+        let handshake_payloads = handshake_msg.to_fragments(200).unwrap();
+
+        for _ in 0..10 {
+            let packet = RadioPacket {
+                is_broadcast: false,
+                src_node: client_node,
+                dst_node: [0; 32],
+                payload: handshake_payloads[0].clone(),
+                signal_rssi: -50,
+                signal_snr: 10,
+            };
+            if client_transport.send_packet(packet).await.is_ok() {
+                break;
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        }
+
+        // Wait for response
+        let start = tokio::time::Instant::now();
+        while start.elapsed() < tokio::time::Duration::from_millis(1500) {
+            match tokio::time::timeout(tokio::time::Duration::from_millis(100), client_transport.receive_packet()).await {
+                Ok(Ok(pkt)) => {
+                    if !pkt.payload.is_empty() {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let _ = server_handle.await;
+
+        // Verify capture files were generated
+        let csv_path = temp_dir.join("compression_log.csv");
+        assert!(csv_path.exists(), "CSV compression log should exist");
+        let csv_content = std::fs::read_to_string(&csv_path).unwrap();
+        assert!(csv_content.contains("screen_delta") || csv_content.contains("client_input"), "CSV should record compression events");
+
+        let raw_dir = temp_dir.join("raw");
+        assert!(raw_dir.exists());
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
 }
+
 
 

@@ -20,6 +20,10 @@ target/
 tmp/
 .client_cache/
 **/.client_cache/
+captured_packets/
+**/captured_packets/
+packet_capture/
+**/packet_capture/
 scratch/
 
 # Local configuration overrides

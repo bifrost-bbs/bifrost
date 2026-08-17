@@ -8,6 +8,8 @@ async fn main() -> Result<()> {
     let mut config_path = PathBuf::from("config.toml");
     let mut cli_log_level: Option<String> = None;
 
+    let mut cli_capture_dir: Option<String> = None;
+
     let args: Vec<String> = std::env::args().collect();
     let mut i = 1;
     while i < args.len() {
@@ -24,6 +26,14 @@ async fn main() -> Result<()> {
                     i += 1;
                 }
             }
+            "--capture-packets" | "--capture" | "--dump-packets" => {
+                if i + 1 < args.len() && !args[i + 1].starts_with('-') {
+                    cli_capture_dir = Some(args[i + 1].clone());
+                    i += 1;
+                } else {
+                    cli_capture_dir = Some("captured_packets".to_string());
+                }
+            }
             "--debug" | "-v" | "--verbose" => {
                 cli_log_level = Some("debug".to_string());
             }
@@ -36,6 +46,7 @@ async fn main() -> Result<()> {
                 println!("Options:");
                 println!("  -c, --config <PATH>      Path to config file [default: config.toml]");
                 println!("  -l, --log-level <LEVEL>  Set log level (trace, debug, info, warn, error)");
+                println!("      --capture-packets [DIR] Capture all in/out raw and compressed packets to CSV and .bin files [default: captured_packets]");
                 println!("  -v, --debug, --verbose   Enable debug logging");
                 println!("      --trace              Enable trace logging");
                 println!("      --mock               Enable mock radio transport");
@@ -77,6 +88,6 @@ async fn main() -> Result<()> {
         env_logger::init();
     }
 
-    // Delegate to the core runner
-    bifrost_bbs::run_bbs(Some(config_path), None).await
+    // Delegate to the core runner with capture options
+    bifrost_bbs::run_bbs_with_capture(Some(config_path), None, cli_capture_dir).await
 }
