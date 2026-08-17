@@ -38,10 +38,10 @@ function profile.on_start(session)
             local new_bio = submission.bio or current_bio
             db.set("users", user_id, { nickname = new_nick, bio = new_bio })
             log.info("Profile updated: nickname=" .. new_nick .. ", bio=" .. new_bio)
-            session.load_app("00_main_menu")
+            session.load_app("main_menu")
         else
             log.info("Profile edit canceled.")
-            session.load_app("00_main_menu")
+            session.load_app("main_menu")
         end
     end)
 end

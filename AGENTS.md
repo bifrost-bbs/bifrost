@@ -28,13 +28,13 @@ The project is structured as a Rust Cargo Workspace:
 ├── docs/
 │   ├── MeshBBS_MeshANSI_Spec.md     # Protocol and architecture specification
 │   └── PRD.md                       # Product Requirements Document
-├── apps/                            # Sandboxed Lua BBS Applications
-│   ├── 00_main_menu.lua
-│   ├── 10_messages.lua
-│   └── 30_doorgames/
-│       └── minidungeon.lua
-├── assets/                          # Static UI screens and assets
-│   └── manifest.toml                # Asset manifest tracking AssetIDs
+├── apps/                            # Encapsulated Lua BBS Applications
+│   ├── main_menu/                   # Default navigation entry point (manifest.toml, main.lua, assets/)
+│   ├── messages/                    # Discussion boards (manifest.toml, main.lua)
+│   ├── marketplace/                 # Classifieds and auctions (manifest.toml, main.lua)
+│   ├── minidungeon/                 # Asynchronous door game (manifest.toml, main.lua, assets/)
+│   ├── profile/                     # Profile editor (manifest.toml, main.lua)
+│   └── admin/                       # Admin console (manifest.toml, main.lua)
 └── crates/
     ├── bifrost-compression/        # Heatshrink LZSS algorithm implementation
     │   ├── Cargo.toml
@@ -89,7 +89,13 @@ The project is structured as a Rust Cargo Workspace:
     5.  **Priority 4:** On-demand public asset broadcasts.
 *   Enforce a rolling average airtime usage cap (1.0% by default) using a leaky-bucket or token-bucket rate limiter.
 
-### 4.3 Testing & CI
+### 4.3 Application Framework & Dynamic Asset Registry
+*   **Encapsulation:** Each application lives under `apps/<app_id>/` with its own `manifest.toml`, `main.lua`, and local `assets/`.
+*   **Dynamic Asset IDs:** Never hardcode global AssetIDs in app manifests. Let the BBS server allocate collision-free 16-bit IDs dynamically on boot.
+*   **Asset Referencing:** Refer to assets relatively within an app (`term.render_asset("banner")`) or namespaced across apps (`term.render_asset("main_menu/banner")` or `term.render_asset("main_menu::banner")`).
+*   **Scoped Modules:** Use `require("module")` or `session.include("file.lua")` which resolve strictly within the active application's directory.
+
+### 4.4 Testing & CI
 *   **Encapsulation & Testability:** Write highly modular, functional code to ensure easy testability and isolation.
 *   **Coverage Target:** Maintain a minimum of **95% test coverage** across the cargo workspace.
 *   **Unit Tests:** Place unit tests in a nested `tests` module in the same file as implementation:

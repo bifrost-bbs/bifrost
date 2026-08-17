@@ -92,7 +92,8 @@ The vision is to establish an off-grid digital community center that runs on sol
     * `term`: Controls printing, colors, absolute positioning, box macros, asset rendering, and screen flushes.
     * `session`: Exposes node info and prompts for input asynchronously.
     * `db`: Provides key-value persistent storage.
-  * **Application Loading:** Dynamically executes scripts from `/meshbbs/apps/` based on user navigation.
+  * **Application Loading:** Dynamically executes encapsulated applications from `/bifrost/apps/<app_id>/` (each with `manifest.toml`, `main.lua`, and local `assets/`) configured via `config.toml`.
+  * **Dynamic Asset Registration:** Automatically discovers asset declarations in `manifest.toml`, allocates collision-free 16-bit AssetIDs dynamically, and provides relative (`"banner"`) and namespaced (`"main_menu/banner"`) asset resolution.
 
 ### 3.7 Mock Transport & Telemetry Harness
 * **Description:** A local testing environment that simulates LoRa network physics to allow developer testing without hardware.
@@ -188,7 +189,7 @@ Client->>Client: Verify Server Signature
 Client->>Server: Client DH PubKey (encrypted)
 Server->>Server: Derives Ephemeral Symmetric Session Key
 Client->>Client: Derives Ephemeral Symmetric Session Key
-Server->>Client: Establish Encrypted Channel -> Enter 00_main_menu.lua
+Server->>Client: Establish Encrypted Channel -> Enter configured main_app (apps/main_menu/main.lua)
 ```
 
 ### 5.3 Passive Multicast Caching Flow

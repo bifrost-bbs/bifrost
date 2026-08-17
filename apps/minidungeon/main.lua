@@ -96,7 +96,7 @@ end
 
 function app.view_room(session, player, msg)
     term.clear()
-    term.render_asset("ASSET_DUNGEON_BANNER")
+    term.render_asset("dungeon_banner")
     term.move_to(2, 6)
     term.set_color(14, 0)
     term.print(string.format("Level %d - Lvl %d %s", player.dungeon_level, player.level, session.callsign()))
@@ -175,7 +175,7 @@ function app.view_room(session, player, msg)
             end
         elseif act == "quit" then
             save_player(session, player)
-            session.load_app("00_main_menu")
+            session.load_app("main_menu")
         else
             app.view_room(session, player, "Invalid action.")
         end
@@ -303,7 +303,7 @@ end
 
 function app.msg_view(session, player, form_id, msg, color)
     term.clear()
-    term.render_asset("ASSET_DUNGEON_BANNER")
+    term.render_asset("dungeon_banner")
     term.move_to(2, 10)
     term.set_color(color or 7, 0)
     term.print(msg)
@@ -315,7 +315,7 @@ end
 
 function app.battle_round(session, player, monster, msg)
     term.clear()
-    term.render_asset("ASSET_DUNGEON_BANNER")
+    term.render_asset("dungeon_banner")
     term.move_to(2, 6)
     term.set_color(12, 0)
     term.print("=== BATTLE ===")
@@ -489,7 +489,7 @@ function app.level_up(session, player)
     save_player(session, player)
 
     term.clear()
-    term.render_asset("ASSET_DUNGEON_BANNER")
+    term.render_asset("dungeon_banner")
     term.move_to(2, 8)
     term.set_color(14, 0)
     term.print("LEVEL UP! You are now level " .. player.level .. "!")
@@ -536,7 +536,7 @@ end
 function app.game_over(session, player, cause)
     db.set("dungeon_players", session.node_id(), nil) -- Clear save
     term.clear()
-    term.render_asset("ASSET_DUNGEON_BANNER")
+    term.render_asset("dungeon_banner")
     term.move_to(2, 8)
     term.set_color(12, 0)
     term.print("=== GAME OVER ===")
@@ -550,7 +550,7 @@ function app.game_over(session, player, cause)
     term.add_submit_button("exit", 2, 14)
     term.flush_form()
     
-    session.await_input(60, function() session.load_app("00_main_menu") end)
+    session.await_input(60, function() session.load_app("main_menu") end)
 end
 
 return app

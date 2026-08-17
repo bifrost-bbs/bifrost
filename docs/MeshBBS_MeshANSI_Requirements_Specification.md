@@ -247,29 +247,44 @@ $$T_{	ext{payload}} = N_{	ext{symbols}} 	imes T_{	ext{sym}} \quad 	ext{where} \q
 The BBS core acts as a microkernel. All user-facing features are decoupled into standalone **Lua Applications** executed in a memory-bounded, sandboxed environment via `mlua`.
 
 ```
-/meshbbs/
+/bifrost/
   ├── config.toml
-  ├── assets/                # Static ANSI screens, icons, bitmaps
-  │   ├── manifest.toml      # Catalog mapping names to 16-bit AssetIDs
-  │   └── *.ans
   └── apps/
-      ├── 00_main_menu.lua   # System entrypoint and top-level navigation
-      ├── 10_messages.lua    # Public threaded message boards
-      ├── 20_mail.lua        # End-to-end encrypted private mail
-      ├── 30_doorgames/      # Turn-based Door games
-      │   ├── tradewars.lua
-      │   └── lord.lua
-      ├── 40_filegate.lua    # Chunked file repository & OTA bulletin sync
-      └── 50_bridges/        # Read-only external bridges
-          └── weather.lua    # Cached off-grid weather distributor
+      ├── main_menu/         # System entrypoint and top-level navigation
+      │   ├── manifest.toml  # App metadata and asset declarations
+      │   ├── main.lua
+      │   └── assets/        # App-specific visual assets (.ans)
+      ├── messages/          # Public categorized message boards
+      │   ├── manifest.toml
+      │   └── main.lua
+      ├── marketplace/       # Decentralized buy/sell/trade/auctions
+      │   ├── manifest.toml
+      │   └── main.lua
+      ├── minidungeon/       # Turn-based dungeon door game
+      │   ├── manifest.toml
+      │   ├── main.lua
+      │   └── assets/
+      ├── profile/           # User profile manager
+      │   ├── manifest.toml
+      │   └── main.lua
+      └── admin/             # Admin console and permission manager
+          ├── manifest.toml
+          └── main.lua
 ```
 
-### 5.1 Lua Sandboxing & Resource Isolation
+### 5.1 App Encapsulation & Dynamic Asset Registry
+* **Self-Contained Packages:** Every BBS application resides in its own subfolder containing a `manifest.toml`, an entry point `main.lua`, local Lua modules, and private `assets/`.
+* **Dynamic Asset IDs:** Assets in `manifest.toml` are declared without hardcoded global IDs. The BBS host dynamically assigns unique 16-bit `AssetID`s on startup, preventing ID collisions between independent applications.
+* **Flexible Asset Referencing:** Lua applications can reference assets relatively (`term.render_asset("banner")`) within their own package or absolutely using namespace paths (`term.render_asset("main_menu/banner")` or `term.render_asset("main_menu::banner")`).
+* **Config-Driven Loading:** Applications to load are enumerated in `config.toml` under `[apps]`, allowing node operators to choose their entrypoint `main_app` and enabled applications.
+
+### 5.2 Lua Sandboxing & Resource Isolation
 * **Instruction Counter Limit:** Max 500,000 instructions per execution slice to prevent infinite loops.
 * **Memory Quota:** Each Lua VM is bounded to a maximum of 512 KB heap RAM.
 * **Restricted Standard Libraries:** Direct OS access, raw filesystem I/O, and raw sockets are stripped. All external operations are mediated by safe Rust Host APIs.
+* **Scoped Requires & Includes:** Lua scripts can use standard `require("helper")` or `session.include("file.lua")` safely resolved within the active app's directory.
 
-### 5.2 Rust-to-Lua Host API Specification
+### 5.3 Rust-to-Lua Host API Specification
 
 #### Screen & Terminal API (`term`)
 * `term.clear()`: Clears client terminal and resets cursor.
@@ -277,12 +292,14 @@ The BBS core acts as a microkernel. All user-facing features are decoupled into 
 * `term.set_color(fg, bg)`: Sets active 16-color CGA/EGA palette.
 * `term.print(text)`: Emits printable text string.
 * `term.draw_box(col, row, width, height, border_style)`: Emits optimized CP437 box macro.
-* `term.render_asset(asset_name_or_id)`: Emits opcode to render a pre-cached client asset.
+* `term.render_asset(asset_name)`: Emits opcode to render a pre-cached client asset (resolved relative to active app, e.g. `"banner"` or cross-app e.g. `"main_menu/banner"`).
 * `term.flush()`: Compiles terminal mutations into MeshANSI delta bytecode and queues for transmit.
 
 #### Session & Identity API (`session`)
 * `session.node_id()`: Returns hex string of client's MeshCore public key.
 * `session.callsign()`: Returns registered nickname/callsign.
+* `session.load_app(app_name)`: Switches execution to an enabled application (e.g. `"main_menu"`).
+* `session.include(filename)`: Evaluates a Lua script relative to the current application directory.
 * `session.await_input(max_len, callback)`: Prompts client for input and suspends execution until response arrives.
 * `session.close()`: Gracefully terminates connection.
 
@@ -291,16 +308,16 @@ The BBS core acts as a microkernel. All user-facing features are decoupled into 
 * `db.set(table, key, value)`: Stores string/JSON document.
 * `db.query(table, prefix, limit)`: Iterates records for message threads or scoreboards.
 
-#### Sample Lua App: Turn-Based Door Game (`minidungeon.lua`)
+#### Sample Lua App: Turn-Based Door Game (`apps/minidungeon/main.lua`)
 
 ```lua
--- Simple Turn-Based Combat Door Game for MeshBBS
+-- Simple Turn-Based Combat Door Game for Bifrost BBS
 local app = {}
 
 function app.on_start(session)
     term.clear()
     -- Renders public cached banner (0 airtime if pre-cached via broadcast)
-    term.render_asset("ASSET_DUNGEON_BANNER")
+    term.render_asset("dungeon_banner")
     term.move_to(2, 8)
     term.set_color(14, 0) -- Yellow on Black
     term.print("=== THE LORA CATACOMBS ===")
@@ -326,7 +343,7 @@ function app.on_start(session)
             term.flush()
             session.await_input(1, function() app.on_start(session) end)
         else
-            session.load_app("00_main_menu")
+            session.load_app("main_menu")
         end
     end)
 end
@@ -485,13 +502,13 @@ The Virtual Mock Transport enables automated integration tests and logs key prot
   * Build the token-bucket rate limiter and airtime duty-cycle regulator.
   * Integrate native MeshCore packet framing and header decapsulation.
 * **Phase 2: MeshANSI Compiler & Broadcast Asset Engine**
-  * Develop the `meshansi` Rust crate (ANSI parser, opcode generator, Heatshrink compression).
-  * Build the passive on-demand Public Multicast asset distributor.
+  * Develop the `bifrost-ansi` and `bifrost-compression` Rust crates (ANSI parser, opcode generator, Heatshrink LZSS compression).
+  * Build the passive on-demand Public Multicast asset distributor with dynamic AssetID allocation.
   * Build embedded C/C++ reference decoder and promiscuous cache manager for client nodes.
 * **Phase 3: Lua Application Runtime**
-  * Integrate `mlua` sandbox into the Rust engine.
-  * Expose `term`, `session`, `db`, and `net` Host APIs to Lua.
-  * Implement core system applications (`00_main_menu.lua`, `10_messages.lua`, `30_doorgames/minidungeon.lua`).
+  * Integrate `mlua` sandbox into the Rust engine (`bifrost-bbs`).
+  * Expose `term`, `session`, `db`, and `log` Host APIs to Lua.
+  * Implement encapsulated system applications (`main_menu`, `messages`, `minidungeon`, `marketplace`, `profile`, `admin`).
 * **Phase 4: Field Testing & MeshCore Radio Deployment**
   * Connect Rust core to physical LoRa transceivers via UART/KISS/SPI drivers.
   * Validate multi-hop routing, opportunistic caching across multiple field devices, and RF channel performance.

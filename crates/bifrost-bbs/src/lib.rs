@@ -130,7 +130,37 @@ fn default_log_level() -> String {
     "info".to_string()
 }
 
-/// MeshBBS Server Configuration Loaded from config.toml
+fn default_main_app() -> String {
+    "main_menu".to_string()
+}
+
+fn default_enabled_apps() -> Vec<String> {
+    vec![
+        "main_menu".to_string(),
+        "messages".to_string(),
+        "profile".to_string(),
+        "minidungeon".to_string(),
+        "admin".to_string(),
+        "marketplace".to_string(),
+    ]
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct AppsConfig {
+    #[serde(default = "default_main_app")]
+    pub main_app: String,
+    #[serde(default = "default_enabled_apps")]
+    pub enabled: Vec<String>,
+}
+
+fn default_apps_config() -> AppsConfig {
+    AppsConfig {
+        main_app: default_main_app(),
+        enabled: default_enabled_apps(),
+    }
+}
+
+/// Bifrost BBS Server Configuration Loaded from config.toml
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct AppConfig {
     #[serde(default = "default_log_level")]
@@ -141,6 +171,8 @@ pub struct AppConfig {
     pub form_colors: FormColorsConfig,
     #[serde(default)]
     pub admin_nodes: Vec<String>,
+    #[serde(default = "default_apps_config")]
+    pub apps: AppsConfig,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -191,6 +223,7 @@ pub fn default_config() -> AppConfig {
             submit_bg: 7,
         },
         admin_nodes: Vec::new(),
+        apps: default_apps_config(),
     }
 }
 
@@ -198,9 +231,10 @@ pub fn default_config() -> AppConfig {
 pub async fn run_bbs(config_path: Option<PathBuf>, run_duration_secs: Option<u64>) -> Result<()> {
     // 1. Load Config File
     let config: AppConfig = if let Some(path) = config_path {
-        if path.exists() {
-            info!("Loading configuration from {:?}", path);
-            let contents = std::fs::read_to_string(&path)?;
+        let resolved = find_workspace_path(path.to_str().unwrap_or(""));
+        if resolved.exists() {
+            info!("Loading configuration from {:?}", resolved);
+            let contents = std::fs::read_to_string(&resolved)?;
             toml::from_str(&contents)?
         } else {
             warn!(
@@ -232,26 +266,77 @@ pub async fn run_bbs(config_path: Option<PathBuf>, run_duration_secs: Option<u64
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
-pub struct AssetEntry {
+pub struct AppMetadata {
+    pub id: String,
     pub name: String,
-    pub id: u16,
+    pub description: Option<String>,
+    pub author: Option<String>,
+    pub version: Option<String>,
+    pub repository: Option<String>,
+    pub entry_point: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct AppAssetEntry {
+    pub name: String,
+    #[serde(default)]
+    pub id: Option<u16>,
     pub path: String,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
-pub struct AssetManifest {
-    pub assets: Vec<AssetEntry>,
+pub struct AppManifest {
+    pub app: AppMetadata,
+    #[serde(default)]
+    pub assets: Vec<AppAssetEntry>,
 }
 
-/// Loads the static public asset manifest mapping AssetID -> (Name, RelativePath).
-pub fn load_asset_manifest() -> HashMap<u16, (String, String)> {
-    let manifest_path = find_workspace_path("assets/manifest.toml");
+/// Loads the static public asset manifests for all enabled apps.
+/// Dynamically assigns unique 16-bit AssetIDs to prevent conflicts.
+/// Maps AssetID -> (CanonicalNamespacedName, ResolvedRelativePath).
+pub fn load_app_manifests(enabled_apps: &[String]) -> HashMap<u16, (String, String)> {
     let mut map = HashMap::new();
-    if let Ok(contents) = std::fs::read_to_string(&manifest_path) {
-        if let Ok(manifest) = toml::from_str::<AssetManifest>(&contents) {
-            for entry in manifest.assets {
-                map.insert(entry.id, (entry.name, entry.path));
+    let mut next_dynamic_id: u16 = 0x0101;
+
+    for app_id in enabled_apps {
+        let manifest_rel = format!("apps/{}/manifest.toml", app_id);
+        let manifest_path = find_workspace_path(&manifest_rel);
+        if let Ok(contents) = std::fs::read_to_string(&manifest_path) {
+            if let Ok(app_manifest) = toml::from_str::<AppManifest>(&contents) {
+                log::info!(
+                    "Loaded app '{}' ({}) v{} by {}",
+                    app_manifest.app.name,
+                    app_manifest.app.id,
+                    app_manifest.app.version.as_deref().unwrap_or("1.0.0"),
+                    app_manifest.app.author.as_deref().unwrap_or("Unknown")
+                );
+                for asset in app_manifest.assets {
+                    let asset_id = if let Some(explicit_id) = asset.id {
+                        explicit_id
+                    } else {
+                        while map.contains_key(&next_dynamic_id) {
+                            next_dynamic_id = next_dynamic_id.wrapping_add(1);
+                        }
+                        let id = next_dynamic_id;
+                        next_dynamic_id = next_dynamic_id.wrapping_add(1);
+                        id
+                    };
+
+                    let asset_path = format!("apps/{}/{}", app_id, asset.path);
+                    let namespaced_name = format!("{}/{}", app_id, asset.name);
+                    log::debug!(
+                        "Registered asset 0x{:04X}: '{}' -> '{}'",
+                        asset_id,
+                        namespaced_name,
+                        asset_path
+                    );
+                    map.insert(asset_id, (namespaced_name, asset_path));
+                }
+            } else {
+                log::warn!("Failed to parse app manifest: {:?}", manifest_path);
             }
+        } else {
+            log::warn!("App manifest not found: {:?}", manifest_path);
         }
     }
     map
@@ -476,7 +561,7 @@ pub async fn start_server_with_stats(
         HashMap::<String, HashMap<String, String>>::new(),
     ));
     let mut reassembler = MessageReassembler::new();
-    let asset_manifest_map = Arc::new(load_asset_manifest());
+    let asset_manifest_map = Arc::new(load_app_manifests(&config.apps.enabled));
     let bbs_stats = Arc::new(BbsStats::new());
 
     // Spawn periodic stats logger (once per minute)
@@ -616,6 +701,7 @@ pub async fn start_server_with_stats(
                                 let form_colors_config = config.form_colors.clone();
                                 let admin_nodes_config = config.admin_nodes.clone();
                                 let asset_manifest_clone = asset_manifest_map.clone();
+                                let apps_config_clone = config.apps.clone();
                                 let bbs_stats_inner = bbs_stats_clone.clone();
                                 let transport_stats_inner = transport_stats.clone();
                                 std::thread::spawn(move || {
@@ -628,6 +714,7 @@ pub async fn start_server_with_stats(
                                         form_colors_config,
                                         admin_nodes_config,
                                         asset_manifest_clone,
+                                        apps_config_clone,
                                         bbs_stats_inner.clone(),
                                         transport_stats_inner,
                                     );
@@ -678,12 +765,13 @@ fn run_session_task(
     form_colors: FormColorsConfig,
     admin_nodes: Vec<String>,
     asset_manifest: Arc<HashMap<u16, (String, String)>>,
+    apps_config: AppsConfig,
     bbs_stats: Arc<BbsStats>,
     transport_stats: Option<Arc<TransportStats>>,
 ) -> Result<()> {
     log::debug!("Starting run_session_task for client session");
     let lua = mlua::Lua::new();
-    let active_app = Arc::new(StdMutex::new("00_main_menu".to_string()));
+    let active_app = Arc::new(StdMutex::new(apps_config.main_app.clone()));
 
     let node_hex_str: String = node_id.iter().map(|b| format!("{:02x}", b)).collect();
 
@@ -727,7 +815,32 @@ fn run_session_task(
     globals.set("os", mlua::Value::Nil)?;
     globals.set("io", mlua::Value::Nil)?;
     globals.set("package", mlua::Value::Nil)?;
-    globals.set("require", mlua::Value::Nil)?;
+
+    // Sandboxed relative require scoped to the active application folder
+    let active_app_for_require = active_app.clone();
+    globals.set(
+        "require",
+        lua.create_function(move |lua, mod_name: String| {
+            let current_app = active_app_for_require.lock().unwrap().clone();
+            let path = find_workspace_path(&format!("apps/{}/{}.lua", current_app, mod_name));
+            let path = if path.exists() {
+                path
+            } else {
+                find_workspace_path(&format!("apps/{}/{}/init.lua", current_app, mod_name))
+            };
+            if path.exists() {
+                let code = std::fs::read_to_string(&path)?;
+                let chunk = lua.load(&code).set_name(&mod_name);
+                let val: mlua::Value = chunk.eval()?;
+                Ok(val)
+            } else {
+                Err(mlua::Error::RuntimeError(format!(
+                    "Module '{}' not found in app '{}'",
+                    mod_name, current_app
+                )))
+            }
+        })?,
+    )?;
 
     // term table
     let term = lua.create_table()?;
@@ -777,22 +890,39 @@ fn run_session_task(
 
     let out_buf = output_buf.clone();
     let asset_manifest_for_render = asset_manifest.clone();
+    let active_app_for_render = active_app.clone();
     term.set(
         "render_asset",
         lua.create_function(move |_, asset_name: String| {
             let mut buf = out_buf.lock().unwrap();
             buf.push(0xC5); // OP_RENDER_ASSET
-            let id: u16 = if let Some((&matched_id, _)) = asset_manifest_for_render
+            let current_app = active_app_for_render.lock().unwrap().clone();
+
+            // 1. Normalized namespaced targets: e.g. "main_menu/banner", "main_menu/main_menu_banner"
+            let normalized_target = asset_name.replace("::", "/").replace(':', "/");
+            let relative_target = format!("{}/{}", current_app, normalized_target);
+
+            let id_opt = asset_manifest_for_render
                 .iter()
-                .find(|(_, (n, _))| n == &asset_name)
-            {
-                matched_id
-            } else if asset_name == "ASSET_DUNGEON_BANNER" {
-                0x0101
-            } else if asset_name == "ASSET_MAIN_MENU_BANNER" {
-                0x0103
-            } else {
-                0x0102
+                .find(|(_, (n, _))| {
+                    let n_norm = n.replace("::", "/").replace(':', "/");
+                    n_norm == normalized_target
+                        || n_norm == relative_target
+                        || n_norm.ends_with(&format!("/{}", normalized_target))
+                        || n_norm.to_ascii_uppercase().contains(&asset_name.to_ascii_uppercase())
+                })
+                .map(|(&id, _)| id);
+
+            let id = match id_opt {
+                Some(matched_id) => matched_id,
+                None => {
+                    log::warn!(
+                        "Asset '{}' not found in loaded asset manifests (current app: '{}')",
+                        asset_name,
+                        current_app
+                    );
+                    0x0101
+                }
             };
             buf.extend_from_slice(&id.to_be_bytes());
             Ok(())
@@ -1260,15 +1390,48 @@ fn run_session_task(
         })?,
     )?;
 
+    let active_app_for_include = active_app.clone();
+    session.set(
+        "include",
+        lua.create_function(move |lua, file_name: String| {
+            let current_app = active_app_for_include.lock().unwrap().clone();
+            let path = find_workspace_path(&format!("apps/{}/{}", current_app, file_name));
+            let path = if path.exists() {
+                path
+            } else {
+                find_workspace_path(&format!("apps/{}/{}.lua", current_app, file_name))
+            };
+            if path.exists() {
+                let code = std::fs::read_to_string(&path)?;
+                let chunk = lua.load(&code).set_name(&file_name);
+                let val: mlua::Value = chunk.eval()?;
+                Ok(val)
+            } else {
+                Err(mlua::Error::RuntimeError(format!(
+                    "Included file not found: {:?}",
+                    path
+                )))
+            }
+        })?,
+    )?;
+
+    let enabled_apps = apps_config.enabled.clone();
     let active_app_clone = active_app.clone();
     let load_app = lua.create_function(move |lua, app_name: String| {
-        let path = find_workspace_path(&format!("apps/{}.lua", app_name));
+        if !enabled_apps.contains(&app_name) {
+            log::error!("Application '{}' not found or not enabled in config", app_name);
+            return Ok(());
+        }
+        let entry_file = format!("apps/{}/main.lua", app_name);
+        let path = find_workspace_path(&entry_file);
         if path.exists() {
             *active_app_clone.lock().unwrap() = app_name.clone();
-            let code = std::fs::read_to_string(path)?;
-            let app: mlua::Table = lua.load(&code).eval()?;
+            let code = std::fs::read_to_string(&path)?;
+            let app: mlua::Table = lua.load(&code).set_name(&app_name).eval()?;
             let on_start: mlua::Function = app.get("on_start")?;
             on_start.call::<_, ()>(lua.globals().get::<_, mlua::Table>("session")?)?;
+        } else {
+            log::error!("Application '{}' entry point not found at {:?}", app_name, path);
         }
         Ok(())
     })?;
@@ -1276,17 +1439,23 @@ fn run_session_task(
 
     globals.set("session", session)?;
 
-    // Start 00_main_menu.lua
-    log::debug!("Loading 00_main_menu.lua");
-    let main_path = find_workspace_path("apps/00_main_menu.lua");
-    let main_code = std::fs::read_to_string(main_path)?;
-    log::debug!("Evaluating menu code...");
-    let main_menu: mlua::Table = lua.load(&main_code).eval()?;
-    log::debug!("Menu code evaluated successfully");
-    let on_start: mlua::Function = main_menu.get("on_start")?;
-    log::debug!("Invoking menu.on_start...");
-    on_start.call::<_, ()>(lua.globals().get::<_, mlua::Table>("session")?)?;
-    log::debug!("menu.on_start invoked successfully");
+    // Start initial application specified in config (default: main_menu)
+    let main_app_name = apps_config.main_app.clone();
+    log::debug!("Loading initial app '{}'...", main_app_name);
+    let main_entry_file = format!("apps/{}/main.lua", main_app_name);
+    let main_path = find_workspace_path(&main_entry_file);
+    if main_path.exists() {
+        let main_code = std::fs::read_to_string(&main_path)?;
+        log::debug!("Evaluating app '{}' code...", main_app_name);
+        let app: mlua::Table = lua.load(&main_code).set_name(&main_app_name).eval()?;
+        log::debug!("App '{}' code evaluated successfully", main_app_name);
+        let on_start: mlua::Function = app.get("on_start")?;
+        log::debug!("Invoking on_start for '{}'...", main_app_name);
+        on_start.call::<_, ()>(lua.globals().get::<_, mlua::Table>("session")?)?;
+        log::debug!("App '{}' on_start invoked successfully", main_app_name);
+    } else {
+        log::error!("Main app '{}' entry point not found at {:?}", main_app_name, main_path);
+    }
 
     // Read loop using blocking receiver in standard thread context
     loop {
@@ -1339,27 +1508,60 @@ fn run_session_task(
     Ok(())
 }
 
-fn find_workspace_path(relative_path: &str) -> PathBuf {
+pub fn find_workspace_path(relative_path: &str) -> PathBuf {
     let path = PathBuf::from(relative_path);
     if path.exists() {
         return path;
     }
+
+    // 1. Traverse upward from current working directory
     if let Ok(current) = std::env::current_dir() {
-        if current.ends_with("crates/bifrost-bbs")
-            || current.ends_with("bifrost-bbs")
-            || current.ends_with("crates/meshbbs")
-            || current.ends_with("meshbbs")
-        {
-            if let Some(parent) = current.parent() {
-                if let Some(workspace_root) = parent.parent() {
-                    let parent_path = workspace_root.join(relative_path);
-                    if parent_path.exists() {
-                        return parent_path;
-                    }
-                }
+        let mut cur = current;
+        for _ in 0..10 {
+            let candidate = cur.join(relative_path);
+            if candidate.exists() {
+                return candidate;
+            }
+            if let Some(parent) = cur.parent() {
+                cur = parent.to_path_buf();
+            } else {
+                break;
             }
         }
     }
+
+    // 2. Traverse upward from executable directory
+    if let Ok(exe) = std::env::current_exe() {
+        let mut cur = exe;
+        for _ in 0..10 {
+            let candidate = cur.join(relative_path);
+            if candidate.exists() {
+                return candidate;
+            }
+            if let Some(parent) = cur.parent() {
+                cur = parent.to_path_buf();
+            } else {
+                break;
+            }
+        }
+    }
+
+    // 3. Traverse upward from CARGO_MANIFEST_DIR
+    if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
+        let mut cur = PathBuf::from(manifest_dir);
+        for _ in 0..10 {
+            let candidate = cur.join(relative_path);
+            if candidate.exists() {
+                return candidate;
+            }
+            if let Some(parent) = cur.parent() {
+                cur = parent.to_path_buf();
+            } else {
+                break;
+            }
+        }
+    }
+
     path
 }
 
@@ -2073,20 +2275,35 @@ max_asset_broadcast_duty_cycle = 0.15
 
     #[test]
     fn test_asset_manifest_loading() {
-        let manifest = load_asset_manifest();
-        assert!(manifest.contains_key(&0x0101));
-        assert!(manifest.contains_key(&0x0102));
-        assert!(manifest.contains_key(&0x0103));
+        let manifest = load_app_manifests(&["main_menu".to_string(), "minidungeon".to_string()]);
+        assert_eq!(manifest.len(), 3);
 
-        let (banner_name, banner_path) = manifest.get(&0x0103).unwrap();
-        assert_eq!(banner_name, "ASSET_MAIN_MENU_BANNER");
-        assert_eq!(banner_path, "assets/main_menu_banner.ans");
+        let banner_entry = manifest
+            .iter()
+            .find(|(_, (name, _))| name == "main_menu/main_menu_banner");
+        assert!(banner_entry.is_some(), "main_menu/main_menu_banner must be registered");
+        let (&banner_id, (banner_name, banner_path)) = banner_entry.unwrap();
+        assert_eq!(banner_name, "main_menu/main_menu_banner");
+        assert_eq!(banner_path, "apps/main_menu/assets/main_menu_banner.ans");
+
+        let dungeon_entry = manifest
+            .iter()
+            .find(|(_, (name, _))| name == "minidungeon/dungeon_banner");
+        assert!(dungeon_entry.is_some(), "minidungeon/dungeon_banner must be registered");
+        let (&dungeon_id, _) = dungeon_entry.unwrap();
+        assert_ne!(banner_id, dungeon_id, "Asset IDs must be unique");
     }
 
     #[tokio::test]
     async fn test_on_demand_asset_broadcast_and_client_caching() {
         let _ = env_logger::builder().is_test(true).try_init();
         let config = default_config();
+        let manifest = load_app_manifests(&config.apps.enabled);
+        let (&req_asset_id, (_, _)) = manifest
+            .iter()
+            .find(|(_, (n, _))| n == "main_menu/main_menu_banner")
+            .expect("main_menu/main_menu_banner must exist in manifest");
+
         let server_transport = Arc::new(MockSocketTransport::new_server(
             "127.0.0.1:9098".to_string(),
             0.0,
@@ -2125,8 +2342,7 @@ max_asset_broadcast_duty_cycle = 0.15
         }
         assert!(sent, "Failed to send handshake from client");
 
-        // Send REQ_ASSET for 0x0103 (ASSET_MAIN_MENU_BANNER)
-        let req_asset_id: u16 = 0x0103;
+        // Send REQ_ASSET for dynamically resolved asset ID
         let req_msg = MeshBbsMessage::new(0x01, 0x05, 0x00, req_asset_id.to_be_bytes().to_vec());
         let req_payloads = req_msg.to_fragments(200).unwrap();
         let packet = RadioPacket {
@@ -2200,7 +2416,7 @@ max_asset_broadcast_duty_cycle = 0.15
             "CRC32 mismatch on assembled broadcast asset"
         );
 
-        let banner_path = find_workspace_path("assets/main_menu_banner.ans");
+        let banner_path = find_workspace_path("apps/main_menu/assets/main_menu_banner.ans");
         let expected_bytes = std::fs::read(banner_path).unwrap();
         assert_eq!(assembled_bytes, expected_bytes, "Broadcast asset content does not match original file");
 
@@ -2390,7 +2606,7 @@ max_asset_broadcast_duty_cycle = 0.15
     #[test]
     fn test_minidungeon_xp_and_stat_mechanics() {
         let lua = mlua::Lua::new();
-        let code = std::fs::read_to_string(find_workspace_path("apps/30_doorgames/minidungeon.lua"))
+        let code = std::fs::read_to_string(find_workspace_path("apps/minidungeon/main.lua"))
             .unwrap();
 
         // Verify exponential XP progression
@@ -2518,11 +2734,11 @@ max_asset_broadcast_duty_cycle = 0.15
 
     #[test]
     fn test_marketplace_app_syntax() {
-        let path = find_workspace_path("apps/50_marketplace.lua");
+        let path = find_workspace_path("apps/marketplace/main.lua");
         let content = std::fs::read_to_string(path).unwrap();
         let lua = mlua::Lua::new();
         let chunk = lua.load(&content);
-        assert!(chunk.into_function().is_ok(), "50_marketplace.lua should compile as valid Lua");
+        assert!(chunk.into_function().is_ok(), "marketplace/main.lua should compile as valid Lua");
     }
 
     #[tokio::test]
@@ -2725,5 +2941,52 @@ max_asset_broadcast_duty_cycle = 0.15
         assert!(parse_meshcore_advert(&[0x11, 0x00], [0; 32]).is_none());
         assert!(parse_meshcore_advert(&[0u8; 50], [0; 32]).is_none());
     }
+
+    #[test]
+    fn test_apps_config_parsing() {
+        let toml_str = r#"
+        [rate_limiter]
+        max_packets_per_minute = 45
+        max_burst_packets = 4
+        inter_packet_guard_ms = 350
+        max_duty_cycle_percent = 1.0
+        duty_cycle_window_secs = 3600
+
+        [asset_broadcaster]
+        enable_on_demand_broadcast = true
+        max_asset_broadcast_duty_cycle = 0.15
+
+        [apps]
+        main_app = "custom_menu"
+        enabled = ["custom_menu", "messages"]
+        "#;
+        let config: AppConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.apps.main_app, "custom_menu");
+        assert_eq!(config.apps.enabled, vec!["custom_menu", "messages"]);
+    }
+
+    #[test]
+    fn test_all_app_manifests_valid() {
+        let enabled = vec![
+            "main_menu".to_string(),
+            "messages".to_string(),
+            "profile".to_string(),
+            "minidungeon".to_string(),
+            "admin".to_string(),
+            "marketplace".to_string(),
+        ];
+        let manifest_map = load_app_manifests(&enabled);
+        assert!(manifest_map.contains_key(&0x0101)); // dungeon banner
+        assert!(manifest_map.contains_key(&0x0102)); // main menu border
+        assert!(manifest_map.contains_key(&0x0103)); // main menu banner
+
+        // Verify each main.lua exists
+        for app_id in &enabled {
+            let entry = format!("apps/{}/main.lua", app_id);
+            let path = find_workspace_path(&entry);
+            assert!(path.exists(), "App main.lua must exist at {:?}", path);
+        }
+    }
 }
+
 

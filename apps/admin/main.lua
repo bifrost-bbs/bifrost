@@ -4,7 +4,7 @@ local admin = {}
 function admin.on_start(session)
     if not session.has_permission("admin") then
         log.warn("Unauthorized access attempt to admin app.")
-        session.load_app("00_main_menu")
+        session.load_app("main_menu")
         return
     end
 
@@ -45,7 +45,7 @@ function admin.on_start(session)
 
         local action = submission.submit
         if action == "back" then
-            session.load_app("00_main_menu")
+            session.load_app("main_menu")
         elseif action == "toggle_admin" then
             local prefix = submission.target_id or ""
             if prefix ~= "" then

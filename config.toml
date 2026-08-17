@@ -40,3 +40,16 @@ field_bg = 14     # Bright Blue
 admin_nodes = [
     "0101010101010101010101010101010101010101010101010101010101010101"
 ]
+
+[apps]
+# The default entrypoint application (replaces hardcoded main menu)
+main_app = "main_menu"
+# List of enabled applications to load and register
+enabled = [
+    "main_menu",
+    "messages",
+    "profile",
+    "minidungeon",
+    "admin",
+    "marketplace",
+]

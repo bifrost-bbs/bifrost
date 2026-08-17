@@ -43,7 +43,7 @@ function market.on_start(session)
 
         local action = submission.submit
         if action == "main_menu" then
-            session.load_app("00_main_menu")
+            session.load_app("main_menu")
         elseif action == "admin_new_cat" and is_admin then
             market.new_category(session)
         elseif string.sub(action, 1, 4) == "cat_" then
