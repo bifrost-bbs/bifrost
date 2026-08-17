@@ -1,0 +1,13 @@
+[app]
+id = "minidungeon"
+name = "Mini Dungeon"
+description = "Turn-based dungeon crawler door game"
+author = "Bifrost Contributors"
+version = "1.0.0"
+repository = "https://github.com/pmumby/bifrost"
+entry_point = "main.lua"
+
+[[assets]]
+name = "ASSET_DUNGEON_BANNER"
+id = 0x0101
+path = "assets/dungeon_banner.ans"

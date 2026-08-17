@@ -28,13 +28,13 @@ The project is structured as a Rust Cargo Workspace:
 ├── docs/
 │   ├── MeshBBS_MeshANSI_Spec.md     # Protocol and architecture specification
 │   └── PRD.md                       # Product Requirements Document
-├── apps/                            # Sandboxed Lua BBS Applications
-│   ├── 00_main_menu.lua
-│   ├── 10_messages.lua
-│   └── 30_doorgames/
-│       └── minidungeon.lua
-├── assets/                          # Static UI screens and assets
-│   └── manifest.toml                # Asset manifest tracking AssetIDs
+├── apps/                            # Encapsulated Lua BBS Applications
+│   ├── main_menu/                   # Default navigation entry point (manifest.toml, main.lua, assets/)
+│   ├── messages/                    # Discussion boards (manifest.toml, main.lua)
+│   ├── marketplace/                 # Classifieds and auctions (manifest.toml, main.lua)
+│   ├── minidungeon/                 # Asynchronous door game (manifest.toml, main.lua, assets/)
+│   ├── profile/                     # Profile editor (manifest.toml, main.lua)
+│   └── admin/                       # Admin console (manifest.toml, main.lua)
 └── crates/
     ├── bifrost-compression/        # Heatshrink LZSS algorithm implementation
     │   ├── Cargo.toml

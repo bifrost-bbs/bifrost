@@ -55,7 +55,7 @@ function board.show_categories(session)
 
         local action = submission.submit
         if action == "main_menu" then
-            session.load_app("00_main_menu")
+            session.load_app("main_menu")
         elseif action == "admin_manage" then
             if session.has_permission("admin") then
                 board.manage_categories(session)

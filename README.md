@@ -25,20 +25,20 @@ The project is managed as a Rust Cargo Workspace:
 ├── docs/
 │   ├── MeshBBS_MeshANSI_Requirements_Specification.md  # Core protocol spec
 │   └── PRD.md                       # Product Requirements Document
-├── apps/                            # Lua BBS applications
-│   ├── 00_main_menu.lua             # Entry point
-│   ├── 10_messages.lua              # Discussion boards
-│   └── 30_doorgames/                # Asynchronous door games
-│       └── minidungeon.lua
-├── assets/                          # Shared visual assets
-│   └── manifest.toml                # Asset registry
+├── apps/                            # Encapsulated Lua BBS Applications
+│   ├── main_menu/                   # Default navigation entry point (manifest.toml, main.lua, assets/)
+│   ├── messages/                    # Discussion boards (manifest.toml, main.lua)
+│   ├── marketplace/                 # Classifieds and auctions (manifest.toml, main.lua)
+│   ├── minidungeon/                 # Asynchronous door game (manifest.toml, main.lua, assets/)
+│   ├── profile/                     # Profile editor (manifest.toml, main.lua)
+│   └── admin/                       # Admin console (manifest.toml, main.lua)
 └── crates/
     ├── bifrost-compression/        # Heatshrink LZSS algorithm implementation
     ├── bifrost-ansi/               # Bytecode encoding, decoding, and compression
     ├── bifrost-transport/          # Packet framing, serialization, and mock sockets
     ├── bifrost-bbs/                # Main host server daemon (kernel, scheduler, Lua runner)
     └── bifrost-client/             # Interactive client terminal emulator
-
+```
 ---
 
 ## 🛠️ Getting Started

@@ -1,0 +1,18 @@
+[app]
+id = "main_menu"
+name = "Main Menu"
+description = "Bifrost BBS Main Menu and Navigation Hub"
+author = "Bifrost Contributors"
+version = "1.0.0"
+repository = "https://github.com/pmumby/bifrost"
+entry_point = "main.lua"
+
+[[assets]]
+name = "ASSET_MAIN_MENU_BANNER"
+id = 0x0103
+path = "assets/main_menu_banner.ans"
+
+[[assets]]
+name = "ASSET_MAIN_MENU_BORDER"
+id = 0x0102
+path = "assets/main_menu_border.ans"

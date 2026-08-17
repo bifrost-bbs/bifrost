@@ -1,0 +1,8 @@
+[app]
+id = "admin"
+name = "Admin Panel"
+description = "System administration and node permission management console"
+author = "Bifrost Contributors"
+version = "1.0.0"
+repository = "https://github.com/pmumby/bifrost"
+entry_point = "main.lua"

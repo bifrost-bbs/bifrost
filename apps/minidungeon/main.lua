@@ -175,7 +175,7 @@ function app.view_room(session, player, msg)
             end
         elseif act == "quit" then
             save_player(session, player)
-            session.load_app("00_main_menu")
+            session.load_app("main_menu")
         else
             app.view_room(session, player, "Invalid action.")
         end
@@ -550,7 +550,7 @@ function app.game_over(session, player, cause)
     term.add_submit_button("exit", 2, 14)
     term.flush_form()
     
-    session.await_input(60, function() session.load_app("00_main_menu") end)
+    session.await_input(60, function() session.load_app("main_menu") end)
 end
 
 return app

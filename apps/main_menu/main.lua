@@ -69,16 +69,16 @@ function menu.on_start(session)
             log.info("Main menu selected action: " .. tostring(action))
 
             if action == "read_boards" then
-                session.load_app("10_messages")
+                session.load_app("messages")
             elseif action == "marketplace" then
-                session.load_app("50_marketplace")
+                session.load_app("marketplace")
             elseif action == "door_game" then
-                session.load_app("30_doorgames/minidungeon")
+                session.load_app("minidungeon")
             elseif action == "profile" then
-                session.load_app("20_profile")
+                session.load_app("profile")
             elseif action == "admin" then
                 if session.has_permission("admin") then
-                    session.load_app("40_admin")
+                    session.load_app("admin")
                 else
                     log.warn("Access denied: User " .. user.nickname .. " requested admin app without permission.")
                     menu.on_start(session)
