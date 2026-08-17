@@ -1028,26 +1028,55 @@ fn find_workspace_path(relative_path: &str) -> std::path::PathBuf {
     if path.exists() {
         return path;
     }
+
+    // 1. Traverse upward from current working directory
     if let Ok(current) = std::env::current_dir() {
-        if current.ends_with("crates/bifrost-client")
-            || current.ends_with("bifrost-client")
-            || current.ends_with("crates/bifrost-bbs")
-            || current.ends_with("bifrost-bbs")
-            || current.ends_with("crates/meshclient")
-            || current.ends_with("meshclient")
-            || current.ends_with("crates/meshbbs")
-            || current.ends_with("meshbbs")
-        {
-            if let Some(parent) = current.parent() {
-                if let Some(workspace_root) = parent.parent() {
-                    let parent_path = workspace_root.join(relative_path);
-                    if parent_path.exists() {
-                        return parent_path;
-                    }
-                }
+        let mut cur = current;
+        for _ in 0..10 {
+            let candidate = cur.join(relative_path);
+            if candidate.exists() {
+                return candidate;
+            }
+            if let Some(parent) = cur.parent() {
+                cur = parent.to_path_buf();
+            } else {
+                break;
             }
         }
     }
+
+    // 2. Traverse upward from executable directory
+    if let Ok(exe) = std::env::current_exe() {
+        let mut cur = exe;
+        for _ in 0..10 {
+            let candidate = cur.join(relative_path);
+            if candidate.exists() {
+                return candidate;
+            }
+            if let Some(parent) = cur.parent() {
+                cur = parent.to_path_buf();
+            } else {
+                break;
+            }
+        }
+    }
+
+    // 3. Traverse upward from CARGO_MANIFEST_DIR
+    if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
+        let mut cur = std::path::PathBuf::from(manifest_dir);
+        for _ in 0..10 {
+            let candidate = cur.join(relative_path);
+            if candidate.exists() {
+                return candidate;
+            }
+            if let Some(parent) = cur.parent() {
+                cur = parent.to_path_buf();
+            } else {
+                break;
+            }
+        }
+    }
+
     path
 }
 
