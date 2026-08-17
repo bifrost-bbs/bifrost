@@ -231,9 +231,10 @@ pub fn default_config() -> AppConfig {
 pub async fn run_bbs(config_path: Option<PathBuf>, run_duration_secs: Option<u64>) -> Result<()> {
     // 1. Load Config File
     let config: AppConfig = if let Some(path) = config_path {
-        if path.exists() {
-            info!("Loading configuration from {:?}", path);
-            let contents = std::fs::read_to_string(&path)?;
+        let resolved = find_workspace_path(path.to_str().unwrap_or(""));
+        if resolved.exists() {
+            info!("Loading configuration from {:?}", resolved);
+            let contents = std::fs::read_to_string(&resolved)?;
             toml::from_str(&contents)?
         } else {
             warn!(
@@ -1507,27 +1508,60 @@ fn run_session_task(
     Ok(())
 }
 
-fn find_workspace_path(relative_path: &str) -> PathBuf {
+pub fn find_workspace_path(relative_path: &str) -> PathBuf {
     let path = PathBuf::from(relative_path);
     if path.exists() {
         return path;
     }
+
+    // 1. Traverse upward from current working directory
     if let Ok(current) = std::env::current_dir() {
-        if current.ends_with("crates/bifrost-bbs")
-            || current.ends_with("bifrost-bbs")
-            || current.ends_with("crates/meshbbs")
-            || current.ends_with("meshbbs")
-        {
-            if let Some(parent) = current.parent() {
-                if let Some(workspace_root) = parent.parent() {
-                    let parent_path = workspace_root.join(relative_path);
-                    if parent_path.exists() {
-                        return parent_path;
-                    }
-                }
+        let mut cur = current;
+        for _ in 0..10 {
+            let candidate = cur.join(relative_path);
+            if candidate.exists() {
+                return candidate;
+            }
+            if let Some(parent) = cur.parent() {
+                cur = parent.to_path_buf();
+            } else {
+                break;
             }
         }
     }
+
+    // 2. Traverse upward from executable directory
+    if let Ok(exe) = std::env::current_exe() {
+        let mut cur = exe;
+        for _ in 0..10 {
+            let candidate = cur.join(relative_path);
+            if candidate.exists() {
+                return candidate;
+            }
+            if let Some(parent) = cur.parent() {
+                cur = parent.to_path_buf();
+            } else {
+                break;
+            }
+        }
+    }
+
+    // 3. Traverse upward from CARGO_MANIFEST_DIR
+    if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
+        let mut cur = PathBuf::from(manifest_dir);
+        for _ in 0..10 {
+            let candidate = cur.join(relative_path);
+            if candidate.exists() {
+                return candidate;
+            }
+            if let Some(parent) = cur.parent() {
+                cur = parent.to_path_buf();
+            } else {
+                break;
+            }
+        }
+    }
+
     path
 }
 

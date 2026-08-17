@@ -52,12 +52,13 @@ async fn main() -> Result<()> {
     // 2. RUST_LOG environment variable
     // 3. log_level in config file
     // 4. Default: "info"
+    let resolved_config = bifrost_bbs::find_workspace_path(config_path.to_str().unwrap_or(""));
     let default_level = if let Some(ref lvl) = cli_log_level {
         lvl.clone()
     } else if std::env::var("RUST_LOG").is_ok() {
         "".to_string()
-    } else if config_path.exists() {
-        if let Ok(contents) = std::fs::read_to_string(&config_path) {
+    } else if resolved_config.exists() {
+        if let Ok(contents) = std::fs::read_to_string(&resolved_config) {
             if let Ok(cfg) = toml::from_str::<bifrost_bbs::AppConfig>(&contents) {
                 cfg.log_level
             } else {
