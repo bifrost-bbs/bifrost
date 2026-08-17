@@ -8,6 +8,5 @@ repository = "https://github.com/pmumby/bifrost"
 entry_point = "main.lua"
 
 [[assets]]
-name = "ASSET_DUNGEON_BANNER"
-id = 0x0101
+name = "dungeon_banner"
 path = "assets/dungeon_banner.ans"

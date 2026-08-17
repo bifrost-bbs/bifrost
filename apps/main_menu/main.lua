@@ -6,7 +6,7 @@ function menu.on_start(session)
     local user = db.get("users", user_id)
 
     term.clear()
-    term.render_asset("ASSET_MAIN_MENU_BANNER")
+    term.render_asset("main_menu_banner")
     term.move_to(2, 7)
     term.set_color(7, 0) -- White on Black
 

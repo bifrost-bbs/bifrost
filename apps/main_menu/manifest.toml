@@ -8,11 +8,9 @@ repository = "https://github.com/pmumby/bifrost"
 entry_point = "main.lua"
 
 [[assets]]
-name = "ASSET_MAIN_MENU_BANNER"
-id = 0x0103
+name = "main_menu_banner"
 path = "assets/main_menu_banner.ans"
 
 [[assets]]
-name = "ASSET_MAIN_MENU_BORDER"
-id = 0x0102
+name = "main_menu_border"
 path = "assets/main_menu_border.ans"

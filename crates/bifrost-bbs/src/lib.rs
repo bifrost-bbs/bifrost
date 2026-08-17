@@ -278,7 +278,8 @@ pub struct AppMetadata {
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct AppAssetEntry {
     pub name: String,
-    pub id: u16,
+    #[serde(default)]
+    pub id: Option<u16>,
     pub path: String,
 }
 
@@ -290,9 +291,12 @@ pub struct AppManifest {
 }
 
 /// Loads the static public asset manifests for all enabled apps.
-/// Maps AssetID -> (NamespacedName, ResolvedRelativePath).
+/// Dynamically assigns unique 16-bit AssetIDs to prevent conflicts.
+/// Maps AssetID -> (CanonicalNamespacedName, ResolvedRelativePath).
 pub fn load_app_manifests(enabled_apps: &[String]) -> HashMap<u16, (String, String)> {
     let mut map = HashMap::new();
+    let mut next_dynamic_id: u16 = 0x0101;
+
     for app_id in enabled_apps {
         let manifest_rel = format!("apps/{}/manifest.toml", app_id);
         let manifest_path = find_workspace_path(&manifest_rel);
@@ -306,15 +310,26 @@ pub fn load_app_manifests(enabled_apps: &[String]) -> HashMap<u16, (String, Stri
                     app_manifest.app.author.as_deref().unwrap_or("Unknown")
                 );
                 for asset in app_manifest.assets {
+                    let asset_id = if let Some(explicit_id) = asset.id {
+                        explicit_id
+                    } else {
+                        while map.contains_key(&next_dynamic_id) {
+                            next_dynamic_id = next_dynamic_id.wrapping_add(1);
+                        }
+                        let id = next_dynamic_id;
+                        next_dynamic_id = next_dynamic_id.wrapping_add(1);
+                        id
+                    };
+
                     let asset_path = format!("apps/{}/{}", app_id, asset.path);
-                    let namespaced_name = format!("{}::{}", app_id, asset.name);
+                    let namespaced_name = format!("{}/{}", app_id, asset.name);
                     log::debug!(
                         "Registered asset 0x{:04X}: '{}' -> '{}'",
-                        asset.id,
+                        asset_id,
                         namespaced_name,
                         asset_path
                     );
-                    map.insert(asset.id, (namespaced_name, asset_path));
+                    map.insert(asset_id, (namespaced_name, asset_path));
                 }
             } else {
                 log::warn!("Failed to parse app manifest: {:?}", manifest_path);
@@ -874,23 +889,39 @@ fn run_session_task(
 
     let out_buf = output_buf.clone();
     let asset_manifest_for_render = asset_manifest.clone();
+    let active_app_for_render = active_app.clone();
     term.set(
         "render_asset",
         lua.create_function(move |_, asset_name: String| {
             let mut buf = out_buf.lock().unwrap();
             buf.push(0xC5); // OP_RENDER_ASSET
-            let id: u16 = if let Some((&matched_id, _)) = asset_manifest_for_render
+            let current_app = active_app_for_render.lock().unwrap().clone();
+
+            // 1. Normalized namespaced targets: e.g. "main_menu/banner", "main_menu/main_menu_banner"
+            let normalized_target = asset_name.replace("::", "/").replace(':', "/");
+            let relative_target = format!("{}/{}", current_app, normalized_target);
+
+            let id_opt = asset_manifest_for_render
                 .iter()
-                .find(|(_, (n, _))| n == &asset_name || n.ends_with(&format!("::{}", asset_name)))
-            {
-                matched_id
-            } else if asset_name == "ASSET_DUNGEON_BANNER" {
-                0x0101
-            } else if asset_name == "ASSET_MAIN_MENU_BANNER" {
-                0x0103
-            } else {
-                log::warn!("Asset '{}' not found in loaded asset manifests", asset_name);
-                0x0102
+                .find(|(_, (n, _))| {
+                    let n_norm = n.replace("::", "/").replace(':', "/");
+                    n_norm == normalized_target
+                        || n_norm == relative_target
+                        || n_norm.ends_with(&format!("/{}", normalized_target))
+                        || n_norm.to_ascii_uppercase().contains(&asset_name.to_ascii_uppercase())
+                })
+                .map(|(&id, _)| id);
+
+            let id = match id_opt {
+                Some(matched_id) => matched_id,
+                None => {
+                    log::warn!(
+                        "Asset '{}' not found in loaded asset manifests (current app: '{}')",
+                        asset_name,
+                        current_app
+                    );
+                    0x0101
+                }
             };
             buf.extend_from_slice(&id.to_be_bytes());
             Ok(())
@@ -2211,19 +2242,34 @@ max_asset_broadcast_duty_cycle = 0.15
     #[test]
     fn test_asset_manifest_loading() {
         let manifest = load_app_manifests(&["main_menu".to_string(), "minidungeon".to_string()]);
-        assert!(manifest.contains_key(&0x0101));
-        assert!(manifest.contains_key(&0x0102));
-        assert!(manifest.contains_key(&0x0103));
+        assert_eq!(manifest.len(), 3);
 
-        let (banner_name, banner_path) = manifest.get(&0x0103).unwrap();
-        assert_eq!(banner_name, "main_menu::ASSET_MAIN_MENU_BANNER");
+        let banner_entry = manifest
+            .iter()
+            .find(|(_, (name, _))| name == "main_menu/main_menu_banner");
+        assert!(banner_entry.is_some(), "main_menu/main_menu_banner must be registered");
+        let (&banner_id, (banner_name, banner_path)) = banner_entry.unwrap();
+        assert_eq!(banner_name, "main_menu/main_menu_banner");
         assert_eq!(banner_path, "apps/main_menu/assets/main_menu_banner.ans");
+
+        let dungeon_entry = manifest
+            .iter()
+            .find(|(_, (name, _))| name == "minidungeon/dungeon_banner");
+        assert!(dungeon_entry.is_some(), "minidungeon/dungeon_banner must be registered");
+        let (&dungeon_id, _) = dungeon_entry.unwrap();
+        assert_ne!(banner_id, dungeon_id, "Asset IDs must be unique");
     }
 
     #[tokio::test]
     async fn test_on_demand_asset_broadcast_and_client_caching() {
         let _ = env_logger::builder().is_test(true).try_init();
         let config = default_config();
+        let manifest = load_app_manifests(&config.apps.enabled);
+        let (&req_asset_id, (_, _)) = manifest
+            .iter()
+            .find(|(_, (n, _))| n == "main_menu/main_menu_banner")
+            .expect("main_menu/main_menu_banner must exist in manifest");
+
         let server_transport = Arc::new(MockSocketTransport::new_server(
             "127.0.0.1:9098".to_string(),
             0.0,
@@ -2262,8 +2308,7 @@ max_asset_broadcast_duty_cycle = 0.15
         }
         assert!(sent, "Failed to send handshake from client");
 
-        // Send REQ_ASSET for 0x0103 (ASSET_MAIN_MENU_BANNER)
-        let req_asset_id: u16 = 0x0103;
+        // Send REQ_ASSET for dynamically resolved asset ID
         let req_msg = MeshBbsMessage::new(0x01, 0x05, 0x00, req_asset_id.to_be_bytes().to_vec());
         let req_payloads = req_msg.to_fragments(200).unwrap();
         let packet = RadioPacket {
