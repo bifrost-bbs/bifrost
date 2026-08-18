@@ -2,7 +2,9 @@
 //! Handles converting ANSI sequences into 1-byte opcodes, differential drawing,
 //! and Heatshrink LZSS compression.
 
-use bifrost_compression::{Heatshrink, HeatshrinkError};
+use bifrost_compression::{
+    compress_adaptive, decompress_adaptive, CompressionDictionary, CompressionError, Heatshrink,
+};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -17,13 +19,16 @@ pub enum MeshAnsiError {
     Io(String),
 }
 
-impl From<HeatshrinkError> for MeshAnsiError {
-    fn from(err: HeatshrinkError) -> Self {
+impl From<CompressionError> for MeshAnsiError {
+    fn from(err: CompressionError) -> Self {
         match err {
-            HeatshrinkError::CompressionOutputFull | HeatshrinkError::InvalidParameters(_) => {
+            CompressionError::CompressionOutputFull | CompressionError::InvalidParameters(_) => {
                 MeshAnsiError::CompressionError(err.to_string())
             }
-            HeatshrinkError::DecompressionOutputFull => {
+            CompressionError::DecompressionOutputFull
+            | CompressionError::CorruptDictionary(_)
+            | CompressionError::InvalidTokenReference(_)
+            | CompressionError::DictionaryCrcMismatch { .. } => {
                 MeshAnsiError::DecompressionError(err.to_string())
             }
         }
@@ -98,6 +103,28 @@ pub fn compress_bytecode(bytecode: &[u8]) -> Result<Vec<u8>, MeshAnsiError> {
 pub fn decompress_bytecode(compressed: &[u8]) -> Result<Vec<u8>, MeshAnsiError> {
     let hs = Heatshrink::new(8, 4)?;
     Ok(hs.decompress(compressed)?)
+}
+
+/// Compresses bytecode adaptively with optional dictionary and fallback guard.
+/// Returns (flags, payload) where flags:
+/// - 0x00: Raw fallback (guaranteed never to expand)
+/// - 0x02: Heatshrink LZSS only
+/// - 0x04: Dictionary only
+/// - 0x06: Dictionary + Heatshrink LZSS
+pub fn compress_bytecode_adaptive(
+    bytecode: &[u8],
+    dict: Option<&CompressionDictionary>,
+) -> (u8, Vec<u8>) {
+    compress_adaptive(bytecode, dict, 8, 4)
+}
+
+/// Decompresses bytecode adaptively based on message flags.
+pub fn decompress_bytecode_adaptive(
+    flags: u8,
+    payload: &[u8],
+    dict: Option<&CompressionDictionary>,
+) -> Result<Vec<u8>, MeshAnsiError> {
+    Ok(decompress_adaptive(flags, payload, dict, 8, 4)?)
 }
 
 #[cfg(test)]

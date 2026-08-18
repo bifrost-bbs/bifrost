@@ -6,6 +6,7 @@ members = [
     "crates/bifrost-transport",
     "crates/bifrost-bbs",
     "crates/bifrost-client",
+    "crates/bifrost-tuning",
 ]
 
 [workspace.dependencies]

@@ -1,0 +1,15 @@
+[package]
+name = "bifrost-tuning"
+version = "0.1.0"
+edition = "2021"
+authors = ["Bifrost Contributors"]
+description = "Bifrost offline packet capture training, benchmark harness, and dictionary tuner CLI"
+
+[dependencies]
+bifrost-compression = { path = "../bifrost-compression" }
+bifrost-ansi = { path = "../bifrost-ansi" }
+bifrost-transport = { path = "../bifrost-transport" }
+
+anyhow.workspace = true
+log.workspace = true
+env_logger.workspace = true
