@@ -50,6 +50,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bifrost-ansi",
+ "bifrost-compression",
  "bifrost-transport",
  "env_logger",
  "log",
@@ -67,6 +68,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bifrost-ansi",
+ "bifrost-compression",
  "bifrost-transport",
  "crossterm",
  "env_logger",
@@ -95,6 +97,18 @@ dependencies = [
  "serde_json",
  "thiserror",
  "tokio",
+]
+
+[[package]]
+name = "bifrost-tuning"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bifrost-ansi",
+ "bifrost-compression",
+ "bifrost-transport",
+ "env_logger",
+ "log",
 ]
 
 [[package]]

@@ -8,6 +8,7 @@ description = "Bifrost BBS Host server daemon kernel, scheduler, and Lua sandbox
 [dependencies]
 bifrost-ansi = { path = "../bifrost-ansi" }
 bifrost-transport = { path = "../bifrost-transport" }
+bifrost-compression = { path = "../bifrost-compression" }
 
 tokio.workspace = true
 serde.workspace = true

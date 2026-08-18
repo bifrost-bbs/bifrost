@@ -93,7 +93,6 @@ impl TransportStats {
     pub fn record_send(&self, payload_bytes: usize) {
         self.packets_sent.fetch_add(1, Ordering::Relaxed);
         self.bytes_sent.fetch_add(payload_bytes as u64, Ordering::Relaxed);
-        self.compressed_bytes_sent.fetch_add(payload_bytes as u64, Ordering::Relaxed);
         if let Ok(mut ts) = self.packet_timestamps.lock() {
             ts.push((Instant::now(), true));
         }
@@ -103,7 +102,6 @@ impl TransportStats {
     pub fn record_receive(&self, payload_bytes: usize) {
         self.packets_received.fetch_add(1, Ordering::Relaxed);
         self.bytes_received.fetch_add(payload_bytes as u64, Ordering::Relaxed);
-        self.compressed_bytes_received.fetch_add(payload_bytes as u64, Ordering::Relaxed);
         if let Ok(mut ts) = self.packet_timestamps.lock() {
             ts.push((Instant::now(), false));
         }
@@ -254,8 +252,18 @@ impl MockSocketTransport {
 
     /// Creates a mock transport that binds to a TCP port as a server.
     pub fn new_server(addr: String, packet_loss_rate: f64, latency_ms: u32, mtu: usize) -> Self {
-        let (tx, rx_out) = tokio::sync::mpsc::channel::<RadioPacket>(100);
+        let (tx, mut rx_out) = tokio::sync::mpsc::channel::<RadioPacket>(100);
         let (tx_in, rx) = tokio::sync::mpsc::channel::<RadioPacket>(100);
+
+        let (broadcast_tx, _) = tokio::sync::broadcast::channel::<RadioPacket>(200);
+        let broadcast_tx_clone = broadcast_tx.clone();
+
+        // Forward packets from tx channel into the broadcast channel
+        tokio::spawn(async move {
+            while let Some(packet) = rx_out.recv().await {
+                let _ = broadcast_tx_clone.send(packet);
+            }
+        });
 
         let addr_clone = addr.clone();
         let tx_in_clone = tx_in.clone();
@@ -263,11 +271,20 @@ impl MockSocketTransport {
             if let Ok(listener) = tokio::net::TcpListener::bind(&addr_clone).await {
                 log::info!("Mock Socket Broker listening on {}", addr_clone);
                 loop {
-                    if let Ok((socket, peer_addr)) = listener.accept().await {
-                        log::info!("Mock Socket Broker accepted connection from {}", peer_addr);
-                        // We forward packets in a connection handler loop
-                        let _ = handle_socket_connection(socket, rx_out, tx_in_clone.clone()).await;
-                        break; // Close after first connection for testing
+                    match listener.accept().await {
+                        Ok((socket, peer_addr)) => {
+                            log::info!("Mock Socket Broker accepted connection from {}", peer_addr);
+                            let broadcast_rx = broadcast_tx.subscribe();
+                            let tx_in_inner = tx_in_clone.clone();
+                            tokio::spawn(async move {
+                                let _ = handle_socket_connection_broadcast(socket, broadcast_rx, tx_in_inner).await;
+                                log::debug!("Mock Socket Broker connection handler for {} finished", peer_addr);
+                            });
+                        }
+                        Err(e) => {
+                            log::error!("Mock Socket Broker accept error on {}: {:?}", addr_clone, e);
+                            break;
+                        }
                     }
                 }
             } else {
@@ -313,6 +330,78 @@ impl MockSocketTransport {
             mtu,
             stats: Arc::new(TransportStats::new()),
         }
+    }
+}
+
+async fn handle_socket_connection_broadcast(
+    mut socket: tokio::net::TcpStream,
+    mut rx_out: tokio::sync::broadcast::Receiver<RadioPacket>,
+    tx_in: tokio::sync::mpsc::Sender<RadioPacket>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    log::debug!("Mock TCP Socket Broker connection handler started");
+    let (mut reader, mut writer) = socket.split();
+
+    let write_loop = async {
+        loop {
+            match rx_out.recv().await {
+                Ok(packet) => {
+                    log::debug!(
+                        "TCP write_loop: forwarding packet of len {} over TCP",
+                        packet.payload.len()
+                    );
+                    let json = serde_json::to_string(&packet)?;
+                    let bytes = json.as_bytes();
+                    let len = bytes.len() as u32;
+                    writer.write_all(&len.to_be_bytes()).await?;
+                    writer.write_all(bytes).await?;
+                    writer.flush().await?;
+                    log::debug!("TCP write_loop: packet successfully flushed to socket");
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    continue;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    break;
+                }
+            }
+        }
+        log::debug!("TCP write_loop exited");
+        Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+    };
+
+    let read_loop = async {
+        let mut len_bytes = [0u8; 4];
+        loop {
+            if reader.read_exact(&mut len_bytes).await.is_err() {
+                log::debug!("TCP read_loop: read_exact length failed (connection closed by peer)");
+                break;
+            }
+            let len = u32::from_be_bytes(len_bytes) as usize;
+            log::debug!("TCP read_loop: reading payload of len {}", len);
+            let mut buf = vec![0u8; len];
+            if reader.read_exact(&mut buf).await.is_err() {
+                log::debug!("TCP read_loop: read_exact payload failed");
+                break;
+            }
+            if let Ok(packet) = serde_json::from_slice::<RadioPacket>(&buf) {
+                log::debug!("TCP read_loop: dispatching packet to local receiver");
+                if tx_in.send(packet).await.is_err() {
+                    log::debug!("TCP read_loop: rx channel receiver dropped");
+                    break;
+                }
+            } else {
+                log::debug!("TCP read_loop: failed to deserialize RadioPacket");
+            }
+        }
+        log::debug!("TCP read_loop exited");
+        Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+    };
+
+    tokio::select! {
+        r = write_loop => r,
+        r = read_loop => r,
     }
 }
 
@@ -635,6 +724,59 @@ impl MessageReassembler {
         } else {
             Ok(None)
         }
+    }
+}
+
+/// A ring-buffer LRU session payload cache for frame de-duplication over the air.
+#[derive(Debug, Clone)]
+pub struct SessionPayloadCache {
+    capacity: usize,
+    entries: std::collections::VecDeque<u32>,
+    lookup: std::collections::HashMap<u32, Vec<u8>>,
+}
+
+impl SessionPayloadCache {
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            capacity: std::cmp::max(1, capacity),
+            entries: std::collections::VecDeque::with_capacity(capacity),
+            lookup: std::collections::HashMap::with_capacity(capacity),
+        }
+    }
+
+    pub fn insert(&mut self, crc32: u32, payload: Vec<u8>) {
+        if self.lookup.contains_key(&crc32) {
+            return;
+        }
+        if self.entries.len() >= self.capacity {
+            if let Some(old_crc) = self.entries.pop_front() {
+                self.lookup.remove(&old_crc);
+            }
+        }
+        self.entries.push_back(crc32);
+        self.lookup.insert(crc32, payload);
+    }
+
+    pub fn get(&self, crc32: u32) -> Option<&Vec<u8>> {
+        self.lookup.get(&crc32)
+    }
+
+    pub fn contains(&self, crc32: u32) -> bool {
+        self.lookup.contains_key(&crc32)
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
+impl Default for SessionPayloadCache {
+    fn default() -> Self {
+        Self::new(100)
     }
 }
 
@@ -976,5 +1118,31 @@ mod tests {
         assert_eq!(stats.total_compressed_bytes_sent(), 200);
         assert_eq!(stats.total_raw_bytes_received(), 400);
         assert_eq!(stats.total_compressed_bytes_received(), 150);
+    }
+
+    #[test]
+    fn test_session_payload_cache_insert_get_eviction() {
+        let mut cache = SessionPayloadCache::new(3);
+        assert!(cache.is_empty());
+
+        let payload1 = b"Screen 1".to_vec();
+        let payload2 = b"Screen 2".to_vec();
+        let payload3 = b"Screen 3".to_vec();
+        let payload4 = b"Screen 4".to_vec();
+
+        cache.insert(0x1111, payload1.clone());
+        cache.insert(0x2222, payload2.clone());
+        cache.insert(0x3333, payload3.clone());
+
+        assert_eq!(cache.len(), 3);
+        assert_eq!(cache.get(0x1111), Some(&payload1));
+        assert_eq!(cache.get(0x2222), Some(&payload2));
+        assert_eq!(cache.get(0x3333), Some(&payload3));
+
+        // Insert 4th element -> should evict oldest (0x1111)
+        cache.insert(0x4444, payload4.clone());
+        assert_eq!(cache.len(), 3);
+        assert_eq!(cache.get(0x1111), None);
+        assert_eq!(cache.get(0x4444), Some(&payload4));
     }
 }

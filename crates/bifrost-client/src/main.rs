@@ -8,6 +8,7 @@ use crossterm::{
 };
 use std::collections::HashMap;
 use std::io::{self, Write};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -69,49 +70,287 @@ impl Default for FormState {
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    let mut cli_log_level: Option<String> = None;
-    let args: Vec<String> = std::env::args().collect();
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientConfig {
+    pub log_level: Option<String>,
+    pub auto_crawl: bool,
+    pub crawl_steps: usize,
+    pub crawl_delay_ms: u64,
+    pub headless: bool,
+    pub server_addr: String,
+}
+
+impl Default for ClientConfig {
+    fn default() -> Self {
+        Self {
+            log_level: None,
+            auto_crawl: false,
+            crawl_steps: 50,
+            crawl_delay_ms: 250,
+            headless: false,
+            server_addr: "127.0.0.1:8088".to_string(),
+        }
+    }
+}
+
+pub fn parse_cli_args(args: &[String]) -> Result<Option<ClientConfig>> {
+    let mut config = ClientConfig::default();
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
             "--log-level" | "-l" => {
                 if i + 1 < args.len() {
-                    cli_log_level = Some(args[i + 1].clone());
+                    config.log_level = Some(args[i + 1].clone());
                     i += 1;
                 }
             }
             "--debug" | "-v" | "--verbose" => {
-                cli_log_level = Some("debug".to_string());
+                config.log_level = Some("debug".to_string());
             }
             "--trace" => {
-                cli_log_level = Some("trace".to_string());
+                config.log_level = Some("trace".to_string());
+            }
+            "--auto-navigate" | "--crawl" | "--auto" => {
+                config.auto_crawl = true;
+            }
+            "--crawl-steps" | "-n" => {
+                if i + 1 < args.len() {
+                    if let Ok(steps) = args[i + 1].parse::<usize>() {
+                        config.crawl_steps = steps;
+                    }
+                    i += 1;
+                }
+            }
+            "--crawl-delay" | "-d" => {
+                if i + 1 < args.len() {
+                    if let Ok(delay) = args[i + 1].parse::<u64>() {
+                        config.crawl_delay_ms = delay;
+                    }
+                    i += 1;
+                }
+            }
+            "--headless" => {
+                config.headless = true;
+            }
+            "--addr" => {
+                if i + 1 < args.len() {
+                    config.server_addr = args[i + 1].clone();
+                    i += 1;
+                }
             }
             "--help" | "-h" => {
                 println!("Usage: bifrost-client [OPTIONS]");
                 println!();
                 println!("Options:");
-                println!("  -l, --log-level <LEVEL>  Set log level (trace, debug, info, warn, error)");
-                println!("  -v, --debug, --verbose   Enable debug logging");
-                println!("      --trace              Enable trace logging");
-                println!("  -h, --help               Print help");
-                return Ok(());
+                println!("  -l, --log-level <LEVEL>    Set log level (trace, debug, info, warn, error)");
+                println!("  -v, --debug, --verbose     Enable debug logging");
+                println!("      --trace                Enable trace logging");
+                println!("      --crawl, --auto-navigate Automate navigating BBS options at random");
+                println!("  -n, --crawl-steps <STEPS>  Number of crawl steps to execute (default: 50)");
+                println!("  -d, --crawl-delay <MS>     Delay in milliseconds between actions (default: 250)");
+                println!("      --headless             Run headless without interactive terminal display");
+                println!("      --addr <IP:PORT>       Server address to connect to (default: 127.0.0.1:8088)");
+                println!("  -h, --help                 Print help");
+                return Ok(None);
             }
             _ => {}
         }
         i += 1;
     }
+    Ok(Some(config))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CrawlAction {
+    pub payload: Vec<u8>,
+    pub description: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct CrawlState {
+    pub visit_counts: HashMap<(u8, String), usize>, // (form_id, button_id) -> count
+    pub last_form_id: Option<u8>,
+    pub last_button_id: Option<String>,
+    pub rng_state: u64,
+}
+
+impl Default for CrawlState {
+    fn default() -> Self {
+        let initial_seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0x9E3779B97F4A7C15);
+
+        Self {
+            visit_counts: HashMap::new(),
+            last_form_id: None,
+            last_button_id: None,
+            rng_state: initial_seed ^ 0x6C62272E07BB0142,
+        }
+    }
+}
+
+impl CrawlState {
+    pub fn next_rand(&mut self) -> u64 {
+        // XorShift64* PRNG
+        self.rng_state ^= self.rng_state >> 12;
+        self.rng_state ^= self.rng_state << 25;
+        self.rng_state ^= self.rng_state >> 27;
+        self.rng_state.wrapping_mul(0x2545F4914F6CDD1D)
+    }
+
+    pub fn decide_action(&mut self, form: &mut FormState) -> CrawlAction {
+        if form.active && !form.fields.is_empty() {
+            let submit_indices: Vec<usize> = form
+                .fields
+                .iter()
+                .enumerate()
+                .filter(|(_, f)| f.is_submit)
+                .map(|(i, _)| i)
+                .collect();
+
+            if !submit_indices.is_empty() {
+                // Determine weights for each submit button
+                // 1. Base weight inversely proportional to prior visit count
+                // 2. Penalize "back", "cancel", "main_menu", "logout" if there are other unvisited options
+                // 3. Avoid immediately repeating the action that brought us here
+                let mut weights = Vec::with_capacity(submit_indices.len());
+                let has_forward_options = submit_indices.iter().any(|&i| {
+                    let id = &form.fields[i].id;
+                    id != "back" && id != "cancel" && id != "logout" && id != "main_menu"
+                });
+
+                for &idx in &submit_indices {
+                    let field = &form.fields[idx];
+                    let prior_visits = *self.visit_counts.get(&(form.form_id, field.id.clone())).unwrap_or(&0);
+                    
+                    // High weight for least visited items: 1000 / (1 + visits * 4)
+                    let mut w: f64 = 1000.0 / (1.0 + (prior_visits as f64) * 4.0);
+
+                    let is_exit_button = field.id == "back" || field.id == "cancel" || field.id == "main_menu" || field.id == "logout";
+                    if is_exit_button && has_forward_options {
+                        // If other forward options exist on this form that haven't been visited,
+                        // heavily discount the back/exit button to encourage exploration
+                        let unvisited_forward_count = submit_indices.iter().filter(|&&i| {
+                            let fid = &form.fields[i].id;
+                            fid != "back" && fid != "cancel" && fid != "logout" && fid != "main_menu"
+                                && *self.visit_counts.get(&(form.form_id, fid.clone())).unwrap_or(&0) == 0
+                        }).count();
+
+                        if unvisited_forward_count > 0 {
+                            w *= 0.05; // 95% discount on early back-tracking
+                        } else {
+                            w *= 0.40; // Moderate discount once some forward options explored
+                        }
+                    }
+
+                    if field.id == "logout" {
+                        w *= 0.01; // Very rare logout so session continues exploring
+                    }
+
+                    // Anti-ping-pong: If we just clicked "back" from Form A to Form B,
+                    // don't immediately re-click the exact same button that took us to Form A
+                    if let (Some(_last_fid), Some(ref last_bid)) = (self.last_form_id, &self.last_button_id) {
+                        if last_bid == "back" && self.visit_counts.get(&(form.form_id, field.id.clone())).unwrap_or(&0) > &0 {
+                            w *= 0.15;
+                        }
+                    }
+
+                    weights.push(w.max(0.001));
+                }
+
+                // Weighted random roulette selection
+                let total_weight: f64 = weights.iter().sum();
+                let rand_val = ((self.next_rand() % 10000) as f64 / 10000.0) * total_weight;
+
+                let mut cumulative = 0.0;
+                let mut chosen_idx = submit_indices[0];
+                for (i, &w) in weights.iter().enumerate() {
+                    cumulative += w;
+                    if rand_val <= cumulative {
+                        chosen_idx = submit_indices[i];
+                        break;
+                    }
+                }
+
+                let chosen_field = form.fields[chosen_idx].clone();
+                *self.visit_counts.entry((form.form_id, chosen_field.id.clone())).or_insert(0) += 1;
+                self.last_form_id = Some(form.form_id);
+                self.last_button_id = Some(chosen_field.id.clone());
+
+                let mut map = HashMap::new();
+                for f in &form.fields {
+                    if !f.is_submit {
+                        map.insert(f.id.clone(), f.val.clone());
+                    }
+                }
+                map.insert("submit".to_string(), chosen_field.id.clone());
+                let json = serde_json::to_string(&map).unwrap();
+                let desc = format!("Submit button '{}' on Form {}", chosen_field.id, form.form_id);
+
+                form.active = false;
+                form.fields.clear();
+                CrawlAction {
+                    payload: json.into_bytes(),
+                    description: desc,
+                }
+            } else {
+                // Form with only input fields (no submit button): preserve values and submit
+                let mut map = HashMap::new();
+                for f in &form.fields {
+                    map.insert(f.id.clone(), f.val.clone());
+                }
+                let json = serde_json::to_string(&map).unwrap();
+                let desc = format!("Submit form {} fields", form.form_id);
+
+                form.active = false;
+                form.fields.clear();
+                CrawlAction {
+                    payload: json.into_bytes(),
+                    description: desc,
+                }
+            }
+        } else {
+            // Plain text screen / prompt
+            let keys = [b'\r', b' ', b'1', b'2', b'3', b'b', b'\r'];
+            let idx = (self.next_rand() as usize) % keys.len();
+            let chosen_key = keys[idx];
+            let desc = format!("Keystroke {:?}", chosen_key as char);
+            CrawlAction {
+                payload: vec![chosen_key],
+                description: desc,
+            }
+        }
+    }
+}
+
+pub fn decide_crawl_action(form: &mut FormState, rng_seed: usize) -> CrawlAction {
+    let mut state = CrawlState {
+        visit_counts: HashMap::new(),
+        last_form_id: None,
+        last_button_id: None,
+        rng_state: (rng_seed as u64) | 1,
+    };
+    state.decide_action(form)
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let args: Vec<String> = std::env::args().collect();
+    let config = match parse_cli_args(&args)? {
+        Some(cfg) => cfg,
+        None => return Ok(()),
+    };
 
     // Default to warn for client unless configured via CLI or RUST_LOG
-    let default_level = cli_log_level.unwrap_or_else(|| "warn".to_string());
+    let default_level = config.log_level.unwrap_or_else(|| "warn".to_string());
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(default_level)).init();
 
-    println!("Connecting to virtual radio transport at 127.0.0.1:8088...");
-    // Create client transport connecting to port 8088
+    println!("Connecting to virtual radio transport at {}...", config.server_addr);
+    // Create client transport connecting to specified port
     let client_key = [1u8; 32];
     let transport = Arc::new(MockSocketTransport::new_client(
-        "127.0.0.1:8088".to_string(),
+        config.server_addr.clone(),
         0.0,
         0,
         200,
@@ -166,69 +405,150 @@ async fn main() -> Result<()> {
         transport.send_packet(handshake).await?;
     }
 
-    // Enable raw mode for single-keystroke interactivity
-    enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    stdout.execute(EnterAlternateScreen)?;
-    stdout.flush()?;
+    let shutdown_signal = Arc::new(AtomicBool::new(false));
 
+    // Terminal layout and state setup
     let layout = Arc::new(Mutex::new(LayoutMode::Full));
     let form_state = Arc::new(Mutex::new(FormState::default()));
     let redraw_trigger = Arc::new(AtomicBool::new(false));
 
-    // Draw initial layout border
-    let (term_w, term_h) = crossterm::terminal::size().unwrap_or((80, 25));
-    let (col_offset, row_offset, w, h) = get_viewport_offsets(LayoutMode::Full, term_w, term_h);
-    draw_viewport_border(col_offset, row_offset, w, h);
-    print!("\x1b[{};{}H", row_offset + 1, col_offset + 1);
-    stdout.flush()?;
+    if !config.headless {
+        // Enable raw mode for single-keystroke interactivity
+        enable_raw_mode()?;
+        let mut stdout = io::stdout();
+        stdout.execute(EnterAlternateScreen)?;
+        stdout.flush()?;
+
+        // Draw initial layout border
+        let (term_w, term_h) = crossterm::terminal::size().unwrap_or((80, 25));
+        let (col_offset, row_offset, w, h) = get_viewport_offsets(LayoutMode::Full, term_w, term_h);
+        draw_viewport_border(col_offset, row_offset, w, h);
+        print!("\x1b[{};{}H", row_offset + 1, col_offset + 1);
+        stdout.flush()?;
+    }
 
     let transport_clone = transport.clone();
     let layout_clone = layout.clone();
     let form_clone = form_state.clone();
     let redraw_clone = redraw_trigger.clone();
     let client_key_clone = client_key;
+    let shutdown_clone = shutdown_signal.clone();
 
-    let (key_tx, mut key_rx) = tokio::sync::mpsc::channel::<KeyEvent>(100);
-    std::thread::spawn(move || loop {
-        if let Ok(Event::Key(key_event)) = event::read() {
-            if key_tx.blocking_send(key_event).is_err() {
-                break;
-            }
-        }
-    });
+    // Spawn automated crawler task if enabled
+    if config.auto_crawl {
+        let form_crawl = form_state.clone();
+        let transport_crawl = transport.clone();
+        let client_key_crawl = client_key;
+        let shutdown_crawl = shutdown_signal.clone();
+        let steps_total = config.crawl_steps;
+        let delay_ms = config.crawl_delay_ms;
+        let is_headless = config.headless;
 
-    // Spawn task to read keyboard events and send to server
-    let input_handle = tokio::spawn(async move {
-        while let Some(KeyEvent {
-            code,
-            modifiers,
-            kind,
-            ..
-        }) = key_rx.recv().await
-        {
-            if kind == event::KeyEventKind::Release {
-                continue;
+        tokio::spawn(async move {
+            log::info!("[AUTO-CRAWLER] Started automated navigation ({} steps, {}ms delay)", steps_total, delay_ms);
+            if is_headless {
+                println!("[AUTO-CRAWLER] Started automated navigation ({} steps, {}ms delay)...", steps_total, delay_ms);
             }
-            match code {
-                KeyCode::Char('l') | KeyCode::Char('L')
-                    if modifiers.contains(KeyModifiers::CONTROL) =>
-                {
-                    // Cycle layout!
-                    let mut layout_val = layout_clone.lock().unwrap();
-                    *layout_val = layout_val.cycle();
-                    redraw_clone.store(true, Ordering::SeqCst);
-                }
-                KeyCode::Char('x') | KeyCode::Char('X')
-                    if modifiers.contains(KeyModifiers::CONTROL) =>
-                {
+
+            // Allow initial handshake and screen load to arrive
+            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+            let mut crawler = CrawlState::default();
+            let mut step_count = 0;
+
+            while step_count < steps_total || steps_total == 0 {
+                if shutdown_crawl.load(Ordering::SeqCst) {
                     break;
                 }
-                KeyCode::Char('c') | KeyCode::Char('C')
-                    if modifiers.contains(KeyModifiers::CONTROL) =>
-                {
+
+                tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
+                step_count += 1;
+
+                let action = {
+                    let mut form = form_crawl.lock().unwrap();
+                    crawler.decide_action(&mut form)
+                };
+
+                log::info!("[AUTO-CRAWLER] Step {}/{}: {}", step_count, steps_total, action.description);
+                if is_headless {
+                    println!("[AUTO-CRAWLER] Step {}/{}: {}", step_count, steps_total, action.description);
+                }
+
+                let msg = MeshBbsMessage::new(0x02, 0x02, 0x00, action.payload);
+                let mtu = transport_crawl.get_mtu();
+                if let Ok(frags) = msg.to_fragments(mtu) {
+                    for frag in frags {
+                        let packet = RadioPacket {
+                            is_broadcast: false,
+                            src_node: client_key_crawl,
+                            dst_node: [0; 32],
+                            payload: frag,
+                            signal_rssi: -50,
+                            signal_snr: 10,
+                        };
+                        if transport_crawl.send_packet(packet).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+
+            log::info!("[AUTO-CRAWLER] Completed {} automated steps.", step_count);
+            if is_headless {
+                println!("[AUTO-CRAWLER] Completed {} automated steps.", step_count);
+            }
+            shutdown_crawl.store(true, Ordering::SeqCst);
+        });
+    }
+
+    // Keyboard input handling (interactive mode)
+    if !config.headless {
+        let (key_tx, mut key_rx) = tokio::sync::mpsc::channel::<KeyEvent>(100);
+        std::thread::spawn(move || loop {
+            if let Ok(Event::Key(key_event)) = event::read() {
+                if key_tx.blocking_send(key_event).is_err() {
                     break;
                 }
+            }
+        });
+
+        // Spawn task to read keyboard events and send to server
+        tokio::spawn(async move {
+            while let Some(KeyEvent {
+                code,
+                modifiers,
+                kind,
+                ..
+            }) = key_rx.recv().await
+            {
+                if kind == event::KeyEventKind::Release {
+                    continue;
+                }
+                match code {
+                    KeyCode::Char('l') | KeyCode::Char('L')
+                        if modifiers.contains(KeyModifiers::CONTROL) =>
+                    {
+                        // Cycle layout!
+                        let mut layout_val = layout_clone.lock().unwrap();
+                        *layout_val = layout_val.cycle();
+                        redraw_clone.store(true, Ordering::SeqCst);
+                    }
+                    KeyCode::Char('x') | KeyCode::Char('X')
+                        if modifiers.contains(KeyModifiers::CONTROL) =>
+                    {
+                        shutdown_clone.store(true, Ordering::SeqCst);
+                        break;
+                    }
+                    KeyCode::Char('c') | KeyCode::Char('C')
+                        if modifiers.contains(KeyModifiers::CONTROL) =>
+                    {
+                        shutdown_clone.store(true, Ordering::SeqCst);
+                        break;
+                    }
+                    KeyCode::Esc => {
+                        shutdown_clone.store(true, Ordering::SeqCst);
+                        break;
+                    }
                 KeyCode::Tab | KeyCode::Down | KeyCode::Right => {
                     let mut form = form_clone.lock().unwrap();
                     let layout_val = *layout_clone.lock().unwrap();
@@ -397,22 +717,23 @@ async fn main() -> Result<()> {
                         }
                     }
                 }
-                KeyCode::Esc => {
-                    break;
-                }
                 _ => {}
             }
         }
     });
+}
 
     // Receive and render bytecode packets from server in main loop
     let mut reassembler = MessageReassembler::new();
     let mut bytecode_history = Vec::new();
     let (req_asset_tx, mut req_asset_rx) = tokio::sync::mpsc::unbounded_channel::<u16>();
     let mut asset_cache_assembler: HashMap<u16, (u8, u32, HashMap<u8, Vec<u8>>)> = HashMap::new();
+    let mut connected_bbs_node: [u8; 32] = [0; 32];
+    let mut client_dict = load_client_dictionary(&connected_bbs_node);
+    let mut client_session_cache = bifrost_transport::SessionPayloadCache::new(100);
 
     loop {
-        if input_handle.is_finished() {
+        if shutdown_signal.load(Ordering::SeqCst) {
             break;
         }
 
@@ -447,6 +768,7 @@ async fn main() -> Result<()> {
 
             let mut form_lock = form_state.lock().unwrap();
             interpret_bytecode(
+                &connected_bbs_node,
                 &bytecode_history,
                 &mut form_lock,
                 layout_val,
@@ -461,6 +783,10 @@ async fn main() -> Result<()> {
             let _ = io::stdout().flush();
         }
 
+        if shutdown_signal.load(Ordering::SeqCst) {
+            break;
+        }
+
         match tokio::time::timeout(
             tokio::time::Duration::from_millis(100),
             transport.receive_packet(),
@@ -468,6 +794,11 @@ async fn main() -> Result<()> {
         .await
         {
             Ok(Ok(packet)) => {
+                if packet.src_node != [0; 32] && packet.src_node != connected_bbs_node {
+                    connected_bbs_node = packet.src_node;
+                    client_dict = load_client_dictionary(&connected_bbs_node);
+                }
+
                 // Check for public broadcast asset chunks (AppPort 0xBB, MsgType 0x04)
                 if packet.payload.len() >= 12 && packet.payload[0] == 0xBB && packet.payload[1] == 0x04 {
                     let chunk_idx = packet.payload[3];
@@ -486,7 +817,6 @@ async fn main() -> Result<()> {
                             .entry(asset_id)
                             .or_insert_with(|| (total_chunks, master_crc, HashMap::new()));
                         entry.2.insert(chunk_idx, chunk_data.to_vec());
-
                         if entry.2.len() == total_chunks as usize {
                             let mut assembled = Vec::new();
                             for idx in 1..=total_chunks {
@@ -500,7 +830,10 @@ async fn main() -> Result<()> {
                                     asset_id,
                                     assembled.len()
                                 );
-                                save_asset_to_cache(asset_id, &assembled);
+                                save_asset_to_cache(&connected_bbs_node, asset_id, &assembled);
+                                if asset_id == 0x00DF {
+                                    client_dict = load_client_dictionary(&connected_bbs_node);
+                                }
                                 redraw_trigger.store(true, Ordering::SeqCst);
                             } else {
                                 log::warn!("Asset 0x{:04X} CRC32 mismatch, discarding", asset_id);
@@ -512,10 +845,67 @@ async fn main() -> Result<()> {
 
                 match reassembler.process_packet([0; 32], &packet.payload) {
                     Ok(Some(msg)) => {
-                        let payload = if (msg.flags & 0x02) != 0 {
-                            match bifrost_ansi::decompress_bytecode(&msg.payload) {
+                        let payload = if (msg.flags & 0x08) != 0 {
+                            // Hash-referencing previous session payload
+                            if msg.payload.len() >= 4 {
+                                let crc = u32::from_be_bytes([
+                                    msg.payload[0],
+                                    msg.payload[1],
+                                    msg.payload[2],
+                                    msg.payload[3],
+                                ]);
+                                if let Some(cached) = client_session_cache.get(crc) {
+                                    log::debug!(
+                                        "[SESSION DEDUP] Cache hit for CRC 0x{:08X} ({} bytes recovered)",
+                                        crc,
+                                        cached.len()
+                                    );
+                                    transport
+                                        .stats
+                                        .record_decompression(msg.payload.len(), cached.len());
+                                    cached.clone()
+                                } else {
+                                    log::warn!(
+                                        "[SESSION DEDUP] Cache miss for CRC 0x{:08X}, sending NACK to BBS",
+                                        crc
+                                    );
+                                    let nack_msg = MeshBbsMessage::new(
+                                        0x01,
+                                        0x06,
+                                        0x00,
+                                        crc.to_be_bytes().to_vec(),
+                                    );
+                                    let mtu = transport.get_mtu();
+                                    if let Ok(frags) = nack_msg.to_fragments(mtu) {
+                                        for frag in frags {
+                                            let packet = RadioPacket {
+                                                is_broadcast: false,
+                                                src_node: client_key,
+                                                dst_node: connected_bbs_node,
+                                                payload: frag,
+                                                signal_rssi: -50,
+                                                signal_snr: 10,
+                                            };
+                                            let _ = transport.send_packet(packet).await;
+                                        }
+                                    }
+                                    continue;
+                                }
+                            } else {
+                                msg.payload
+                            }
+                        } else if (msg.flags & 0x06) != 0 {
+                            match bifrost_ansi::decompress_bytecode_adaptive(
+                                msg.flags,
+                                &msg.payload,
+                                Some(&client_dict),
+                            ) {
                                 Ok(decomp) => {
-                                    transport.stats.record_decompression(msg.payload.len(), decomp.len());
+                                    transport
+                                        .stats
+                                        .record_decompression(msg.payload.len(), decomp.len());
+                                    let crc = bifrost_transport::crc32(&decomp);
+                                    client_session_cache.insert(crc, decomp.clone());
                                     decomp
                                 }
                                 Err(e) => {
@@ -524,6 +914,8 @@ async fn main() -> Result<()> {
                                 }
                             }
                         } else {
+                            let crc = bifrost_transport::crc32(&msg.payload);
+                            client_session_cache.insert(crc, msg.payload.clone());
                             msg.payload
                         };
 
@@ -534,25 +926,35 @@ async fn main() -> Result<()> {
                         let (col_offset, row_offset, w, h) =
                             get_viewport_offsets(layout_val, term_w, term_h);
 
-                        if payload.first() == Some(&0x01) {
+                        if !config.headless && payload.first() == Some(&0x01) {
                             print!("\x1b[2J\x1b[H");
                             draw_viewport_border(col_offset, row_offset, w, h);
                         }
 
                         let mut form_lock = form_state.lock().unwrap();
-                        interpret_bytecode(
-                            &payload,
-                            &mut form_lock,
-                            layout_val,
-                            col_offset,
-                            row_offset,
-                            &req_asset_tx,
-                        );
+                        if config.headless {
+                            interpret_bytecode_headless(
+                                &connected_bbs_node,
+                                &payload,
+                                &mut form_lock,
+                                &req_asset_tx,
+                            );
+                        } else {
+                            interpret_bytecode(
+                                &connected_bbs_node,
+                                &payload,
+                                &mut form_lock,
+                                layout_val,
+                                col_offset,
+                                row_offset,
+                                &req_asset_tx,
+                            );
 
-                        if form_lock.active {
-                            position_cursor(&form_lock, layout_val);
+                            if form_lock.active {
+                                position_cursor(&form_lock, layout_val);
+                            }
+                            let _ = io::stdout().flush();
                         }
-                        let _ = io::stdout().flush();
                     }
                     Ok(None) => {}
                     Err(e) => {
@@ -568,9 +970,12 @@ async fn main() -> Result<()> {
         }
     }
 
-    let _ = disable_raw_mode();
-    stdout.execute(LeaveAlternateScreen)?;
-    stdout.flush()?;
+    if !config.headless {
+        let _ = disable_raw_mode();
+        let mut stdout = io::stdout();
+        let _ = stdout.execute(LeaveAlternateScreen);
+        let _ = stdout.flush();
+    }
     println!("Disconnected from BBS.");
     Ok(())
 }
@@ -740,6 +1145,7 @@ fn append_to_history(history: &mut Vec<u8>, payload: &[u8]) {
 }
 
 fn interpret_bytecode(
+    server_node_id: &[u8; 32],
     payload: &[u8],
     form_state: &mut FormState,
     layout: LayoutMode,
@@ -818,7 +1224,7 @@ fn interpret_bytecode(
                 // OP_RENDER_ASSET
                 if i + 2 < payload.len() {
                     let id = u16::from_be_bytes([payload[i + 1], payload[i + 2]]);
-                    if !render_cached_asset(id, col_offset, row_offset) {
+                    if !render_cached_asset(server_node_id, id, col_offset, row_offset) {
                         let _ = req_asset_tx.send(id);
                     }
                     i += 3;
@@ -1080,22 +1486,62 @@ fn find_workspace_path(relative_path: &str) -> std::path::PathBuf {
     path
 }
 
-fn save_asset_to_cache(asset_id: u16, data: &[u8]) {
-    let cache_dir = find_workspace_path(".client_cache");
-    let _ = std::fs::create_dir_all(&cache_dir);
-    let cache_file = cache_dir.join(format!("{:04x}.ans", asset_id));
+fn get_node_cache_dir(node_id: &[u8; 32]) -> PathBuf {
+    let node_hex: String = node_id.iter().map(|b| format!("{:02x}", b)).collect();
+    let base = find_workspace_path(".client_cache");
+    base.join(node_hex)
+}
+
+fn save_asset_to_cache(node_id: &[u8; 32], asset_id: u16, data: &[u8]) {
+    let node_dir = get_node_cache_dir(node_id);
+    let _ = std::fs::create_dir_all(&node_dir);
+    let cache_file = if asset_id == 0x00DF {
+        node_dir.join("dict.bin")
+    } else {
+        node_dir.join(format!("{:04x}.ans", asset_id))
+    };
     let _ = std::fs::write(&cache_file, data);
 }
 
-fn render_cached_asset(asset_id: u16, col_offset: u16, row_offset: u16) -> bool {
-    let cache_dir = find_workspace_path(".client_cache");
-    let cache_file = cache_dir.join(format!("{:04x}.ans", asset_id));
+fn load_client_dictionary(node_id: &[u8; 32]) -> bifrost_compression::CompressionDictionary {
+    let node_dir = get_node_cache_dir(node_id);
+    let dict_file = node_dir.join("dict.bin");
+    if let Ok(bytes) = std::fs::read(&dict_file) {
+        if let Ok(dict) = bifrost_compression::CompressionDictionary::from_bytes(&bytes) {
+            log::info!(
+                "Loaded cached domain dictionary for BBS node (CRC32: 0x{:08X}, {} tokens)",
+                dict.crc32(),
+                dict.tokens().len()
+            );
+            return dict;
+        }
+    }
+    // Check config/bbs_dict.bin as pre-seeded dictionary
+    let config_dict = find_workspace_path("config/bbs_dict.bin");
+    if let Ok(bytes) = std::fs::read(&config_dict) {
+        if let Ok(dict) = bifrost_compression::CompressionDictionary::from_bytes(&bytes) {
+            return dict;
+        }
+    }
+    bifrost_compression::CompressionDictionary::standard_static()
+}
 
-    // Check client cache first
+fn render_cached_asset(
+    node_id: &[u8; 32],
+    asset_id: u16,
+    col_offset: u16,
+    row_offset: u16,
+) -> bool {
+    let node_dir = get_node_cache_dir(node_id);
+    let cache_file = node_dir.join(format!("{:04x}.ans", asset_id));
+
+    // Check client node cache first
     let content = if let Ok(c) = std::fs::read_to_string(&cache_file) {
         Some(c)
     } else {
-        None
+        // Fallback check root client cache
+        let root_file = find_workspace_path(".client_cache").join(format!("{:04x}.ans", asset_id));
+        std::fs::read_to_string(&root_file).ok()
     };
 
     if let Some(content) = content {
@@ -1112,5 +1558,431 @@ fn render_cached_asset(asset_id: u16, col_offset: u16, row_offset: u16) -> bool 
         true
     } else {
         false
+    }
+}
+
+fn interpret_bytecode_headless(
+    server_node_id: &[u8; 32],
+    payload: &[u8],
+    form_state: &mut FormState,
+    req_asset_tx: &tokio::sync::mpsc::UnboundedSender<u16>,
+) {
+    let mut i = 0;
+    while i < payload.len() {
+        let op = payload[i];
+        match op {
+            0x00 | 0x02 | b'\n' | 0x04 => {
+                i += 1;
+            }
+            0x01 => {
+                // OP_CLEAR_SCREEN
+                form_state.active = false;
+                form_state.fields.clear();
+                form_state.active_idx = 0;
+                i += 1;
+            }
+            0xC0 => {
+                if i + 1 < payload.len() {
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            0xC3 => {
+                if i + 2 < payload.len() {
+                    i += 3;
+                } else {
+                    i += 1;
+                }
+            }
+            0xC5 => {
+                if i + 2 < payload.len() {
+                    let id = u16::from_be_bytes([payload[i + 1], payload[i + 2]]);
+                    let node_dir = get_node_cache_dir(server_node_id);
+                    let cache_file = node_dir.join(format!("{:04x}.ans", id));
+                    if !cache_file.exists() {
+                        let _ = req_asset_tx.send(id);
+                    }
+                    i += 3;
+                } else {
+                    i += 1;
+                }
+            }
+            0xD0 => {
+                // OP_FORM_START
+                if i + 5 < payload.len() {
+                    let form_id = payload[i + 1];
+                    let field_fg = payload[i + 2];
+                    let field_bg = payload[i + 3];
+                    let submit_fg = payload[i + 4];
+                    let submit_bg = payload[i + 5];
+
+                    form_state.active = true;
+                    form_state.form_id = form_id;
+                    form_state.field_fg = field_fg;
+                    form_state.field_bg = field_bg;
+                    form_state.submit_fg = submit_fg;
+                    form_state.submit_bg = submit_bg;
+                    form_state.fields.clear();
+                    form_state.active_idx = 0;
+                    i += 6;
+                } else {
+                    i += 1;
+                }
+            }
+            0xD1 => {
+                // OP_FORM_FIELD
+                if i + 5 < payload.len() {
+                    let col = payload[i + 1];
+                    let row = payload[i + 2];
+                    let width = payload[i + 3];
+                    let id_len = payload[i + 4] as usize;
+                    if i + 5 + id_len < payload.len() {
+                        let id = String::from_utf8_lossy(&payload[i + 5..i + 5 + id_len]).into_owned();
+                        let val_len_idx = i + 5 + id_len;
+                        let val_len = payload[val_len_idx] as usize;
+                        if val_len_idx + 1 + val_len <= payload.len() {
+                            let val = String::from_utf8_lossy(
+                                &payload[val_len_idx + 1..val_len_idx + 1 + val_len],
+                            )
+                            .into_owned();
+
+                            form_state.fields.push(FormField {
+                                id,
+                                col,
+                                row,
+                                width,
+                                height: 1,
+                                val,
+                                is_submit: false,
+                            });
+                            i = val_len_idx + 1 + val_len;
+                        } else {
+                            i += 1;
+                        }
+                    } else {
+                        i += 1;
+                    }
+                } else {
+                    i += 1;
+                }
+            }
+            0xD2 => {
+                // OP_FORM_SUBMIT
+                if i + 4 < payload.len() {
+                    let col = payload[i + 1];
+                    let row = payload[i + 2];
+                    let id_len = payload[i + 3] as usize;
+                    if i + 4 + id_len <= payload.len() {
+                        let id = String::from_utf8_lossy(&payload[i + 4..i + 4 + id_len]).into_owned();
+                        form_state.fields.push(FormField {
+                            id: id.clone(),
+                            col,
+                            row,
+                            width: (id.len() + 4) as u8,
+                            height: 1,
+                            val: String::new(),
+                            is_submit: true,
+                        });
+                        i = i + 4 + id_len;
+                    } else {
+                        i += 1;
+                    }
+                } else {
+                    i += 1;
+                }
+            }
+            0xD3 => {
+                // OP_FORM_END
+                i += 1;
+            }
+            _ => {
+                i += 1;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_layout_mode_cycle() {
+        assert_eq!(LayoutMode::Full.cycle(), LayoutMode::Compact);
+        assert_eq!(LayoutMode::Compact.cycle(), LayoutMode::Full);
+    }
+
+    #[test]
+    fn test_get_viewport_offsets() {
+        let (col, row, w, h) = get_viewport_offsets(LayoutMode::Full, 100, 30);
+        assert_eq!(w, 80);
+        assert_eq!(h, 25);
+        assert_eq!(col, 10);
+        assert_eq!(row, 2);
+
+        let (col_c, row_c, w_c, h_c) = get_viewport_offsets(LayoutMode::Compact, 100, 30);
+        assert_eq!(w_c, 40);
+        assert_eq!(h_c, 25);
+        assert_eq!(col_c, 30);
+        assert_eq!(row_c, 2);
+    }
+
+    #[test]
+    fn test_parse_cli_args() {
+        let args = vec![
+            "bifrost-client".to_string(),
+            "--auto-navigate".to_string(),
+            "--crawl-steps".to_string(),
+            "75".to_string(),
+            "--crawl-delay".to_string(),
+            "150".to_string(),
+            "--headless".to_string(),
+            "--log-level".to_string(),
+            "debug".to_string(),
+            "--addr".to_string(),
+            "127.0.0.1:9999".to_string(),
+        ];
+
+        let config = parse_cli_args(&args).unwrap().unwrap();
+        assert!(config.auto_crawl);
+        assert_eq!(config.crawl_steps, 75);
+        assert_eq!(config.crawl_delay_ms, 150);
+        assert!(config.headless);
+        assert_eq!(config.log_level, Some("debug".to_string()));
+        assert_eq!(config.server_addr, "127.0.0.1:9999");
+    }
+
+    #[test]
+    fn test_decide_crawl_action_with_form_buttons() {
+        let mut form = FormState {
+            active: true,
+            form_id: 10,
+            fields: vec![
+                FormField {
+                    id: "nickname".to_string(),
+                    col: 2,
+                    row: 2,
+                    width: 15,
+                    height: 1,
+                    val: "TestOperator".to_string(),
+                    is_submit: false,
+                },
+                FormField {
+                    id: "read_boards".to_string(),
+                    col: 2,
+                    row: 5,
+                    width: 15,
+                    height: 1,
+                    val: String::new(),
+                    is_submit: true,
+                },
+                FormField {
+                    id: "door_game".to_string(),
+                    col: 18,
+                    row: 5,
+                    width: 15,
+                    height: 1,
+                    val: String::new(),
+                    is_submit: true,
+                },
+                FormField {
+                    id: "logout".to_string(),
+                    col: 2,
+                    row: 8,
+                    width: 10,
+                    height: 1,
+                    val: String::new(),
+                    is_submit: true,
+                },
+            ],
+            active_idx: 0,
+            field_fg: 7,
+            field_bg: 0,
+            submit_fg: 7,
+            submit_bg: 0,
+        };
+
+        // Pick action: should choose one of the non-logout submit buttons and preserve nickname
+        let action = decide_crawl_action(&mut form, 42);
+        assert!(!form.active);
+        let parsed: serde_json::Value = serde_json::from_slice(&action.payload).unwrap();
+        assert_eq!(parsed["nickname"], "TestOperator");
+        let submit_val = parsed["submit"].as_str().unwrap();
+        assert!(submit_val == "read_boards" || submit_val == "door_game" || submit_val == "logout");
+    }
+
+    #[test]
+    fn test_decide_crawl_action_input_only_form() {
+        let mut form = FormState {
+            active: true,
+            form_id: 1,
+            fields: vec![FormField {
+                id: "nickname".to_string(),
+                col: 2,
+                row: 2,
+                width: 15,
+                height: 1,
+                val: "Operator".to_string(),
+                is_submit: false,
+            }],
+            active_idx: 0,
+            field_fg: 7,
+            field_bg: 0,
+            submit_fg: 7,
+            submit_bg: 0,
+        };
+
+        let action = decide_crawl_action(&mut form, 1);
+        let parsed: serde_json::Value = serde_json::from_slice(&action.payload).unwrap();
+        assert_eq!(parsed["nickname"], "Operator");
+    }
+
+    #[test]
+    fn test_decide_crawl_action_non_form_keystroke() {
+        let mut form = FormState::default();
+        let action = decide_crawl_action(&mut form, 7);
+        assert_eq!(action.payload.len(), 1);
+        assert!(action.description.starts_with("Keystroke"));
+    }
+
+    #[test]
+    fn test_interpret_bytecode_headless_form_parsing() {
+        let server_node = [0xAAu8; 32];
+        let mut form = FormState::default();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+        // Bytecode: OP_CLEAR (0x01), OP_FORM_START (0xD0), OP_FORM_FIELD (0xD1), OP_FORM_SUBMIT (0xD2), OP_FORM_END (0xD3)
+        let mut bytecode = Vec::new();
+        bytecode.push(0x01); // clear
+
+        // Form Start: form_id=5, field_fg=15, field_bg=1, submit_fg=14, submit_bg=4
+        bytecode.extend_from_slice(&[0xD0, 0x05, 15, 1, 14, 4]);
+
+        // Form Field: col=2, row=3, width=10, id_len=4, id="nick", val_len=3, val="Bob"
+        bytecode.extend_from_slice(&[0xD1, 2, 3, 10, 4]);
+        bytecode.extend_from_slice(b"nick");
+        bytecode.push(3);
+        bytecode.extend_from_slice(b"Bob");
+
+        // Form Submit: col=2, row=6, id_len=6, id="submit"
+        bytecode.extend_from_slice(&[0xD2, 2, 6, 6]);
+        bytecode.extend_from_slice(b"submit");
+
+        bytecode.push(0xD3); // Form end
+
+        interpret_bytecode_headless(&server_node, &bytecode, &mut form, &tx);
+
+        assert!(form.active);
+        assert_eq!(form.form_id, 5);
+        assert_eq!(form.fields.len(), 2);
+        assert_eq!(form.fields[0].id, "nick");
+        assert_eq!(form.fields[0].val, "Bob");
+        assert!(!form.fields[0].is_submit);
+        assert_eq!(form.fields[1].id, "submit");
+        assert!(form.fields[1].is_submit);
+    }
+
+    #[test]
+    fn test_crawl_state_explores_multiple_categories_and_avoids_ping_pong() {
+        let mut crawler = CrawlState {
+            visit_counts: HashMap::new(),
+            last_form_id: None,
+            last_button_id: None,
+            rng_state: 42,
+        };
+
+        let make_marketplace_form = || FormState {
+            active: true,
+            form_id: 50,
+            fields: vec![
+                FormField {
+                    id: "cat_1".to_string(),
+                    col: 2,
+                    row: 2,
+                    width: 10,
+                    height: 1,
+                    val: String::new(),
+                    is_submit: true,
+                },
+                FormField {
+                    id: "cat_2".to_string(),
+                    col: 2,
+                    row: 4,
+                    width: 10,
+                    height: 1,
+                    val: String::new(),
+                    is_submit: true,
+                },
+                FormField {
+                    id: "cat_3".to_string(),
+                    col: 2,
+                    row: 6,
+                    width: 10,
+                    height: 1,
+                    val: String::new(),
+                    is_submit: true,
+                },
+                FormField {
+                    id: "main_menu".to_string(),
+                    col: 2,
+                    row: 8,
+                    width: 10,
+                    height: 1,
+                    val: String::new(),
+                    is_submit: true,
+                },
+            ],
+            active_idx: 0,
+            field_fg: 7,
+            field_bg: 0,
+            submit_fg: 7,
+            submit_bg: 0,
+        };
+
+        let make_cat_view_form = || FormState {
+            active: true,
+            form_id: 52,
+            fields: vec![
+                FormField {
+                    id: "back".to_string(),
+                    col: 2,
+                    row: 8,
+                    width: 10,
+                    height: 1,
+                    val: String::new(),
+                    is_submit: true,
+                },
+            ],
+            active_idx: 0,
+            field_fg: 7,
+            field_bg: 0,
+            submit_fg: 7,
+            submit_bg: 0,
+        };
+
+        // Step 1: on marketplace form, picks one category
+        let mut form_50 = make_marketplace_form();
+        let action1 = crawler.decide_action(&mut form_50);
+        let parsed1: serde_json::Value = serde_json::from_slice(&action1.payload).unwrap();
+        let cat_first = parsed1["submit"].as_str().unwrap().to_string();
+
+        // Step 2: on category view form, clicks back
+        let mut form_52 = make_cat_view_form();
+        let action2 = crawler.decide_action(&mut form_52);
+        let parsed2: serde_json::Value = serde_json::from_slice(&action2.payload).unwrap();
+        assert_eq!(parsed2["submit"], "back");
+
+        // Step 3: back on marketplace form, should pick a DIFFERENT category instead of ping-ponging!
+        let mut form_50_second = make_marketplace_form();
+        let action3 = crawler.decide_action(&mut form_50_second);
+        let parsed3: serde_json::Value = serde_json::from_slice(&action3.payload).unwrap();
+        let cat_second = parsed3["submit"].as_str().unwrap().to_string();
+
+        assert_ne!(
+            cat_first, cat_second,
+            "Crawler should explore different categories instead of repeating {}",
+            cat_first
+        );
     }
 }
