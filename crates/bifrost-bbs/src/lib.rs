@@ -118,7 +118,7 @@ fn default_form_colors() -> FormColorsConfig {
     }
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq)]
 pub struct FormColorsConfig {
     pub field_fg: u8,
     pub field_bg: u8,
@@ -145,7 +145,7 @@ fn default_enabled_apps() -> Vec<String> {
     ]
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq)]
 pub struct AppsConfig {
     #[serde(default = "default_main_app")]
     pub main_app: String,
@@ -161,7 +161,7 @@ fn default_apps_config() -> AppsConfig {
 }
 
 /// Bifrost BBS Server Configuration Loaded from config.toml
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq)]
 pub struct AppConfig {
     #[serde(default = "default_log_level")]
     pub log_level: String,
@@ -320,7 +320,7 @@ impl PacketRecorder {
     }
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq)]
 pub struct RateLimiterConfig {
     pub max_packets_per_minute: u32,
     pub max_burst_packets: u32,
@@ -329,7 +329,7 @@ pub struct RateLimiterConfig {
     pub duty_cycle_window_secs: u64,
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq)]
 pub struct AssetBroadcasterConfig {
     pub enable_on_demand_broadcast: bool,
     pub max_asset_broadcast_duty_cycle: f32,

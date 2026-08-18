@@ -1,0 +1,508 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="green">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>HEIMDALL // Bifrost BBS Master Supervisor</title>
+  <link rel="stylesheet" href="style.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;700&family=VT323&family=Share+Tech+Mono&display=swap" rel="stylesheet">
+</head>
+<body class="crt-overlay">
+  <!-- Top Global Header -->
+  <header class="heimdall-header" role="banner">
+    <div class="header-branding">
+      <span class="ascii-logo">╔═╗╦ ╦╔═╗╦╔╦╗╔╦╗╔═╗╦  ╦<br>║ ╦╠═╣║╣ ║║║║ ║║╠═╣║  ║<br>╚═╝╩ ╩╚═╝╩╩ ╩═╩╝╩ ╩╩═╝╩═╝</span>
+      <div class="header-titles">
+        <h1 class="system-title">HEIMDALL <span class="version-tag">v0.1.0</span></h1>
+        <p class="system-subtitle">Bifrost MeshBBS Master Supervisor &amp; Airtime NOC</p>
+      </div>
+    </div>
+
+    <div class="header-status-group">
+      <div class="status-pill" id="bbs-status-pill" aria-live="polite">
+        <span class="indicator-dot" id="bbs-indicator"></span>
+        <span class="status-label">BBS: <strong id="bbs-status-text">CONNECTING...</strong></span>
+      </div>
+
+      <div class="status-pill" id="duty-cycle-pill" title="LoRa Regulatory Duty Cycle (Rolling)">
+        <span class="pill-title">AIRTIME</span>
+        <span class="pill-value" id="duty-cycle-text">0.00% / 1.0%</span>
+      </div>
+
+      <div class="theme-picker-group">
+        <label for="theme-selector" class="sr-only">Color Theme</label>
+        <select id="theme-selector" class="retro-select" title="CRT Phosphor Theme">
+          <option value="green">CRT Green (P1)</option>
+          <option value="amber">Amber Phosphor (P3)</option>
+          <option value="cyan">Cyber Cyan</option>
+          <option value="mono">Monochrome (P4)</option>
+        </select>
+        <button id="toggle-scanlines" class="retro-btn btn-sm" aria-pressed="true" title="Toggle CRT Scanline Effect">CRT FX: ON</button>
+      </div>
+    </div>
+  </header>
+
+  <!-- Navigation Tab Bar -->
+  <nav class="heimdall-navbar" role="navigation" aria-label="Main Navigation">
+    <button class="nav-tab active" data-tab="overview" id="tab-btn-overview" aria-controls="tab-overview" aria-selected="true">
+      <span class="tab-key">[1]</span> OVERVIEW
+    </button>
+    <button class="nav-tab" data-tab="terminal" id="tab-btn-terminal" aria-controls="tab-terminal" aria-selected="false">
+      <span class="tab-key">[2]</span> WEB CLIENT
+    </button>
+    <button class="nav-tab" data-tab="logs" id="tab-btn-logs" aria-controls="tab-logs" aria-selected="false">
+      <span class="tab-key">[3]</span> LOGS <span class="badge" id="log-count-badge">0</span>
+    </button>
+    <button class="nav-tab" data-tab="apps" id="tab-btn-apps" aria-controls="tab-apps" aria-selected="false">
+      <span class="tab-key">[4]</span> APPS &amp; ASSETS
+    </button>
+    <button class="nav-tab" data-tab="config" id="tab-btn-config" aria-controls="tab-config" aria-selected="false">
+      <span class="tab-key">[5]</span> CONFIG
+    </button>
+    <button class="nav-tab" data-tab="telemetry" id="tab-btn-telemetry" aria-controls="tab-telemetry" aria-selected="false">
+      <span class="tab-key">[6]</span> TELEMETRY
+    </button>
+    <button class="nav-tab" data-tab="tuning" id="tab-btn-tuning" aria-controls="tab-tuning" aria-selected="false">
+      <span class="tab-key">[7]</span> TUNING &amp; TOOLS
+    </button>
+  </nav>
+
+  <!-- Main Content Container -->
+  <main class="main-content" role="main">
+
+    <!-- TAB 1: OVERVIEW -->
+    <section id="tab-overview" class="tab-pane active" role="tabpanel" aria-labelledby="tab-btn-overview">
+      <!-- Quick Actions Toolbar -->
+      <div class="retro-panel actions-toolbar">
+        <div class="panel-header">
+          <span class="panel-title">══ SUPERVISOR COMMANDS ══</span>
+        </div>
+        <div class="action-btn-group">
+          <button id="btn-start-bbs" class="retro-btn btn-success">▶ START BBS</button>
+          <button id="btn-stop-bbs" class="retro-btn btn-danger">■ STOP BBS</button>
+          <button id="btn-restart-bbs" class="retro-btn btn-warning">↻ RESTART BBS</button>
+          <button id="btn-quick-crawler" class="retro-btn">🤖 RUN CRAWLER (100)</button>
+          <button id="btn-quick-benchmark" class="retro-btn">🔬 RUN BENCHMARK</button>
+        </div>
+      </div>
+
+      <!-- Overview Stats Grid -->
+      <div class="stats-grid">
+        <div class="retro-card stat-card">
+          <span class="card-label">ACTIVE SESSIONS</span>
+          <span class="card-value" id="stat-active-sessions">0</span>
+          <span class="card-sub" id="stat-unique-users">24h Users: 0</span>
+        </div>
+        <div class="retro-card stat-card">
+          <span class="card-label">AIRTIME CONSUMPTION</span>
+          <span class="card-value" id="stat-duty-cycle">0.00%</span>
+          <span class="card-sub">Limit: 1.0% Rolling</span>
+        </div>
+        <div class="retro-card stat-card">
+          <span class="card-label">PACKETS TX / RX</span>
+          <span class="card-value" id="stat-packets-tx-rx">0 / 0</span>
+          <span class="card-sub" id="stat-ppm">PPM: 0.0 TX / 0.0 RX</span>
+        </div>
+        <div class="retro-card stat-card">
+          <span class="card-label">COMPRESSION SAVINGS</span>
+          <span class="card-value" id="stat-compression-savings">+0.0%</span>
+          <span class="card-sub" id="stat-raw-comp-bytes">Raw: 0 B | Comp: 0 B</span>
+        </div>
+      </div>
+
+      <!-- Managed Services Grid -->
+      <div class="retro-panel">
+        <div class="panel-header">
+          <span class="panel-title">══ MANAGED CORE SERVICES ══</span>
+        </div>
+        <div class="table-container">
+          <table class="retro-table" id="services-table">
+            <thead>
+              <tr>
+                <th>SERVICE</th>
+                <th>STATUS</th>
+                <th>PID</th>
+                <th>UPTIME</th>
+                <th>RESTARTS</th>
+                <th>ACTIONS</th>
+              </tr>
+            </thead>
+            <tbody id="services-tbody">
+              <!-- Dynamically Populated -->
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 2: INTERACTIVE WEB CLIENT -->
+    <section id="tab-terminal" class="tab-pane" role="tabpanel" aria-labelledby="tab-btn-terminal">
+      <div class="terminal-layout">
+        <div class="terminal-frame">
+          <div class="terminal-topbar">
+            <div class="terminal-status-info">
+              <span class="term-status-dot active" id="term-status-dot"></span>
+              <span id="term-status-title">BIFROST CP437 ANSI TERMINAL (80x25)</span>
+              <span class="term-node-badge" id="term-node-badge">NODE: INITIALIZING</span>
+            </div>
+            <div class="terminal-actions">
+              <button id="btn-term-reconnect" class="retro-btn btn-sm">RECONNECT</button>
+              <button id="btn-term-reset" class="retro-btn btn-sm">CLEAR SCREEN</button>
+            </div>
+          </div>
+
+          <!-- Exact 80x25 Screen Container -->
+          <div class="terminal-screen-wrapper">
+            <div id="terminal-screen" class="terminal-screen" tabindex="0" aria-label="BBS 80x25 Terminal Canvas">
+              <!-- Pre-rendered 80x25 Character Grid -->
+              <div id="terminal-canvas-grid" class="terminal-canvas-grid">
+                <div class="term-line">Connecting to virtual BBS radio transport...</div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Interactive Quick Keys Bar -->
+          <div class="terminal-quick-keys" id="terminal-quick-keys">
+            <span class="quick-keys-label">HOTKEYS:</span>
+            <button class="key-btn" data-key="1">1</button>
+            <button class="key-btn" data-key="2">2</button>
+            <button class="key-btn" data-key="3">3</button>
+            <button class="key-btn" data-key="4">4</button>
+            <button class="key-btn" data-key="5">5</button>
+            <button class="key-btn" data-key="6">6</button>
+            <button class="key-btn" data-key="q">Q</button>
+            <button class="key-btn key-btn-action" data-key="Enter">ENTER ↵</button>
+            <button class="key-btn key-btn-action" data-key="Escape">ESC</button>
+            <button class="key-btn key-btn-action" data-key="Tab">TAB ⇥</button>
+            <button class="key-btn key-btn-action" data-key="Backspace">⌫ BKSP</button>
+            <button class="key-btn key-btn-action" data-key="ArrowUp">▲ UP</button>
+            <button class="key-btn key-btn-action" data-key="ArrowDown">▼ DOWN</button>
+          </div>
+        </div>
+
+        <!-- Terminal Instructions & Keybindings Panel -->
+        <div class="terminal-sidebar retro-panel">
+          <div class="panel-header">
+            <span class="panel-title">══ CONTROLS &amp; SHORTCUTS ══</span>
+          </div>
+          <div class="terminal-instructions">
+            <div class="instruction-group">
+              <span class="instruction-title">⌨ DIRECT KEYBOARD</span>
+              <p>Click inside the terminal canvas to type and navigate. Keystrokes are processed in real time.</p>
+            </div>
+
+            <div class="shortcut-list">
+              <div class="shortcut-item">
+                <kbd class="key-badge">TAB</kbd> / <kbd class="key-badge">ARROWS</kbd>
+                <span class="shortcut-desc">Navigate menu buttons &amp; text fields</span>
+              </div>
+              <div class="shortcut-item">
+                <kbd class="key-badge">ENTER ↵</kbd>
+                <span class="shortcut-desc">Submit active button or advance field</span>
+              </div>
+              <div class="shortcut-item">
+                <kbd class="key-badge">A..Z / 0..9</kbd>
+                <span class="shortcut-desc">Type into focused input field</span>
+              </div>
+              <div class="shortcut-item">
+                <kbd class="key-badge">⌫ BKSP</kbd>
+                <span class="shortcut-desc">Delete character from text field</span>
+              </div>
+              <div class="shortcut-item">
+                <kbd class="key-badge">ESC</kbd>
+                <span class="shortcut-desc">Back / Exit menu</span>
+              </div>
+            </div>
+
+            <div class="instruction-group" style="margin-top: 14px;">
+              <span class="instruction-title">📡 SESSION INFO</span>
+              <p class="text-muted" id="term-session-details">Protocol: MeshANSI Bytecode (CP437)<br>Transport: Mock Radio Socket</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 3: AGGREGATED LOGS -->
+    <section id="tab-logs" class="tab-pane" role="tabpanel" aria-labelledby="tab-btn-logs">
+      <div class="retro-panel logs-panel">
+        <div class="panel-header logs-header">
+          <div class="logs-header-left">
+            <span class="panel-title">══ BUFFERED &amp; STREAMING LOGS ══</span>
+            <span class="log-count-indicator" id="log-count-indicator">0 buffered logs</span>
+          </div>
+          <div class="log-controls">
+            <select id="log-level-filter" class="retro-select" title="Filter by Log Level">
+              <option value="ALL">All Levels</option>
+              <option value="INFO">INFO</option>
+              <option value="WARN">WARN</option>
+              <option value="ERROR">ERROR</option>
+              <option value="DEBUG">DEBUG</option>
+              <option value="TRACE">TRACE</option>
+            </select>
+            <select id="log-source-filter" class="retro-select" title="Filter by Process/Source">
+              <option value="ALL">All Sources</option>
+              <option value="bifrost_bbs">bifrost_bbs</option>
+              <option value="bifrost_client">bifrost_client</option>
+              <option value="web_client">web_client</option>
+              <option value="bifrost_tuning">bifrost_tuning</option>
+              <option value="heimdall">heimdall</option>
+            </select>
+            <input type="text" id="log-search-input" class="retro-input" placeholder="Search log buffer...">
+            <label class="checkbox-label">
+              <input type="checkbox" id="log-autoscroll" checked> Auto-Scroll
+            </label>
+            <button id="btn-refresh-logs" class="retro-btn btn-sm">RELOAD</button>
+            <button id="btn-clear-logs" class="retro-btn btn-sm">CLEAR</button>
+          </div>
+        </div>
+        <div class="log-console" id="log-console">
+          <!-- Log Entries Streamed Here -->
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 4: APP MANAGER & MULTI-FILE EDITOR -->
+    <section id="tab-apps" class="tab-pane" role="tabpanel" aria-labelledby="tab-btn-apps">
+      <div class="apps-three-pane-layout">
+        <!-- 1. Applications List -->
+        <div class="retro-panel apps-list-panel">
+          <div class="panel-header">
+            <span class="panel-title">══ APPLICATIONS ══</span>
+          </div>
+          <div class="apps-grid" id="apps-grid">
+            <!-- Dynamically Loaded App Cards -->
+          </div>
+        </div>
+
+        <!-- 2. File Browser -->
+        <div class="retro-panel app-files-panel">
+          <div class="panel-header">
+            <span class="panel-title" id="app-files-title">══ APP FILES ══</span>
+          </div>
+          <div class="app-files-list" id="app-files-list">
+            <p class="text-muted">Select an application to view its files.</p>
+          </div>
+        </div>
+
+        <!-- 3. Source File Editor -->
+        <div class="retro-panel app-editor-panel">
+          <div class="panel-header">
+            <span class="panel-title" id="editor-title">══ CODE EDITOR ══</span>
+            <div class="editor-header-actions">
+              <span id="editor-file-badge" class="badge">No file selected</span>
+              <button id="btn-save-app-file" class="retro-btn btn-sm btn-success" disabled>💾 SAVE FILE</button>
+            </div>
+          </div>
+          <div class="editor-container">
+            <textarea id="app-file-editor" class="retro-editor" placeholder="Select a file from the app file list to view and edit..." spellcheck="false"></textarea>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 5: CONFIG EDITOR -->
+    <section id="tab-config" class="tab-pane" role="tabpanel" aria-labelledby="tab-btn-config">
+      <div class="config-layout">
+        <!-- GUI Configuration Panel -->
+        <div class="retro-panel">
+          <div class="panel-header">
+            <span class="panel-title">══ BBS PARAMETERS (GUI) ══</span>
+            <button id="btn-reload-config" class="retro-btn btn-sm">↻ RELOAD</button>
+          </div>
+          <form id="config-form" class="retro-form">
+            <!-- Rate Limiter Settings -->
+            <fieldset class="form-section">
+              <legend>Rate Limiter &amp; Airtime QoS</legend>
+              <div class="form-grid-2">
+                <div class="form-group">
+                  <label for="cfg-max-ppm">Max Packets / Minute:</label>
+                  <input type="number" id="cfg-max-ppm" class="retro-input" min="1" max="600" value="45">
+                </div>
+                <div class="form-group">
+                  <label for="cfg-max-burst">Max Burst Packets:</label>
+                  <input type="number" id="cfg-max-burst" class="retro-input" min="1" max="32" value="4">
+                </div>
+                <div class="form-group">
+                  <label for="cfg-inter-guard">Inter-Packet Guard (ms):</label>
+                  <input type="number" id="cfg-inter-guard" class="retro-input" min="50" max="5000" value="350">
+                </div>
+                <div class="form-group">
+                  <label for="cfg-duty-cycle">Max Duty Cycle (%):</label>
+                  <input type="number" id="cfg-duty-cycle" step="0.05" class="retro-input" min="0.1" max="100.0" value="1.0">
+                </div>
+                <div class="form-group">
+                  <label for="cfg-duty-window">Duty Cycle Window (sec):</label>
+                  <input type="number" id="cfg-duty-window" class="retro-input" min="60" max="86400" value="3600">
+                </div>
+                <div class="form-group">
+                  <label for="cfg-log-level">Log Level:</label>
+                  <select id="cfg-log-level" class="retro-select">
+                    <option value="debug">debug</option>
+                    <option value="info">info</option>
+                    <option value="warn">warn</option>
+                    <option value="error">error</option>
+                    <option value="trace">trace</option>
+                  </select>
+                </div>
+              </div>
+            </fieldset>
+
+            <!-- Asset Broadcaster Settings -->
+            <fieldset class="form-section">
+              <legend>Public Asset Broadcaster</legend>
+              <div class="form-grid-2">
+                <div class="form-group checkbox-group">
+                  <label class="checkbox-label">
+                    <input type="checkbox" id="cfg-broadcast-enabled" checked> Enable On-Demand Broadcasts
+                  </label>
+                </div>
+                <div class="form-group">
+                  <label for="cfg-broadcast-duty">Max Broadcast Duty Cycle (%):</label>
+                  <input type="number" id="cfg-broadcast-duty" step="0.01" class="retro-input" min="0.01" max="1.0" value="0.15">
+                </div>
+              </div>
+            </fieldset>
+
+            <!-- Apps & Packet Capture -->
+            <fieldset class="form-section">
+              <legend>Applications &amp; Packet Capture</legend>
+              <div class="form-grid-2">
+                <div class="form-group">
+                  <label for="cfg-main-app">Entrypoint Main App:</label>
+                  <input type="text" id="cfg-main-app" class="retro-input" value="main_menu">
+                </div>
+                <div class="form-group">
+                  <label for="cfg-capture-dir">Capture Directory:</label>
+                  <input type="text" id="cfg-capture-dir" class="retro-input" value="captured_packets">
+                </div>
+                <div class="form-group checkbox-group">
+                  <label class="checkbox-label">
+                    <input type="checkbox" id="cfg-capture-enabled"> Enable Packet Capture &amp; CSV Log
+                  </label>
+                </div>
+              </div>
+            </fieldset>
+
+            <div class="form-actions">
+              <button type="submit" class="retro-btn btn-success">💾 UPDATE GUI CONFIG &amp; RESTART BBS</button>
+            </div>
+          </form>
+        </div>
+
+        <!-- Raw TOML Editor -->
+        <div class="retro-panel raw-toml-panel">
+          <div class="panel-header">
+            <span class="panel-title">══ config.toml (DIRECT EDITOR) ══</span>
+            <button id="btn-save-raw-toml" class="retro-btn btn-sm btn-success">💾 SAVE TOML &amp; RESTART</button>
+          </div>
+          <div class="editor-container">
+            <textarea id="raw-toml-editor" class="retro-editor" spellcheck="false" placeholder="Loading config.toml..."></textarea>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 6: TELEMETRY & CAPTURE LOGS -->
+    <section id="tab-telemetry" class="tab-pane" role="tabpanel" aria-labelledby="tab-btn-telemetry">
+      <div class="telemetry-stats-grid">
+        <div class="retro-card">
+          <span class="card-label">TOTAL PACKET SAMPLES</span>
+          <span class="card-value" id="cap-stat-samples">0</span>
+          <span class="card-sub" id="cap-stat-tx-rx">TX: 0 | RX: 0</span>
+        </div>
+        <div class="retro-card">
+          <span class="card-label">TOTAL RAW BYTES</span>
+          <span class="card-value" id="cap-stat-raw">0 B</span>
+          <span class="card-sub" id="cap-stat-avg-raw">Avg: 0.0 B</span>
+        </div>
+        <div class="retro-card">
+          <span class="card-label">COMPRESSED BYTES</span>
+          <span class="card-value" id="cap-stat-comp">0 B</span>
+          <span class="card-sub" id="cap-stat-saved">Saved: 0 B</span>
+        </div>
+        <div class="retro-card">
+          <span class="card-label">NET AIRTIME SAVINGS</span>
+          <span class="card-value text-success" id="cap-stat-savings">+0.00%</span>
+          <span class="card-sub" id="cap-stat-avg-time">Avg Time: 0.0 µs</span>
+        </div>
+      </div>
+
+      <div class="retro-panel">
+        <div class="panel-header">
+          <span class="panel-title">══ PACKET CAPTURE LOG (compression_log.csv) ══</span>
+          <button id="btn-refresh-captures" class="retro-btn btn-sm">↻ REFRESH</button>
+        </div>
+        <div class="table-container">
+          <table class="retro-table" id="captures-table">
+            <thead>
+              <tr>
+                <th>SEQ</th>
+                <th>DIR</th>
+                <th>CATEGORY</th>
+                <th>OPCODE</th>
+                <th>FLAGS</th>
+                <th>RAW</th>
+                <th>COMP</th>
+                <th>SAVINGS</th>
+                <th>ALGORITHM</th>
+                <th>TIME (µs)</th>
+              </tr>
+            </thead>
+            <tbody id="captures-tbody">
+              <!-- Dynamically Populated -->
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 7: TUNING CONSOLE -->
+    <section id="tab-tuning" class="tab-pane" role="tabpanel" aria-labelledby="tab-btn-tuning">
+      <div class="tuning-grid">
+        <div class="retro-panel">
+          <div class="panel-header">
+            <span class="panel-title">══ COMPRESSION BENCHMARK &amp; TUNING ══</span>
+          </div>
+          <p class="section-desc">Run offline multi-algorithm benchmarks, Heatshrink window parameter sweeps, and train custom 254-token domain dictionaries from captured traffic.</p>
+          <div class="action-btn-group">
+            <button id="btn-run-analyze" class="retro-btn">🔬 RUN ANALYZE</button>
+            <button id="btn-run-sweep" class="retro-btn">⚡ RUN PARAMETER SWEEP</button>
+          </div>
+          <div class="train-box">
+            <label for="tuning-tokens-input">Max Tokens (2..=254):</label>
+            <input type="number" id="tuning-tokens-input" class="retro-input" min="16" max="254" value="254">
+            <button id="btn-run-train" class="retro-btn btn-warning">🎓 TRAIN DOMAIN DICTIONARY</button>
+          </div>
+        </div>
+
+        <div class="retro-panel">
+          <div class="panel-header">
+            <span class="panel-title">══ AUTOMATED CLIENT CRAWLER ══</span>
+          </div>
+          <p class="section-desc">Simulate realistic random navigation across all registered BBS applications and categories to generate fresh traffic samples for parameter tuning.</p>
+          <div class="crawler-controls">
+            <div class="form-group">
+              <label for="crawler-steps-input">Total Navigation Steps:</label>
+              <input type="number" id="crawler-steps-input" class="retro-input" min="10" max="1000" value="100">
+            </div>
+            <button id="btn-run-crawler-custom" class="retro-btn btn-success">🤖 LAUNCH AUTOMATED CRAWLER</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- Global Footer Bar -->
+  <footer class="heimdall-footer" role="contentinfo">
+    <span class="footer-item">HEIMDALL SUPERVISOR :: BIFROST MESHBBS</span>
+    <span class="footer-item">PORT: <strong id="footer-port">9324</strong></span>
+    <span class="footer-item" id="footer-clock">00:00:00 UTC</span>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>
