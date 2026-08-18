@@ -142,6 +142,7 @@ fn default_enabled_apps() -> Vec<String> {
         "minidungeon".to_string(),
         "admin".to_string(),
         "marketplace".to_string(),
+        "weather".to_string(),
     ]
 }
 
@@ -1669,6 +1670,43 @@ fn run_session_task(
         })?,
     )?;
     globals.set("log", log_table)?;
+
+    // http table
+    let http_table = lua.create_table()?;
+    http_table.set(
+        "get_json",
+        lua.create_function(move |lua, url: String| {
+            // Mitigate SSRF by restricting to allowed domain(s)
+            if !url.starts_with("https://api.open-meteo.com/") {
+                log::error!("Blocked HTTP request to unauthorized URL: {}", url);
+                return Ok(mlua::Value::Nil);
+            }
+
+            // reqwest::blocking cannot be used within tokio runtime, need to spawn blocking
+            let url_clone = url.clone();
+            let json_result = std::thread::spawn(move || {
+                let client = reqwest::blocking::Client::new();
+                let resp = client.get(&url_clone).send().map_err(|e| e.to_string())?;
+                if resp.status().is_success() {
+                    resp.json::<serde_json::Value>().map_err(|e| e.to_string())
+                } else {
+                    Err(format!("HTTP error: status {}", resp.status()))
+                }
+            }).join().unwrap_or(Err("Thread panicked".to_string()));
+
+            match json_result {
+                Ok(json_val) => {
+                    let lua_val = lua.to_value(&json_val)?;
+                    Ok(lua_val)
+                }
+                Err(e) => {
+                    log::error!("HTTP GET request failed for {}: {}", url, e);
+                    Ok(mlua::Value::Nil)
+                }
+            }
+        })?,
+    )?;
+    globals.set("http", http_table)?;
 
     // session table & state
     let session = lua.create_table()?;
