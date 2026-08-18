@@ -57,11 +57,12 @@ The vision is to establish an off-grid digital community center that runs on sol
   * **Cryptographic Identity:** Map user sessions to their MeshCore ED25519 public keys. No plain-text passwords; authentication is validated via signed challenge-response handshakes.
   * **Session Encryption:** Establish ephemeral symmetric keys (AES-256-GCM / ChaCha20-Poly1305) via Diffie-Hellman to encrypt all unicast session traffic.
 
-### 3.3 Passive Multicast Asset Caching
-* **Description:** Public static assets (ANSI screens, graphics, menus) are broadcast as unencrypted public frames only when requested by an active client, allowing all nearby listening nodes to passively capture and cache them in local flash.
+### 3.3 Passive Multicast Asset Caching & Per-Node Storage
+* **Description:** Public static assets (ANSI screens, graphics, menus) and live trained domain dictionaries (Asset `0x00DF`) are broadcast as unencrypted public frames only when requested by an active client, allowing all nearby listening nodes to passively capture and cache them in local storage.
 * **Functional Requirements:**
   * **On-Demand Public Multicast:** When a connected client requests a missing asset via `REQ_ASSET`, the server broadcasts the asset chunks publicly as group frames, allowing all nodes in RF range to receive and cache it.
-  * **Promiscuous Cache Listener:** Client devices listen to public asset broadcasts, reassemble them, verify their integrity using CRC32, and save them to local flash memory (SPI Flash/LittleFS).
+  * **Per-Node Cache Partitioning:** Clients partition stored assets by BBS Node ID (`.client_cache/<bbs_node_hex>/`), enabling seamless multi-BBS roaming without asset collision.
+  * **Promiscuous Cache Listener:** Client devices listen to public asset broadcasts, reassemble them, verify their integrity using CRC32, and save them to local storage (SPI Flash / LittleFS).
   * **Cache Synchronization:** The BBS server invokes cached assets via the `OP_RENDER_ASSET` opcode. If a client lacks an asset, it issues a `REQ_ASSET` packet, which prompts the server to broadcast it.
 
 ### 3.4 Rate Limiting & Airtime Regulator
@@ -76,15 +77,30 @@ The vision is to establish an off-grid digital community center that runs on sol
     * **Priority 3:** Bulk Data (Private Mail, File Gate chunks).
     * **Priority 4:** On-Demand Public Asset Broadcasts.
 
-### 3.5 MeshANSI Bytecode & Compression Engine
-* **Description:** A bandwidth-efficient replacement for ANSI escape codes that tokenizes layout operations and compresses the data stream.
+### 3.5 MeshANSI Bytecode & Multi-Tier Adaptive Compression Engine
+* **Description:** A bandwidth-efficient replacement for ANSI escape codes that tokenizes layout operations and compresses data through an adaptive multi-tier pipeline.
 * **Functional Requirements:**
   * **Bytecode Tokenizer:** Replaces long CSI sequences (e.g., `\x1b[31;42m`) with compact 1-byte opcodes (e.g., `0xC0 0x24` for red on green).
   * **Run-Length Encoding (RLE):** Implements `OP_RLE_GLYPH` and `OP_RLE_SPACE` to collapse repetitive text and background blocks.
   * **Screen Delta Extractor:** Compares the updated shadow terminal with the previous state and transmits only changed cells, jumping to coordinates with `OP_CURSOR_ABS`.
-  * **Heatshrink LZSS Compression:** Compresses tokenized bytecode streams using Heatshrink LZSS ($W=8, L=4$) before transmission.
+  * **Domain-Specific Dictionary Encoding:** Replaces high-frequency UI strings, form labels, box lines, and opcode patterns with 1-byte token references (`0xFD <idx>`). Supports dynamic 254-token domain dictionaries broadcast via Asset `0x00DF`.
+  * **Heatshrink LZSS Compression:** Compresses bytecode streams using sliding-window LZSS ($W=6..8, L=4..5$).
+  * **Compound Compression:** Automatically chains domain dictionary tokenization with Heatshrink LZSS for up to **+36.9% net airtime reduction**.
+  * **Anti-Expansion Guard:** Automatically compares compressed payload against raw byte count; falls back to uncompressed raw transmission (`flags = 0x00`) if compression yields zero or negative savings.
 
-### 3.6 Lua Sandboxed Application Runtime
+### 3.6 Session-Level Packet Deduplication (Hash-Referencing)
+* **Description:** Eliminates redundant over-the-air transmissions when clients repeatedly navigate back and forth between identical menus or screens.
+* **Functional Requirements:**
+  * **Session Payload Ring Buffer:** Both server and client maintain an LRU cache (100 entries) of recently transmitted/received screen frames keyed by 32-bit CRC.
+  * **Hash-Only Packets:** If a screen payload matches an existing entry in the session cache, the server sets Sub-Header Flag `0x08` (`SESSION_DEDUP_HASH`) and transmits only the 4-byte CRC32 integer, achieving **90–98% airtime savings** for recurring views.
+  * **NACK Recovery Protocol:** If a client receives a hash reference for an un-cached frame, it transmits a NACK message (`Opcode 0x06`) requesting immediate full payload retransmission.
+
+### 3.7 10-Minute Seamless Session Resumption
+* **Description:** Preserves user workflow across brief RF dropouts, deep sleep cycles, or client terminal reconnects.
+* **Functional Requirements:**
+  * **10-Minute Timeout Window (`SESSION_RESUME_TIMEOUT_SECS = 600`):** Reconnections within 10 minutes reuse the active session state and invoke the `on_resume()` Lua hook to redraw the active viewport without restarting the session.
+
+### 3.8 Lua Sandboxed Application Runtime
 * **Description:** Safe, sandboxed runtime in the Host server where forums, games, and bridges are executed dynamically without compromising the main daemon.
 * **Functional Requirements:**
   * **Lua Sandbox (`mlua`):** Restricts access to standard libraries (no `os`, `io`, `debug`, or raw `socket`). Binds memory usage to $\le 512$ KB and execution to $\le 500,000$ instructions per cycle.
@@ -95,12 +111,12 @@ The vision is to establish an off-grid digital community center that runs on sol
   * **Application Loading:** Dynamically executes encapsulated applications from `/bifrost/apps/<app_id>/` (each with `manifest.toml`, `main.lua`, and local `assets/`) configured via `config.toml`.
   * **Dynamic Asset Registration:** Automatically discovers asset declarations in `manifest.toml`, allocates collision-free 16-bit AssetIDs dynamically, and provides relative (`"banner"`) and namespaced (`"main_menu/banner"`) asset resolution.
 
-### 3.7 Mock Transport & Telemetry Harness
-* **Description:** A local testing environment that simulates LoRa network physics to allow developer testing without hardware.
+### 3.9 Diagnostics, Automated Crawling & Tuning Suite (`bifrost-tuning`)
+* **Description:** Tooling for continuous diagnostic capture, automated traffic simulation, and data-driven compression parameter tuning.
 * **Functional Requirements:**
-  * **Virtual Socket Radio:** An implementation of the `RadioTransport` trait using TCP or Unix Domain Sockets.
-  * **Channel Degradation Simulation:** Introduces configurable packet loss rates and latency delays.
-  * **Telemetry Logging:** Logs and displays real-time metrics including raw vs. compressed byte sizes, cache hits/misses, airtime consumption, and rate limiter status.
+  * **Server Packet Capture:** CLI flag `--capture [DIR]` captures raw and compressed payloads with per-session CSV logging and clean initialization.
+  * **Automated Client Crawler:** Simulated navigation agent with inverse-visit weighted branch exploration (`--crawl`, `--headless`, `--crawl-steps`, `--crawl-delay`) to fuzz menus and generate realistic training corpora.
+  * **Tuning CLI (`bifrost-tuning`):** Dedicated tool to run compression benchmarks (`analyze`), train custom 254-token dictionaries (`train`), and perform parameter grid searches (`sweep`).
 
 ---
 

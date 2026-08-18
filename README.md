@@ -6,11 +6,28 @@ Bifrost is a next-generation Bulletin Board System (MeshBBS) and compression run
 
 ## 🚀 Key Features
 
-*   **⚡ Bandwidth-Optimized MeshANSI Protocol:** Replaces heavy, multi-byte ANSI escape codes with a high-density 1-byte opcode bytecode. Built-in **Heatshrink LZSS compression** ($W=8, L=4$) shrinks typical terminal screens down to 200–500 bytes.
-*   **💾 Passive Public Asset Multicast:** Static visual elements (headers, border layouts, logos, game art) are requested by active clients and broadcast publicly by the server. Nearby listening client nodes passively intercept and cache these assets in local flash storage, enabling zero-airtime rendering in future sessions.
-*   **🛠️ Sandboxed Lua Application Engine:** BBS apps (main menus, discussion forums, encrypted mail, door games) run dynamically in a memory-bounded (512 KB) and instruction-capped sandbox.
-*   **🛡️ Regulatory QoS & Airtime Regulator:** Active tracking of LoRa transmitter duty cycle. Integrates a token-bucket rate limiter and a 5-tier Priority Queue (ACKs > Cursor Deltas > Screens > Bulk > On-Demand Broadcasts).
-*   **🧪 Pluggable Transport Harness:** A simulation-ready architecture that supports production hardware (KISS/UART LoRa transceivers) as well as virtual TCP/Unix domain socket testing with synthetic packet loss and latency injection.
+*   **⚡ Multi-Tier Adaptive Compression Pipeline:**
+    *   **MeshANSI Bytecode:** Replaces heavy ANSI escape codes with compact 1-byte opcodes.
+    *   **Domain-Specific Dictionary Encoding:** Tokenizes high-frequency BBS phrases, UI headers, and opcode sequences into 1-byte tokens.
+    *   **Heatshrink LZSS Compression:** Tuned sliding-window LZSS ($W=6..8, L=4..5$).
+    *   **Compound Compression:** Combines domain dictionary tokenization with Heatshrink LZSS to achieve **+36.9% net airtime reduction**.
+    *   **Anti-Expansion Guard:** Automatically falls back to raw transmission if compression yields negative gain.
+*   **🔁 Session-Level Packet Deduplication (Hash-Referencing):**
+    *   Caches recurring screen frames and menus in an LRU buffer.
+    *   Repeated payloads are replaced with a 4-byte CRC32 reference packet (Sub-Header Flag `0x08`), cutting airtime by **90–98%** on repeated screens.
+    *   Automatic NACK retransmission recovery if a client experiences a cache miss.
+*   **💾 Passive Public Asset Multicast & Per-Node Caching:**
+    *   Static assets (logos, menus, game art) and live domain dictionaries (Asset `0x00DF`) are broadcast as public unencrypted chunks.
+    *   Nearby listening nodes passively cache them locally partitioned by BBS Node ID (`.client_cache/<node_id>/`), enabling zero-airtime rendering.
+*   **⏱️ 10-Minute Seamless Session Resumption:**
+    *   Preserves active session state and variables across transient disconnections within a 10-minute window, invoking `on_resume()` hooks.
+*   **🛠️ Sandboxed Lua Application Engine:**
+    *   Applications (`main_menu`, `messages`, `marketplace`, `minidungeon`, `profile`, `admin`) run within sandboxed `mlua` instances with strict memory (512 KB) and instruction limits.
+*   **🛡️ Regulatory QoS & Airtime Regulator:**
+    *   Enforces rolling duty-cycle caps (1.0% by default) via token-bucket limiting and a 5-tier Priority Queue.
+*   **🤖 Automated Crawler & Tuning Benchmark Suite (`bifrost-tuning`):**
+    *   Client auto-navigator with inverse-visit weighted exploration to generate realistic test traffic.
+    *   Dedicated tuning CLI (`bifrost-tuning`) supporting `analyze`, `train`, and `sweep` commands for optimizing parameters.
 
 ---
 
@@ -20,24 +37,27 @@ The project is managed as a Rust Cargo Workspace:
 
 ```
 ├── Cargo.toml                       # Cargo Workspace definition
-├── README.md                        # This readme
+├── README.md                        # Project documentation
 ├── AGENTS.md                        # AI coding assistant guidelines
 ├── docs/
-│   ├── MeshBBS_MeshANSI_Requirements_Specification.md  # Core protocol spec
+│   ├── MeshBBS_MeshANSI_Requirements_Specification.md  # Protocol & architecture spec
 │   └── PRD.md                       # Product Requirements Document
 ├── apps/                            # Encapsulated Lua BBS Applications
-│   ├── main_menu/                   # Default navigation entry point (manifest.toml, main.lua, assets/)
-│   ├── messages/                    # Discussion boards (manifest.toml, main.lua)
-│   ├── marketplace/                 # Classifieds and auctions (manifest.toml, main.lua)
-│   ├── minidungeon/                 # Asynchronous door game (manifest.toml, main.lua, assets/)
-│   ├── profile/                     # Profile editor (manifest.toml, main.lua)
-│   └── admin/                       # Admin console (manifest.toml, main.lua)
+│   ├── main_menu/                   # Default navigation entry point
+│   ├── messages/                    # Discussion forums & boards
+│   ├── marketplace/                 # Decentralized classifieds & auctions
+│   ├── minidungeon/                 # Turn-based door game
+│   ├── profile/                     # Profile editor
+│   └── admin/                       # Sysop admin console
+├── config/                          # Default configurations & pre-trained dictionaries
+│   └── bbs_dict.bin                 # Trained BBS domain dictionary (Asset 0x00DF)
 └── crates/
-    ├── bifrost-compression/        # Heatshrink LZSS algorithm implementation
-    ├── bifrost-ansi/               # Bytecode encoding, decoding, and compression
-    ├── bifrost-transport/          # Packet framing, serialization, and mock sockets
-    ├── bifrost-bbs/                # Main host server daemon (kernel, scheduler, Lua runner)
-    └── bifrost-client/             # Interactive client terminal emulator
+    ├── bifrost-compression/        # Heatshrink LZSS & Domain Dictionary algorithms
+    ├── bifrost-ansi/               # MeshANSI bytecode compiler & adaptive decompressor
+    ├── bifrost-transport/          # Packet framing, session deduplication cache, stats
+    ├── bifrost-bbs/                # Main host server daemon (kernel, Lua runner, packet capture)
+    ├── bifrost-client/             # Interactive terminal emulator & automated crawler
+    └── bifrost-tuning/             # Parameter grid search & dictionary training CLI
 ```
 ---
 
@@ -45,56 +65,58 @@ The project is managed as a Rust Cargo Workspace:
 
 ### 📋 Prerequisites
 
-To compile and run Bifrost, you need:
+To compile and run Bifrost:
 *   **Rust:** Version 1.70+ (2021 Edition)
 *   **Cargo:** Included with Rust
-*   **C Compiler:** (gcc/clang) for compiling dependencies like the Heatshrink bindings.
+*   **C Compiler:** gcc/clang for C library bindings.
 
-### 🔨 Building the Project
+### 🔨 Building the Workspace
 
-Compile the workspace binaries and libraries:
 ```bash
 cargo build --release
 ```
 
-### 🧪 Running the Test Suite & Coverage
+### 🧪 Running Tests & Code Coverage
 
-Run unit and integration tests across the cargo workspace:
 ```bash
+# Run full unit and integration test suite
 cargo test
-```
 
-To run tests and check code coverage (requires `cargo-llvm-cov` and `llvm-tools-preview`):
-```bash
-# 1. Install components (one-time setup)
-rustup component add llvm-tools-preview
-cargo install cargo-llvm-cov --locked
-
-# 2. View coverage summary
-cargo llvm-cov
-
-# 3. Generate HTML coverage report
+# Generate coverage report
 cargo llvm-cov --html
 ```
 
-### 🏁 Launching the Mock Server
+### 🏁 Launching the Server & Client
 
-To launch the BBS server daemon using the simulated TCP socket transport for development:
 ```bash
-cargo run --bin bifrost-bbs -- --config config.toml --mock
+# 1. Start the BBS server daemon with diagnostic packet capture enabled
+cargo run --bin bifrost-bbs -- --config config.toml --mock --capture captured_packets
+
+# 2. Launch interactive client terminal emulator
+cargo run --bin bifrost-client
+
+# 3. Or launch automated client crawler to simulate multi-app navigation
+cargo run --bin bifrost-client -- --crawl --crawl-steps 100 --headless
 ```
 
-To launch the interactive client emulator:
+### 🔬 Compression Tuning & Training
+
 ```bash
-cargo run --bin bifrost-client
+# Benchmark compression algorithms on captured traffic
+cargo run --bin bifrost-tuning -- analyze --dir captured_packets/raw
+
+# Run parameter sweep across Heatshrink window and lookahead settings
+cargo run --bin bifrost-tuning -- sweep --dir captured_packets/raw
+
+# Train a custom 254-token domain dictionary from captured packets
+cargo run --bin bifrost-tuning -- train --dir captured_packets/raw --out config/bbs_dict.bin --tokens 254
 ```
 
 ---
 
 ## 📖 Documentation
 
-For detailed specifications and design logs:
 *   **[Product Requirements Document (PRD)](docs/PRD.md):** Vision, functional requirements, and architecture diagrams.
-*   **[System Architecture & Protocol Specification](docs/MeshBBS_MeshANSI_Requirements_Specification.md):** Bytecode opcode tables, packet multiplexing formats, and rate limiter schemas.
-*   **[Agent Guidelines (AGENTS.md)](AGENTS.md):** Detailed ways of working for coding assistants.
+*   **[Protocol & Architecture Specification](docs/MeshBBS_MeshANSI_Requirements_Specification.md):** Wire format, opcode tables, deduplication schemas, and compression pipelines.
+*   **[Developer & Agent Guidelines](AGENTS.md):** Architecture rules and development SOPs.
 

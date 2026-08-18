@@ -368,16 +368,31 @@ return app
 
 ---
 
-## 6. MeshANSI Wire Protocol & Compression Specification
+## 6. MeshANSI Wire Protocol, Compression & Deduplication Specification
 
-MeshANSI converts standard terminal visual operations into a high-density 1-byte opcode command stream.
+MeshANSI converts standard terminal visual operations into a high-density 1-byte opcode command stream, supplemented by session deduplication and adaptive multi-tier compression.
 
-### 6.1 Opcode Specification
+### 6.1 Sub-Header Flag Bits
+
+The Sub-Header `Flags` byte (Byte 5 of MeshBBS framing) controls encryption, compression mode, deduplication, and broadcast semantics:
+
+| Bit | Mask | Flag Name | Description |
+|---|---|---|---|
+| Bit 0 | `0x01` | `FLAG_ENCRYPTED` | Unicast payload is encrypted with ephemeral session key. |
+| Bit 1 | `0x02` | `FLAG_COMP_HEATSHRINK` | Payload is compressed with Heatshrink LZSS. |
+| Bit 2 | `0x04` | `FLAG_COMP_DICT` | Payload contains Domain Dictionary token references (`0xFD <idx>`). |
+| Bit 3 | `0x08` | `FLAG_DEDUP_HASH` | Session Deduplication: Payload is a 4-byte CRC32 hash reference to a cached frame. |
+| Bit 4 | `0x10` | `FLAG_BROADCAST_ASSET`| Public broadcast frame for promiscuous multi-node caching. |
+
+* **Compound Compression Flag (`0x06`):** When both Bits 1 and 2 are set, the payload has been passed through the Domain Dictionary first and then compressed with Heatshrink LZSS.
+* **Uncompressed Raw Flag (`0x00`):** Indicates plain tokenized bytecode (used when Anti-Expansion Guard detects negative or zero savings).
+
+### 6.2 Opcode Specification
 
 | Opcode Range | Identifier | Operands | Function |
 |---|---|---|---|
 | `0x00` | `OP_NOP` | None | No operation. |
-| `0x01` | `OP_CLEAR_SCREEN` | None | Clear 80x25 canvas, cursor to (0,0), reset attributes. |
+| `0x01` | `OP_CLEAR_SCREEN` | None | Clear 80x25 canvas, cursor to (0,0), reset form state. |
 | `0x02` | `OP_CRLF` | None | Advance to start of next line. |
 | `0x03` | `OP_PAGE_PAUSE` | None | Display `[Press Key]` and wait. |
 | `0x04` | `OP_END_OF_FRAME` | None | Terminal redraw commit point. |
@@ -388,14 +403,56 @@ MeshANSI converts standard terminal visual operations into a high-density 1-byte
 | `0xC2` | `OP_RLE_SPACE` | `Count (1B)` | Run-Length Skip Blank Spaces. |
 | `0xC3` | `OP_CURSOR_ABS` | `Col (1B), Row (1B)` | Jump to absolute screen coordinate. |
 | `0xC4` | `OP_CURSOR_REL` | `dCol (1B), dRow (1B)` | Relative offset movement. |
-| `0xC5` | `OP_RENDER_ASSET` | `AssetID (2B or 4B)` | Render static screen from local client cache. |
+| `0xC5` | `OP_RENDER_ASSET` | `AssetID (2B)` | Render static screen from local client cache. |
 | `0xC6` | `OP_DELTA_BLOCK` | `Col, Row, W, H` | Bounding box header for differential update. |
+| `0xD0` | `OP_FORM_START` | `FormID, FieldFG, FieldBG, SubmitFG, SubmitBG` | Initialize interactive form widget definition. |
+| `0xD1` | `OP_FORM_FIELD` | `Col, Row, Width, ID_Len, ID_Str, Val_Len, Val_Str` | Define editable input field with default text. |
+| `0xD2` | `OP_FORM_SUBMIT` | `Col, Row, ID_Len, ID_Str` | Define clickable submit button widget. |
+| `0xD3` | `OP_FORM_END` | None | Finalize form layout and enable field focus. |
+| `0xFD` | `OP_DICT_TOKEN` | `TokenIdx (1B)` | Expand pre-trained Domain Dictionary token (`0x00..0xFD`). `0xFD 0xFE` = literal `0xFD`. |
 | `0xFE` | `OP_RAW_CP437` | `Byte (1B)` | Unmapped 8-bit CP437 raw character escape. |
 
-### 6.2 Compression Pipeline
-1. **ANSI CSI Tokenization:** Eliminates variable-length escape sequences (`[31;42m` $ightarrow$ `0xC0 0x24`).
-2. **Delta Extraction:** Computes difference matrix between previous and current screen states. Unchanged cells are skipped via `OP_CURSOR_ABS`.
-3. **Heatshrink LZSS Encoding:** Tokenized bytecode is passed through a Heatshrink compressor configured with an 8-bit window ($2^8 = 256	ext{ bytes}$) and a 4-bit lookahead ($2^4 = 16	ext{ bytes}$).
+### 6.3 Multi-Tier Adaptive Compression Pipeline
+
+The host compression pipeline processes bytecode streams through sequential optimization stages:
+
+```
+[Raw MeshANSI Bytecode]
+         |
+         v
+[1. Domain Dictionary Encoder] --------> Replaces frequent phrases & opcodes with 1-byte tokens (0xFD <idx>)
+         |
+         v
+[2. Heatshrink LZSS Compressor] -------> Sliding window back-references (W=6..8, L=4..5)
+         |
+         v
+[3. Anti-Expansion Guard] -------------> If compressed size >= raw size, discard compression and send raw
+         |
+         v
+[Final Wire Packet]
+```
+
+1. **Stage 1: Domain-Specific Dictionary Tokenization:**
+   - Pre-trained dictionary containing up to 254 variable-length strings and opcode sequences.
+   - Long strings (e.g. `----------------------------------------`, `Press Enter to continue`, `Logged in as:`) and frequent opcode fragments are collapsed into 2 bytes (`0xFD <idx>`).
+   - Dynamic node dictionaries are assigned Asset ID `0x00DF` and broadcasted for client caching.
+2. **Stage 2: Heatshrink LZSS Compression:**
+   - Parameter grid search on real BBS traffic demonstrates optimal performance at $W=6$ (64-byte window) and $L=4..5$ (16–32 byte lookahead), generating only 6-bit index pointers that out-perform standard 8-bit windows on small packet MTUs (~139 bytes avg).
+3. **Stage 3: Anti-Expansion Guard:**
+   - Strict size comparison prevents buffer expansion on random or high-entropy data, guaranteeing zero negative compression gain.
+
+### 6.4 Session-Level Packet Deduplication (Hash-Referencing)
+
+When users navigate between menus, categories, or battle screens, large portions of identical bytecode payloads are repeatedly transmitted. MeshBBS eliminates this overhead via session-level hash deduplication:
+
+1. **Session Payload Ring Buffer:**
+   - Server and client both maintain an LRU cache of the last 100 transmitted and decompressed payloads, indexed by CRC32.
+2. **Hash-Only Transmission (`0x08`):**
+   - For payloads $> 12$ bytes matching an existing cache entry, the server sends a 4-byte CRC32 integer with Flag `0x08`.
+   - Client resolves the CRC32 from its local cache in $\approx 0.1\mu\text{s}$, achieving **90% to 98% airtime reduction**.
+3. **NACK Fallback Recovery:**
+   - If the client lacks the referenced CRC (e.g. due to reboot or dropped history), it replies with a NACK frame (`Opcode 0x06`) containing the missing CRC32.
+   - The server immediately retransmits the full uncompressed/compressed payload.
 
 ---
 
