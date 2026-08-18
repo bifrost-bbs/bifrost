@@ -3469,6 +3469,7 @@ max_asset_broadcast_duty_cycle = 0.15
             "minidungeon".to_string(),
             "admin".to_string(),
             "marketplace".to_string(),
+            "tradewars".to_string(),
         ];
         let manifest_map = load_app_manifests(&enabled);
         assert!(manifest_map.contains_key(&0x0101)); // dungeon banner
