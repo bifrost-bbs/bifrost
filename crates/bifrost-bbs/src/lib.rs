@@ -3396,6 +3396,126 @@ max_asset_broadcast_duty_cycle = 0.15
     }
 
     #[test]
+    fn test_weather_app_syntax() {
+        let path = find_workspace_path("apps/weather/main.lua");
+        let content = std::fs::read_to_string(path).unwrap();
+        let lua = mlua::Lua::new();
+        let chunk = lua.load(&content);
+        assert!(chunk.into_function().is_ok(), "weather/main.lua should compile as valid Lua");
+    }
+
+    #[tokio::test]
+    async fn test_weather_session_navigation() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let config = default_config();
+        let server_transport = Arc::new(MockSocketTransport::new_server("127.0.0.1:9095".to_string(), 0.0, 0, 200));
+
+        let server_handle = tokio::spawn(async move {
+            start_server(config, server_transport, Some(4)).await
+        });
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        let client_transport = MockSocketTransport::new_client("127.0.0.1:9095".to_string(), 0.0, 0, 200);
+        let client_key = [11u8; 32];
+        let mut client_cache = bifrost_transport::SessionPayloadCache::new(100);
+        let static_dict = bifrost_compression::CompressionDictionary::standard_static();
+
+        // Handshake
+        let handshake_msg = MeshBbsMessage::new(0x03, 0x01, 0x00, Vec::new());
+        let handshake_payloads = handshake_msg.to_fragments(200).unwrap();
+
+        let packet = RadioPacket {
+            is_broadcast: false,
+            src_node: client_key,
+            dst_node: [0; 32],
+            payload: handshake_payloads[0].clone(),
+            signal_rssi: -50,
+            signal_snr: 10,
+        };
+        client_transport.send_packet(packet).await.unwrap();
+
+        let mut client_reassembler = MessageReassembler::new();
+
+        // 1. Receive register screen
+        let start_time = tokio::time::Instant::now();
+        while start_time.elapsed() < tokio::time::Duration::from_millis(1500) {
+            match tokio::time::timeout(tokio::time::Duration::from_millis(100), client_transport.receive_packet()).await {
+                Ok(Ok(packet)) => {
+                    if let Some(msg) = client_reassembler.process_packet([0; 32], &packet.payload).unwrap() {
+                        let _ = decode_test_msg(&mut client_cache, &msg, &static_dict);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // 2. Register nickname "WeatherBob"
+        let register_json = r#"{"nickname":"WeatherBob","submit":"register"}"#;
+        let register_msg = MeshBbsMessage::new(0x02, 0x02, 0x00, register_json.as_bytes().to_vec());
+        let register_payloads = register_msg.to_fragments(200).unwrap();
+        let packet = RadioPacket {
+            is_broadcast: false,
+            src_node: client_key,
+            dst_node: [0; 32],
+            payload: register_payloads[0].clone(),
+            signal_rssi: -50,
+            signal_snr: 10,
+        };
+        client_transport.send_packet(packet).await.unwrap();
+
+        // Receive Main Menu screen
+        let start_time = tokio::time::Instant::now();
+        while start_time.elapsed() < tokio::time::Duration::from_millis(1500) {
+            match tokio::time::timeout(tokio::time::Duration::from_millis(100), client_transport.receive_packet()).await {
+                Ok(Ok(packet)) => {
+                    if let Some(msg) = client_reassembler.process_packet([0; 32], &packet.payload).unwrap() {
+                        let _ = decode_test_msg(&mut client_cache, &msg, &static_dict);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // 3. Submit "weather" action from main menu (Form ID 10)
+        let weather_select_json = r#"{"submit":"weather"}"#;
+        let weather_msg = MeshBbsMessage::new(0x02, 0x02, 0x00, weather_select_json.as_bytes().to_vec());
+        let weather_payloads = weather_msg.to_fragments(200).unwrap();
+        let packet = RadioPacket {
+            is_broadcast: false,
+            src_node: client_key,
+            dst_node: [0; 32],
+            payload: weather_payloads[0].clone(),
+            signal_rssi: -50,
+            signal_snr: 10,
+        };
+        client_transport.send_packet(packet).await.unwrap();
+
+        // 4. Receive Weather screen
+        let mut weather_screen = None;
+        let start_time = tokio::time::Instant::now();
+        while start_time.elapsed() < tokio::time::Duration::from_millis(1500) {
+            match tokio::time::timeout(tokio::time::Duration::from_millis(100), client_transport.receive_packet()).await {
+                Ok(Ok(packet)) => {
+                    if let Some(msg) = client_reassembler.process_packet([0; 32], &packet.payload).unwrap() {
+                        weather_screen = Some(msg);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let resp = weather_screen.expect("Should receive Weather screen");
+        let uncompressed_payload = decode_test_msg(&mut client_cache, &resp, &static_dict);
+        let screen_text = String::from_utf8_lossy(&uncompressed_payload);
+        assert!(screen_text.contains("WEATHER FORECAST"), "Should contain WEATHER FORECAST header, got: {}", screen_text);
+
+        let _ = server_handle.await;
+    }
+
+    #[test]
     fn test_parse_meshcore_advert_full_packet_framing() {
         let node_key = [0x42u8; 32];
         let mut packet_bytes = Vec::new();
