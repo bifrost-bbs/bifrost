@@ -86,16 +86,21 @@ cargo test
 cargo llvm-cov --html
 ```
 
-### 🏁 Launching the Server & Client
+### 🏁 Launching Heimdall & Bifrost
 
 ```bash
-# 1. Start the BBS server daemon with diagnostic packet capture enabled
+# 1. Launch Heimdall Master Supervisor & Web NOC Dashboard (Port 9324)
+cargo run --bin heimdall
+
+# Or run Heimdall with custom options & authentication
+cargo run --bin heimdall -- --port 9324 --user admin --pass secret
+
+# 2. Open Web Admin Console in your browser
+# -> http://localhost:9324
+
+# 3. Direct BBS daemon & interactive terminal commands
 cargo run --bin bifrost-bbs -- --config config.toml --mock --capture captured_packets
-
-# 2. Launch interactive client terminal emulator
 cargo run --bin bifrost-client
-
-# 3. Or launch automated client crawler to simulate multi-app navigation
 cargo run --bin bifrost-client -- --crawl --crawl-steps 100 --headless
 ```
 

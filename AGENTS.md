@@ -48,8 +48,15 @@ The project is structured as a Rust Cargo Workspace:
     ├── bifrost-bbs/                # Main server host engine (tokio, mlua, sled)
     │   ├── Cargo.toml
     │   └── src/
-    └── bifrost-client/             # Interactive client terminal emulator
+    ├── bifrost-client/             # Interactive client terminal emulator
+    │   ├── Cargo.toml
+    │   └── src/
+    ├── bifrost-tuning/             # Compression parameter grid search & dictionary training
+    │   ├── Cargo.toml
+    │   └── src/
+    └── heimdall/                   # Master supervisor daemon & retro web admin dashboard (port 9324)
         ├── Cargo.toml
+        ├── web/
         └── src/
 ```
 
