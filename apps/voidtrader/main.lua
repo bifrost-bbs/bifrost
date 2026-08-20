@@ -5,13 +5,23 @@ local app = {}
 
 local NUM_SECTORS = 100
 local MAX_TURNS = 120
+local WARP_FUEL_COST = 3
+local ORE_TO_FUEL_RATIO = 10
 
--- Ship Classes: name, holds_base, holds_max, max_fighters, max_shields, price
+-- Ship Classes: name, holds_base, holds_max, max_fighters, max_shields, fuel_max, price
 local SHIP_CLASSES = {
-    { name = "Scout Sloop", holds_base = 20, holds_max = 35, max_fighters = 25, max_shields = 25, price = 0 },
-    { name = "Merchant Hauler", holds_base = 50, holds_max = 80, max_fighters = 60, max_shields = 60, price = 4500 },
-    { name = "Armored Freighter", holds_base = 100, holds_max = 150, max_fighters = 120, max_shields = 120, price = 14000 },
-    { name = "Dreadnought Cruiser", holds_base = 200, holds_max = 300, max_fighters = 250, max_shields = 250, price = 42000 }
+    { name = "Scout Sloop", holds_base = 20, holds_max = 35, max_fighters = 25, max_shields = 25, fuel_max = 30, price = 0 },
+    { name = "Merchant Hauler", holds_base = 50, holds_max = 80, max_fighters = 60, max_shields = 60, fuel_max = 60, price = 4500 },
+    { name = "Armored Freighter", holds_base = 100, holds_max = 150, max_fighters = 120, max_shields = 120, fuel_max = 120, price = 14000 },
+    { name = "Dreadnought Cruiser", holds_base = 200, holds_max = 300, max_fighters = 250, max_shields = 250, fuel_max = 250, price = 42000 }
+}
+
+-- Navigation Computers: name, max_jumps, max_favorites, price
+local NAV_COMPUTERS = {
+    { name = "Mark I Basic Nav", max_jumps = 3, max_favorites = 2, price = 0 },
+    { name = "Mark II Enhanced Nav", max_jumps = 6, max_favorites = 5, price = 1500 },
+    { name = "Mark III Hyper-Nav", max_jumps = 10, max_favorites = 10, price = 4500 },
+    { name = "Mark IV Quantum Core", max_jumps = 25, max_favorites = 20, price = 12000 }
 }
 
 -- Port Classes: [Ore, Org, Eqp] where 1 = Port BUYS (Player Sells), 0 = Port SELLS (Player Buys)
@@ -119,6 +129,8 @@ local function init_player(session)
         bank = 0,
         turns = MAX_TURNS,
         ship_class = 1, -- Scout Sloop
+        nav_level = 1,  -- Mark I Basic Nav
+        fuel = 30,      -- Full starter tank
         holds = 20,
         ore = 0,
         ore_cost = 0,
@@ -129,7 +141,9 @@ local function init_player(session)
         fighters = 15,
         shields = 15,
         kills = 0,
-        trades = 0
+        trades = 0,
+        favorites = {},
+        plotted_course = {}
     }
 end
 
@@ -158,13 +172,21 @@ local function get_player(session)
         db.set("vt_players", session.node_id(), p)
     end
 
+    -- Ensure fuel, nav_level, favorites, and plotted_course exist
+    local ship_info = SHIP_CLASSES[p.ship_class or 1] or SHIP_CLASSES[1]
+    if p.fuel == nil then p.fuel = ship_info.fuel_max end
+    if p.nav_level == nil then p.nav_level = 1 end
+    if p.favorites == nil then p.favorites = {} end
+    if p.plotted_course == nil then p.plotted_course = {} end
+
     return p
 end
 
 local function calc_net_worth(p)
     local ship_info = SHIP_CLASSES[p.ship_class or 1] or SHIP_CLASSES[1]
+    local nav_info = NAV_COMPUTERS[p.nav_level or 1] or NAV_COMPUTERS[1]
     local cargo_val = (p.ore * BASE_PRICES.ore) + (p.org * BASE_PRICES.org) + (p.eqp * BASE_PRICES.eqp)
-    local ship_val = ship_info.price + ((p.holds - ship_info.holds_base) * 100)
+    local ship_val = ship_info.price + nav_info.price + ((p.holds - ship_info.holds_base) * 100)
     return p.credits + (p.bank or 0) + cargo_val + (p.fighters * 50) + (p.shields * 75) + ship_val
 end
 
@@ -200,10 +222,51 @@ local function save_player(session, player)
         })
     end
 
-    -- Sort top 10 descending by net worth
     table.sort(board, function(a, b) return (a.net_worth or 0) > (b.net_worth or 0) end)
     while #board > 15 do table.remove(board) end
     db.set("vt_leaderboard", "scores", board)
+end
+
+-- ---------------------------------------------------------------------------
+-- SHORTEST PATH COURSE PLOTTER (BFS)
+-- ---------------------------------------------------------------------------
+
+local function find_shortest_path(sectors, start_sec, target_sec, max_depth)
+    if start_sec == target_sec then return {} end
+    local queue = { { start_sec } }
+    local visited = { [start_sec] = true }
+
+    while #queue > 0 do
+        local path = table.remove(queue, 1)
+        local current = path[#path]
+
+        if #path - 1 < max_depth then
+            local sec = sectors[current]
+            for _, next_sec in ipairs((sec and sec.warps) or {}) do
+                if next_sec == target_sec then
+                    local res = {}
+                    for i = 2, #path do table.insert(res, path[i]) end
+                    table.insert(res, target_sec)
+                    return res
+                end
+                if not visited[next_sec] then
+                    visited[next_sec] = true
+                    local new_path = {}
+                    for _, node in ipairs(path) do table.insert(new_path, node) end
+                    table.insert(new_path, next_sec)
+                    table.insert(queue, new_path)
+                end
+            end
+        end
+    end
+    return nil
+end
+
+local function is_favorite_sector(player, sec_id)
+    for _, f in ipairs(player.favorites or {}) do
+        if f == sec_id then return true end
+    end
+    return false
 end
 
 -- ---------------------------------------------------------------------------
@@ -219,6 +282,10 @@ function app.view_sector(session, player, msg)
     local sectors = get_sectors()
     local sec = sectors[player.sector] or sectors[1]
     local ship_info = SHIP_CLASSES[player.ship_class or 1] or SHIP_CLASSES[1]
+    local nav_info = NAV_COMPUTERS[player.nav_level or 1] or NAV_COMPUTERS[1]
+
+    local is_fav = is_favorite_sector(player, player.sector)
+    local is_stranded = (player.fuel < WARP_FUEL_COST) and (player.ore <= 0)
 
     term.clear()
     term.render_asset("voidtrader_banner")
@@ -228,7 +295,7 @@ function app.view_sector(session, player, msg)
 
     term.move_to(2, 7)
     term.set_color(11, 0) -- Cyan
-    term.print(string.format("Ship: %-18s Holds: %d/%-3d  Fighters: %-3d  Shields: %-3d", ship_info.name, (player.ore + player.org + player.eqp), player.holds, player.fighters, player.shields))
+    term.print(string.format("Ship: %-16s Fuel: %d/%-3d  Holds: %d/%-3d  Fgt: %-3d  Shd: %-3d", ship_info.name, player.fuel, ship_info.fuel_max, (player.ore + player.org + player.eqp), player.holds, player.fighters, player.shields))
 
     term.move_to(2, 8)
     term.set_color(15, 0) -- White
@@ -239,13 +306,14 @@ function app.view_sector(session, player, msg)
     term.print("Warp Lanes: " .. warp_str)
 
     term.move_to(2, 9)
+    local fav_marker = is_fav and " [* FAVORITE PORT]" or ""
     if player.sector == 1 then
         term.set_color(10, 0) -- Green
-        term.print("Facilities: [ Alpha Stardock Prime ] (Shipyard, Bank, Outfitter)")
+        term.print("Facilities: [ Alpha Stardock Prime ] (Shipyard, Bank, Outfitter)" .. fav_marker)
     elseif sec.port then
         term.set_color(10, 0)
         local p_info = PORT_CLASSES[sec.port.class] or { name = "Trading Station" }
-        term.print(string.format("Port: Class %d - %s", sec.port.class, p_info.name))
+        term.print(string.format("Port: Class %d - %s%s", sec.port.class, p_info.name, fav_marker))
     else
         term.set_color(8, 0) -- Grey
         term.print("Port: None in this sector (Deep Space)")
@@ -257,21 +325,68 @@ function app.view_sector(session, player, msg)
         term.print("HAZARD DETECTED: " .. sec.hazard)
     end
 
+    -- Plotted Course summary line
+    local next_course_hop = nil
+    if player.plotted_course and #player.plotted_course > 0 then
+        next_course_hop = player.plotted_course[1]
+        term.move_to(2, 10)
+        term.set_color(13, 0) -- Magenta
+        local course_str = ""
+        for idx, hop in ipairs(player.plotted_course) do
+            if idx <= 5 then
+                course_str = course_str .. " -> " .. hop
+            end
+        end
+        if #player.plotted_course > 5 then course_str = course_str .. " ..." end
+        term.print(string.format("Course Plotted (%d hops):%s", #player.plotted_course, course_str))
+    end
+
+    if is_stranded then
+        term.move_to(2, 10)
+        term.set_color(12, 0)
+        term.print("STRANDED: Out of fuel & fuel ore! Send distress signal.")
+    end
+
     term.move_to(2, 11)
     term.set_color(15, 0)
     term.print(msg or "")
 
     term.define_form(10)
-    term.add_submit_button("warp", 2, 13)
-    if player.sector == 1 then
-        term.add_submit_button("stardock", 12, 13)
-    elseif sec.port then
-        term.add_submit_button("dock", 12, 13)
+    if is_stranded then
+        term.add_submit_button("distress", 2, 13)
+        term.add_submit_button("scan", 14, 13)
+        term.add_submit_button("status", 22, 13)
+        term.add_submit_button("ranks", 32, 13)
+        term.add_submit_button("exit", 42, 13)
+    else
+        term.add_submit_button("warp", 2, 13)
+        if next_course_hop then
+            term.add_submit_button("autowarp", 10, 13)
+            term.add_submit_button("plot", 22, 13)
+        else
+            term.add_submit_button("plot", 10, 13)
+        end
+
+        if player.sector == 1 then
+            term.add_submit_button("stardock", 20, 13)
+        elseif sec.port then
+            term.add_submit_button("dock", 20, 13)
+            if is_fav then
+                term.add_submit_button("unfav", 28, 13)
+            else
+                term.add_submit_button("fav", 28, 13)
+            end
+        end
+
+        if player.ore > 0 and player.fuel < ship_info.fuel_max then
+            term.add_submit_button("refuel", 36, 13)
+        end
+
+        term.add_submit_button("scan", 46, 13)
+        term.add_submit_button("status", 54, 13)
+        term.add_submit_button("ranks", 64, 13)
+        term.add_submit_button("exit", 72, 13)
     end
-    term.add_submit_button("scan", 22, 13)
-    term.add_submit_button("status", 32, 13)
-    term.add_submit_button("ranks", 42, 13)
-    term.add_submit_button("exit", 52, 13)
     term.flush_form()
 
     session.await_input(10, function(sub)
@@ -280,10 +395,22 @@ function app.view_sector(session, player, msg)
 
         if act == "warp" then
             app.nav_prompt(session, player)
+        elseif act == "autowarp" then
+            app.execute_autowarp(session, player)
+        elseif act == "plot" then
+            app.plot_menu(session, player)
         elseif act == "dock" then
             app.port_menu(session, player)
         elseif act == "stardock" then
             app.stardock_menu(session, player)
+        elseif act == "fav" then
+            app.add_favorite(session, player)
+        elseif act == "unfav" then
+            app.remove_favorite(session, player)
+        elseif act == "refuel" then
+            app.refuel_from_ore(session, player)
+        elseif act == "distress" then
+            app.distress_beacon(session, player)
         elseif act == "scan" then
             app.scan_sector(session, player)
         elseif act == "status" then
@@ -300,6 +427,213 @@ function app.view_sector(session, player, msg)
 end
 
 -- ---------------------------------------------------------------------------
+-- FAVORITES & COURSE PLOTTING
+-- ---------------------------------------------------------------------------
+
+function app.add_favorite(session, player)
+    local nav_info = NAV_COMPUTERS[player.nav_level or 1] or NAV_COMPUTERS[1]
+    player.favorites = player.favorites or {}
+    if #player.favorites >= nav_info.max_favorites then
+        app.view_sector(session, player, string.format("Nav memory full! Max %d favorites (Upgrade at Stardock).", nav_info.max_favorites))
+        return
+    end
+    for _, f in ipairs(player.favorites) do
+        if f == player.sector then
+            app.view_sector(session, player, "Sector already in favorites.")
+            return
+        end
+    end
+    table.insert(player.favorites, player.sector)
+    save_player(session, player)
+    app.view_sector(session, player, "Added Sector " .. player.sector .. " to Nav Favorites!")
+end
+
+function app.remove_favorite(session, player)
+    player.favorites = player.favorites or {}
+    for i, f in ipairs(player.favorites) do
+        if f == player.sector then
+            table.remove(player.favorites, i)
+            save_player(session, player)
+            app.view_sector(session, player, "Removed Sector " .. player.sector .. " from Favorites.")
+            return
+        end
+    end
+    app.view_sector(session, player, "")
+end
+
+function app.plot_menu(session, player)
+    local sectors = get_sectors()
+    local nav_info = NAV_COMPUTERS[player.nav_level or 1] or NAV_COMPUTERS[1]
+
+    term.clear()
+    term.render_asset("voidtrader_banner")
+    term.move_to(2, 5)
+    term.set_color(11, 0)
+    term.print(string.format("=== HYPERSPACE COURSE PLOTTER (%s) ===", nav_info.name))
+    term.move_to(2, 6)
+    term.set_color(14, 0)
+    term.print(string.format("Current Location: Sector %d | Max Jumps Plottable: %d", player.sector, nav_info.max_jumps))
+
+    term.move_to(2, 8)
+    term.set_color(15, 0)
+    term.print("Favorite Starports:")
+    if player.favorites and #player.favorites > 0 then
+        for idx, fav_sec in ipairs(player.favorites) do
+            local sec = sectors[fav_sec]
+            local port_name = (sec and sec.port and sec.port.name) or "Deep Space"
+            term.move_to(4, 8 + idx)
+            term.set_color(10, 0)
+            term.print(string.format("[%d] Sector %-3d - %s", idx, fav_sec, port_name))
+        end
+    else
+        term.move_to(4, 9)
+        term.set_color(8, 0)
+        term.print("No favorite ports saved. (Press [fav] at any starport)")
+    end
+
+    term.define_form(25)
+    term.move_to(2, 13)
+    term.set_color(15, 0)
+    term.print("Enter Target Sector: ")
+    term.add_input_field("target", 23, 13, 5, "")
+
+    term.add_submit_button("plot_course", 2, 15)
+    term.add_submit_button("clear_course", 16, 15)
+    term.add_submit_button("back", 32, 15)
+    term.flush_form()
+
+    session.await_input(25, function(sub)
+        if type(sub) == "string" then app.plot_menu(session, player) return end
+        local act = sub.submit
+        if act == "back" then app.view_sector(session, player, "") return end
+
+        if act == "clear_course" then
+            player.plotted_course = {}
+            save_player(session, player)
+            app.view_sector(session, player, "Plotted course cleared.")
+            return
+        end
+
+        local target = tonumber(sub.target)
+        if not target or target < 1 or target > NUM_SECTORS then
+            app.view_sector(session, player, "Invalid target sector coordinates.")
+            return
+        end
+
+        if target == player.sector then
+            app.view_sector(session, player, "You are already in Sector " .. target .. "!")
+            return
+        end
+
+        local path = find_shortest_path(sectors, player.sector, target, nav_info.max_jumps)
+        if not path or #path == 0 then
+            app.view_sector(session, player, string.format("No route found within %d jumps of current Nav Computer.", nav_info.max_jumps))
+            return
+        end
+
+        player.plotted_course = path
+        save_player(session, player)
+        app.view_sector(session, player, string.format("Course plotted to Sector %d (%d jumps). Use [autowarp] to travel.", target, #path))
+    end)
+end
+
+function app.execute_autowarp(session, player)
+    if not player.plotted_course or #player.plotted_course == 0 then
+        app.view_sector(session, player, "No course plotted.")
+        return
+    end
+
+    local dest = player.plotted_course[1]
+    local sectors = get_sectors()
+    local current_sec = sectors[player.sector]
+
+    local valid = false
+    for _, w in ipairs((current_sec and current_sec.warps) or {}) do
+        if w == dest then valid = true break end
+    end
+
+    if not valid then
+        player.plotted_course = {}
+        save_player(session, player)
+        app.view_sector(session, player, "Deviated from plotted route. Course reset.")
+        return
+    end
+
+    -- Pop the hop and perform warp
+    table.remove(player.plotted_course, 1)
+    app.perform_warp_to(session, player, dest)
+end
+
+-- ---------------------------------------------------------------------------
+-- FUEL REFINING & DISTRESS BEACON
+-- ---------------------------------------------------------------------------
+
+function app.refuel_from_ore(session, player)
+    local ship_info = SHIP_CLASSES[player.ship_class or 1] or SHIP_CLASSES[1]
+    local needed = ship_info.fuel_max - player.fuel
+    if needed <= 0 then
+        app.view_sector(session, player, "Fuel tank is already at maximum capacity.")
+        return
+    end
+
+    local ore_needed = math.ceil(needed / ORE_TO_FUEL_RATIO)
+    local ore_to_use = math.min(player.ore, ore_needed)
+
+    if ore_to_use <= 0 then
+        app.view_sector(session, player, "No Fuel Ore in cargo holds to refine.")
+        return
+    end
+
+    local fuel_gain = math.min(needed, ore_to_use * ORE_TO_FUEL_RATIO)
+    player.ore = player.ore - ore_to_use
+    player.fuel = player.fuel + fuel_gain
+
+    if player.ore <= 0 then
+        player.ore = 0
+        player.ore_cost = 0
+    else
+        local avg_cost = get_cargo_avg_cost(player, "ore")
+        player.ore_cost = player.ore * avg_cost
+    end
+
+    save_player(session, player)
+    app.view_sector(session, player, string.format("Refined %d Fuel Ore into %d units of fuel! (Tank: %d/%d)", ore_to_use, fuel_gain, player.fuel, ship_info.fuel_max))
+end
+
+function app.distress_beacon(session, player)
+    if player.turns <= 0 then
+        app.view_sector(session, player, "Out of turns to transmit distress beacon.")
+        return
+    end
+
+    player.turns = player.turns - 1
+    save_player(session, player)
+
+    local roll = math.random(1, 100)
+    if roll <= 35 then
+        -- Benevolent Patrol
+        local fuel_given = 15
+        player.fuel = player.fuel + fuel_given
+        save_player(session, player)
+        app.view_sector(session, player, string.format("Alpha Patrol Corvette answered distress call! Transfused %d free fuel.", fuel_given))
+    elseif roll <= 70 then
+        -- Scavenger extortion
+        local price = math.random(200, 600)
+        if player.credits >= price then
+            player.credits = player.credits - price
+            player.fuel = player.fuel + 15
+            save_player(session, player)
+            app.view_sector(session, player, string.format("Scavenger hauler answered beacon! Sold you 15 fuel for %d cr.", price))
+        else
+            app.view_sector(session, player, "Scavenger answered beacon, but you couldn't afford their price. They left.")
+        end
+    else
+        -- Hostile Pirate Ambush
+        app.pirate_encounter(session, player, math.random(10, 25))
+    end
+end
+
+-- ---------------------------------------------------------------------------
 -- NAVIGATION & WARPING
 -- ---------------------------------------------------------------------------
 
@@ -311,7 +645,7 @@ function app.nav_prompt(session, player)
     term.render_asset("voidtrader_banner")
     term.move_to(2, 6)
     term.set_color(11, 0)
-    term.print(string.format("Current Sector: %d (Turns remaining: %d)", player.sector, player.turns))
+    term.print(string.format("Current Sector: %d (Turns: %d | Fuel: %d)", player.sector, player.turns, player.fuel))
     term.move_to(2, 7)
     local warp_str = ""
     for _, w in ipairs(sec.warps or {}) do warp_str = warp_str .. tostring(w) .. " " end
@@ -339,11 +673,6 @@ function app.nav_prompt(session, player)
             return
         end
 
-        if player.turns <= 0 then
-            app.view_sector(session, player, "Hyperspace engine offline: Out of turns!")
-            return
-        end
-
         local valid = false
         for _, w in ipairs(sec.warps or {}) do
             if w == dest then valid = true break end
@@ -354,31 +683,53 @@ function app.nav_prompt(session, player)
             return
         end
 
-        player.sector = dest
-        player.turns = player.turns - 1
-        save_player(session, player)
-
-        local dest_sec = sectors[dest]
-
-        -- Sector Hazard check
-        if dest_sec.hazard == "ASTEROID_FIELD" then
-            if player.shields > 0 then
-                local dmg = math.min(player.shields, math.random(2, 5))
-                player.shields = player.shields - dmg
-                save_player(session, player)
-            end
-        end
-
-        -- Random Encounters (Pirate ambush or Derelict salvage)
-        local roll = math.random(1, 100)
-        if dest > 1 and roll <= 18 then
-            app.pirate_encounter(session, player, math.random(8, 25))
-        elseif dest > 1 and roll <= 28 then
-            app.derelict_salvage(session, player)
-        else
-            app.view_sector(session, player, "Warp jump successful: Arrived in Sector " .. dest .. ".")
-        end
+        app.perform_warp_to(session, player, dest)
     end)
+end
+
+function app.perform_warp_to(session, player, dest)
+    local sectors = get_sectors()
+
+    if player.turns <= 0 then
+        app.view_sector(session, player, "Hyperspace engine offline: Out of turns!")
+        return
+    end
+
+    if player.fuel < WARP_FUEL_COST then
+        if player.ore > 0 then
+            app.refuel_from_ore(session, player)
+            return
+        else
+            app.view_sector(session, player, "Hyperspace jump failed: Out of fuel! Send distress signal.")
+            return
+        end
+    end
+
+    player.sector = dest
+    player.turns = player.turns - 1
+    player.fuel = player.fuel - WARP_FUEL_COST
+    save_player(session, player)
+
+    local dest_sec = sectors[dest]
+
+    -- Sector Hazard check
+    if dest_sec.hazard == "ASTEROID_FIELD" then
+        if player.shields > 0 then
+            local dmg = math.min(player.shields, math.random(2, 5))
+            player.shields = player.shields - dmg
+            save_player(session, player)
+        end
+    end
+
+    -- Random Encounters (Pirate ambush or Derelict salvage)
+    local roll = math.random(1, 100)
+    if dest > 1 and roll <= 18 then
+        app.pirate_encounter(session, player, math.random(8, 25))
+    elseif dest > 1 and roll <= 28 then
+        app.derelict_salvage(session, player)
+    else
+        app.view_sector(session, player, "Warp jump successful: Arrived in Sector " .. dest .. ".")
+    end
 end
 
 -- ---------------------------------------------------------------------------
@@ -446,8 +797,9 @@ function app.pirate_encounter(session, player, enemy_fighters)
                 app.pirate_encounter(session, player, enemy_fighters)
             end
         elseif act == "hyper_flee" then
-            if math.random(1, 100) <= 60 then
+            if math.random(1, 100) <= 60 and player.fuel >= WARP_FUEL_COST then
                 player.turns = math.max(0, player.turns - 1)
+                player.fuel = math.max(0, player.fuel - WARP_FUEL_COST)
                 save_player(session, player)
                 app.view_sector(session, player, "Engaged emergency hyperdrive jump! Escaped to safety.")
             else
@@ -476,7 +828,6 @@ function app.derelict_salvage(session, player)
 
     player.credits = player.credits + credits_found
     player.ore = player.ore + ore_taken
-    -- Cost basis doesn't increase for free salvage
     save_player(session, player)
 
     app.view_sector(session, player, string.format("Discovered a drifting derelict freighter! Salvaged %d cr and %d Fuel Ore.", credits_found, ore_taken))
@@ -501,7 +852,6 @@ function app.player_death(session, player, cause)
     term.move_to(2, 13)
     term.print("Your bank account credits remained secure.")
 
-    -- Reset to starter ship in Sector 1 while preserving bank balance
     local saved_bank = player.bank or 0
     local p = init_player(session)
     p.bank = saved_bank
@@ -528,6 +878,7 @@ function app.port_menu(session, player)
 
     local port = sec.port
     local p_rules = PORT_CLASSES[port.class] or {1, 0, 0}
+    local ship_info = SHIP_CLASSES[player.ship_class or 1] or SHIP_CLASSES[1]
 
     term.clear()
     term.render_asset("voidtrader_banner")
@@ -587,13 +938,18 @@ function app.port_menu(session, player)
     term.move_to(2, 13)
     term.set_color(15, 0)
     local holds_used = player.ore + player.org + player.eqp
-    term.print(string.format("Cash: %-8d cr   Holds Free: %d / %d", player.credits, (player.holds - holds_used), player.holds))
+    term.print(string.format("Cash: %-8d cr   Holds: %d / %d   Fuel: %d / %d (Refuel: 2 cr/unit)", player.credits, (player.holds - holds_used), player.holds, player.fuel, ship_info.fuel_max))
 
     term.define_form(50)
     term.add_submit_button("trade_ore", 2, 15)
     term.add_submit_button("trade_org", 16, 15)
     term.add_submit_button("trade_eqp", 30, 15)
-    term.add_submit_button("depart", 44, 15)
+    if player.fuel < ship_info.fuel_max then
+        term.add_submit_button("refuel_tank", 44, 15)
+        term.add_submit_button("depart", 60, 15)
+    else
+        term.add_submit_button("depart", 44, 15)
+    end
     term.flush_form()
 
     session.await_input(50, function(sub)
@@ -602,6 +958,19 @@ function app.port_menu(session, player)
 
         if act == "depart" then
             app.view_sector(session, player, "Departed starport.")
+            return
+        end
+
+        if act == "refuel_tank" then
+            local missing = ship_info.fuel_max - player.fuel
+            local max_afford = math.floor(player.credits / 2)
+            local to_add = math.min(missing, max_afford)
+            if to_add > 0 then
+                player.credits = player.credits - (to_add * 2)
+                player.fuel = player.fuel + to_add
+                save_player(session, player)
+            end
+            app.port_menu(session, player)
             return
         end
 
@@ -626,10 +995,8 @@ function app.trade_quantity_prompt(session, player, item_key, item_name, rule, p
     local max_qty = 0
 
     if is_station_buying then
-        -- Station is BUYING from player (Player SELLS)
         max_qty = pl_amt
     else
-        -- Station is SELLING to player (Player BUYS)
         local max_afford = math.floor(player.credits / price)
         max_qty = math.min(free_holds, max_afford, port_amt)
     end
@@ -714,7 +1081,6 @@ function app.trade_quantity_prompt(session, player, item_key, item_name, rule, p
         end
 
         if is_station_buying then
-            -- Player SELLS qty_to_trade
             local total_val = qty_to_trade * price
             player.credits = player.credits + total_val
 
@@ -733,7 +1099,6 @@ function app.trade_quantity_prompt(session, player, item_key, item_name, rule, p
             port[item_key] = port[item_key] + qty_to_trade
             player.trades = (player.trades or 0) + 1
         else
-            -- Player BUYS qty_to_trade
             local total_cost = qty_to_trade * price
             player.credits = player.credits - total_cost
 
@@ -803,16 +1168,16 @@ function app.shipyard_menu(session, player)
     term.print("=== STARDOCK SHIPYARD ===")
     term.move_to(2, 7)
     term.set_color(14, 0)
-    term.print("Ship Class            Max Holds   Combat Drones   Shields   Price")
+    term.print("Ship Class          Max Holds  Drones  Shields  Fuel Tank  Price")
     term.move_to(2, 8)
-    term.print("----------            ---------   -------------   -------   -----")
+    term.print("----------          ---------  ------  -------  ---------  -----")
 
     for i, ship in ipairs(SHIP_CLASSES) do
         term.move_to(2, 8 + i)
         local is_curr = (player.ship_class or 1) == i
         term.set_color(is_curr and 10 or 15, 0)
         local marker = is_curr and "[OWNED]" or string.format("%d cr", ship.price)
-        term.print(string.format("%-20s  %-9d   %-13d   %-7d   %s", ship.name, ship.holds_max, ship.max_fighters, ship.max_shields, marker))
+        term.print(string.format("%-18s  %-9d  %-6d  %-7d  %-9d  %s", ship.name, ship.holds_max, ship.max_fighters, ship.max_shields, ship.fuel_max, marker))
     end
 
     term.define_form(75)
@@ -842,6 +1207,7 @@ function app.shipyard_menu(session, player)
             player.credits = player.credits - target_ship.price
             player.ship_class = target_class
             player.holds = target_ship.holds_base
+            player.fuel = target_ship.fuel_max
             save_player(session, player)
             app.stardock_menu(session, player)
         else
@@ -852,24 +1218,40 @@ end
 
 function app.outfitter_menu(session, player)
     local ship_info = SHIP_CLASSES[player.ship_class or 1]
+    local nav_info = NAV_COMPUTERS[player.nav_level or 1]
+    local next_nav = NAV_COMPUTERS[(player.nav_level or 1) + 1]
+
     term.clear()
     term.render_asset("voidtrader_banner")
     term.move_to(2, 5)
     term.set_color(11, 0)
-    term.print("=== NAVAL OUTFITTER & ARMORY ===")
+    term.print("=== NAVAL OUTFITTER, ARMORY & NAV-DOCK ===")
     term.move_to(2, 7)
     term.set_color(15, 0)
     term.print(string.format("Cargo Holds: %d / %d max (Upgrade: 450 cr / +5 holds)", player.holds, ship_info.holds_max))
     term.move_to(2, 8)
-    term.print(string.format("Combat Drones / Fighters: %d / %d max (50 cr each)", player.fighters, ship_info.max_fighters))
+    term.print(string.format("Combat Drones: %d / %d max (50 cr each) | Shields: %d / %d (75 cr each)", player.fighters, ship_info.max_fighters, player.shields, ship_info.max_shields))
     term.move_to(2, 9)
-    term.print(string.format("Deflector Shields: %d / %d max (75 cr each)", player.shields, ship_info.max_shields))
+    term.print(string.format("Fuel Tank: %d / %d max (Refuel: 2 cr/unit)", player.fuel, ship_info.fuel_max))
+    term.move_to(2, 10)
+    term.set_color(14, 0)
+    if next_nav then
+        term.print(string.format("Nav Computer: %s -> %s (%d cr | %d Jumps, %d Favs)", nav_info.name, next_nav.name, next_nav.price, next_nav.max_jumps, next_nav.max_favorites))
+    else
+        term.print(string.format("Nav Computer: %s [MAX UPGRADE]", nav_info.name))
+    end
 
     term.define_form(80)
     term.add_submit_button("buy_5holds", 2, 12)
     term.add_submit_button("buy_10fighters", 18, 12)
     term.add_submit_button("buy_10shields", 36, 12)
-    term.add_submit_button("back", 52, 12)
+    term.add_submit_button("top_fuel", 54, 12)
+    if next_nav then
+        term.add_submit_button("upgrade_nav", 2, 14)
+        term.add_submit_button("back", 18, 14)
+    else
+        term.add_submit_button("back", 2, 14)
+    end
     term.flush_form()
 
     session.await_input(80, function(sub)
@@ -897,6 +1279,21 @@ function app.outfitter_menu(session, player)
             if to_buy > 0 and player.credits >= cost then
                 player.credits = player.credits - cost
                 player.shields = player.shields + to_buy
+                save_player(session, player)
+            end
+        elseif act == "top_fuel" then
+            local missing = ship_info.fuel_max - player.fuel
+            local max_afford = math.floor(player.credits / 2)
+            local to_add = math.min(missing, max_afford)
+            if to_add > 0 then
+                player.credits = player.credits - (to_add * 2)
+                player.fuel = player.fuel + to_add
+                save_player(session, player)
+            end
+        elseif act == "upgrade_nav" and next_nav then
+            if player.credits >= next_nav.price then
+                player.credits = player.credits - next_nav.price
+                player.nav_level = (player.nav_level or 1) + 1
                 save_player(session, player)
             end
         end
@@ -977,7 +1374,8 @@ function app.scan_sector(session, player)
         if dest == 1 then
             port_str = "Stardock Prime"
         elseif d_sec and d_sec.port then
-            port_str = string.format("Class %d (%s)", d_sec.port.class, d_sec.port.name or "Port")
+            local fav_tag = is_favorite_sector(player, dest) and " [*]" or ""
+            port_str = string.format("Class %d (%s)%s", d_sec.port.class, d_sec.port.name or "Port", fav_tag)
         end
         local hazard_str = (d_sec and d_sec.hazard) or "Clear"
         local w_list = ""
@@ -996,6 +1394,8 @@ end
 
 function app.view_status(session, player)
     local ship_info = SHIP_CLASSES[player.ship_class or 1] or SHIP_CLASSES[1]
+    local nav_info = NAV_COMPUTERS[player.nav_level or 1] or NAV_COMPUTERS[1]
+
     term.clear()
     term.render_asset("voidtrader_banner")
     term.move_to(2, 5)
@@ -1006,9 +1406,9 @@ function app.view_status(session, player)
     term.set_color(15, 0)
     term.print(string.format("Commander: %-15s   Ship Class: %s", player.nickname, ship_info.name))
     term.move_to(2, 8)
-    term.print(string.format("Location:  Sector %-8d   Turns Left: %d / %d", player.sector, player.turns, MAX_TURNS))
+    term.print(string.format("Location:  Sector %-8d   Turns Left: %d / %d   Fuel: %d / %d", player.sector, player.turns, MAX_TURNS, player.fuel, ship_info.fuel_max))
     term.move_to(2, 9)
-    term.print(string.format("Cash:      %-10d cr   Bank Vault: %d cr", player.credits, player.bank or 0))
+    term.print(string.format("Cash:      %-10d cr   Bank Vault: %d cr      Nav: %s", player.credits, player.bank or 0, nav_info.name))
     term.move_to(2, 10)
     term.print(string.format("Net Worth: %-10d cr   Pirates Vanquished: %d", calc_net_worth(player), player.kills or 0))
 
