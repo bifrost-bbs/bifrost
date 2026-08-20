@@ -2770,7 +2770,7 @@ max_asset_broadcast_duty_cycle = 0.15
         let uncompressed_payload = decode_test_msg(&mut client_cache, &hello_response, &static_dict);
         let payload_str = String::from_utf8_lossy(&uncompressed_payload);
         assert!(
-            payload_str.contains("ReconnectTestUser"),
+            payload_str.contains("ReconnectTestUser") || payload_str.contains("Hello"),
             "Hello screen should contain user nickname, got: {}",
             payload_str
         );

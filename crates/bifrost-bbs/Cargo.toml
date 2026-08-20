@@ -19,3 +19,4 @@ thiserror.workspace = true
 mlua.workspace = true
 log.workspace = true
 env_logger.workspace = true
+rusqlite = { version = "0.40.2", features = ["bundled"] }
