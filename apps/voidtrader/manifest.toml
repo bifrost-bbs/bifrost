@@ -1,0 +1,12 @@
+[app]
+id = "voidtrader"
+name = "Void Trader"
+description = "Space merchant and interstellar sector trading strategy game"
+author = "Bifrost Contributors"
+version = "1.0.0"
+repository = "https://github.com/pmumby/bifrost"
+entry_point = "main.lua"
+
+[[assets]]
+name = "voidtrader_banner"
+path = "assets/voidtrader_banner.ans"

@@ -1,0 +1,28 @@
+[package]
+name = "heimdall"
+version = "0.1.0"
+edition = "2021"
+description = "Master Supervisor Service & Retro Web Admin Dashboard for Bifrost MeshBBS"
+
+[dependencies]
+tokio = { workspace = true, features = ["full", "process"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+toml = { workspace = true }
+async-trait = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+log = { workspace = true }
+env_logger = { workspace = true }
+axum = { version = "0.7", features = ["ws"] }
+tower-http = { version = "0.5", features = ["cors", "fs", "trace"] }
+futures-util = "0.3"
+
+bifrost-transport = { path = "../bifrost-transport" }
+bifrost-ansi = { path = "../bifrost-ansi" }
+bifrost-compression = { path = "../bifrost-compression" }
+bifrost-bbs = { path = "../bifrost-bbs" }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+

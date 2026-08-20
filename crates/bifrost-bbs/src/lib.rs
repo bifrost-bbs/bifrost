@@ -118,7 +118,7 @@ fn default_form_colors() -> FormColorsConfig {
     }
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq)]
 pub struct FormColorsConfig {
     pub field_fg: u8,
     pub field_bg: u8,
@@ -142,10 +142,12 @@ fn default_enabled_apps() -> Vec<String> {
         "minidungeon".to_string(),
         "admin".to_string(),
         "marketplace".to_string(),
+        "weather".to_string(),
+        "voidtrader".to_string(),
     ]
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq)]
 pub struct AppsConfig {
     #[serde(default = "default_main_app")]
     pub main_app: String,
@@ -161,7 +163,7 @@ fn default_apps_config() -> AppsConfig {
 }
 
 /// Bifrost BBS Server Configuration Loaded from config.toml
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq)]
 pub struct AppConfig {
     #[serde(default = "default_log_level")]
     pub log_level: String,
@@ -320,7 +322,7 @@ impl PacketRecorder {
     }
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq)]
 pub struct RateLimiterConfig {
     pub max_packets_per_minute: u32,
     pub max_burst_packets: u32,
@@ -329,7 +331,7 @@ pub struct RateLimiterConfig {
     pub duty_cycle_window_secs: u64,
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq)]
 pub struct AssetBroadcasterConfig {
     pub enable_on_demand_broadcast: bool,
     pub max_asset_broadcast_duty_cycle: f32,
@@ -1669,6 +1671,43 @@ fn run_session_task(
         })?,
     )?;
     globals.set("log", log_table)?;
+
+    // http table
+    let http_table = lua.create_table()?;
+    http_table.set(
+        "get_json",
+        lua.create_function(move |lua, url: String| {
+            // Mitigate SSRF by restricting to allowed domain(s)
+            if !url.starts_with("https://api.open-meteo.com/") {
+                log::error!("Blocked HTTP request to unauthorized URL: {}", url);
+                return Ok(mlua::Value::Nil);
+            }
+
+            // reqwest::blocking cannot be used within tokio runtime, need to spawn blocking
+            let url_clone = url.clone();
+            let json_result = std::thread::spawn(move || {
+                let client = reqwest::blocking::Client::new();
+                let resp = client.get(&url_clone).send().map_err(|e| e.to_string())?;
+                if resp.status().is_success() {
+                    resp.json::<serde_json::Value>().map_err(|e| e.to_string())
+                } else {
+                    Err(format!("HTTP error: status {}", resp.status()))
+                }
+            }).join().unwrap_or(Err("Thread panicked".to_string()));
+
+            match json_result {
+                Ok(json_val) => {
+                    let lua_val = lua.to_value(&json_val)?;
+                    Ok(lua_val)
+                }
+                Err(e) => {
+                    log::error!("HTTP GET request failed for {}: {}", url, e);
+                    Ok(mlua::Value::Nil)
+                }
+            }
+        })?,
+    )?;
+    globals.set("http", http_table)?;
 
     // session table & state
     let session = lua.create_table()?;
@@ -3358,6 +3397,246 @@ max_asset_broadcast_duty_cycle = 0.15
     }
 
     #[test]
+    fn test_weather_app_syntax() {
+        let path = find_workspace_path("apps/weather/main.lua");
+        let content = std::fs::read_to_string(path).unwrap();
+        let lua = mlua::Lua::new();
+        let chunk = lua.load(&content);
+        assert!(chunk.into_function().is_ok(), "weather/main.lua should compile as valid Lua");
+    }
+
+    #[tokio::test]
+    async fn test_weather_session_navigation() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let config = default_config();
+        let server_transport = Arc::new(MockSocketTransport::new_server("127.0.0.1:9095".to_string(), 0.0, 0, 200));
+
+        let server_handle = tokio::spawn(async move {
+            start_server(config, server_transport, Some(4)).await
+        });
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        let client_transport = MockSocketTransport::new_client("127.0.0.1:9095".to_string(), 0.0, 0, 200);
+        let client_key = [11u8; 32];
+        let mut client_cache = bifrost_transport::SessionPayloadCache::new(100);
+        let static_dict = bifrost_compression::CompressionDictionary::standard_static();
+
+        // Handshake
+        let handshake_msg = MeshBbsMessage::new(0x03, 0x01, 0x00, Vec::new());
+        let handshake_payloads = handshake_msg.to_fragments(200).unwrap();
+
+        let packet = RadioPacket {
+            is_broadcast: false,
+            src_node: client_key,
+            dst_node: [0; 32],
+            payload: handshake_payloads[0].clone(),
+            signal_rssi: -50,
+            signal_snr: 10,
+        };
+        client_transport.send_packet(packet).await.unwrap();
+
+        let mut client_reassembler = MessageReassembler::new();
+
+        // 1. Receive register screen
+        let start_time = tokio::time::Instant::now();
+        while start_time.elapsed() < tokio::time::Duration::from_millis(1500) {
+            match tokio::time::timeout(tokio::time::Duration::from_millis(100), client_transport.receive_packet()).await {
+                Ok(Ok(packet)) => {
+                    if let Some(msg) = client_reassembler.process_packet([0; 32], &packet.payload).unwrap() {
+                        let _ = decode_test_msg(&mut client_cache, &msg, &static_dict);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // 2. Register nickname "WeatherBob"
+        let register_json = r#"{"nickname":"WeatherBob","submit":"register"}"#;
+        let register_msg = MeshBbsMessage::new(0x02, 0x02, 0x00, register_json.as_bytes().to_vec());
+        let register_payloads = register_msg.to_fragments(200).unwrap();
+        let packet = RadioPacket {
+            is_broadcast: false,
+            src_node: client_key,
+            dst_node: [0; 32],
+            payload: register_payloads[0].clone(),
+            signal_rssi: -50,
+            signal_snr: 10,
+        };
+        client_transport.send_packet(packet).await.unwrap();
+
+        // Receive Main Menu screen
+        let start_time = tokio::time::Instant::now();
+        while start_time.elapsed() < tokio::time::Duration::from_millis(1500) {
+            match tokio::time::timeout(tokio::time::Duration::from_millis(100), client_transport.receive_packet()).await {
+                Ok(Ok(packet)) => {
+                    if let Some(msg) = client_reassembler.process_packet([0; 32], &packet.payload).unwrap() {
+                        let _ = decode_test_msg(&mut client_cache, &msg, &static_dict);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // 3. Submit "weather" action from main menu (Form ID 10)
+        let weather_select_json = r#"{"submit":"weather"}"#;
+        let weather_msg = MeshBbsMessage::new(0x02, 0x02, 0x00, weather_select_json.as_bytes().to_vec());
+        let weather_payloads = weather_msg.to_fragments(200).unwrap();
+        let packet = RadioPacket {
+            is_broadcast: false,
+            src_node: client_key,
+            dst_node: [0; 32],
+            payload: weather_payloads[0].clone(),
+            signal_rssi: -50,
+            signal_snr: 10,
+        };
+        client_transport.send_packet(packet).await.unwrap();
+
+        // 4. Receive Weather screen
+        let mut weather_screen = None;
+        let start_time = tokio::time::Instant::now();
+        while start_time.elapsed() < tokio::time::Duration::from_millis(1500) {
+            match tokio::time::timeout(tokio::time::Duration::from_millis(100), client_transport.receive_packet()).await {
+                Ok(Ok(packet)) => {
+                    if let Some(msg) = client_reassembler.process_packet([0; 32], &packet.payload).unwrap() {
+                        weather_screen = Some(msg);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let resp = weather_screen.expect("Should receive Weather screen");
+        let uncompressed_payload = decode_test_msg(&mut client_cache, &resp, &static_dict);
+        let screen_text = String::from_utf8_lossy(&uncompressed_payload);
+        assert!(screen_text.contains("WEATHER FORECAST"), "Should contain WEATHER FORECAST header, got: {}", screen_text);
+
+        let _ = server_handle.await;
+    }
+
+    #[test]
+    fn test_voidtrader_app_syntax() {
+        let path = find_workspace_path("apps/voidtrader/main.lua");
+        let content = std::fs::read_to_string(path).unwrap();
+        let lua = mlua::Lua::new();
+        let chunk = lua.load(&content);
+        assert!(chunk.into_function().is_ok(), "voidtrader/main.lua should compile as valid Lua");
+    }
+
+    #[tokio::test]
+    async fn test_voidtrader_session_navigation() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let config = default_config();
+        let server_transport = Arc::new(MockSocketTransport::new_server("127.0.0.1:9096".to_string(), 0.0, 0, 200));
+
+        let server_handle = tokio::spawn(async move {
+            start_server(config, server_transport, Some(4)).await
+        });
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        let client_transport = MockSocketTransport::new_client("127.0.0.1:9096".to_string(), 0.0, 0, 200);
+        let client_key = [14u8; 32];
+        let mut client_cache = bifrost_transport::SessionPayloadCache::new(100);
+        let static_dict = bifrost_compression::CompressionDictionary::standard_static();
+
+        // Handshake
+        let handshake_msg = MeshBbsMessage::new(0x03, 0x01, 0x00, Vec::new());
+        let handshake_payloads = handshake_msg.to_fragments(200).unwrap();
+
+        let packet = RadioPacket {
+            is_broadcast: false,
+            src_node: client_key,
+            dst_node: [0; 32],
+            payload: handshake_payloads[0].clone(),
+            signal_rssi: -50,
+            signal_snr: 10,
+        };
+        client_transport.send_packet(packet).await.unwrap();
+
+        let mut client_reassembler = MessageReassembler::new();
+
+        // 1. Receive register screen
+        let start_time = tokio::time::Instant::now();
+        while start_time.elapsed() < tokio::time::Duration::from_millis(1500) {
+            match tokio::time::timeout(tokio::time::Duration::from_millis(100), client_transport.receive_packet()).await {
+                Ok(Ok(packet)) => {
+                    if let Some(msg) = client_reassembler.process_packet([0; 32], &packet.payload).unwrap() {
+                        let _ = decode_test_msg(&mut client_cache, &msg, &static_dict);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // 2. Register nickname "TraderBob"
+        let register_json = r#"{"nickname":"TraderBob","submit":"register"}"#;
+        let register_msg = MeshBbsMessage::new(0x02, 0x02, 0x00, register_json.as_bytes().to_vec());
+        let register_payloads = register_msg.to_fragments(200).unwrap();
+        let packet = RadioPacket {
+            is_broadcast: false,
+            src_node: client_key,
+            dst_node: [0; 32],
+            payload: register_payloads[0].clone(),
+            signal_rssi: -50,
+            signal_snr: 10,
+        };
+        client_transport.send_packet(packet).await.unwrap();
+
+        // Receive Main Menu screen
+        let start_time = tokio::time::Instant::now();
+        while start_time.elapsed() < tokio::time::Duration::from_millis(1500) {
+            match tokio::time::timeout(tokio::time::Duration::from_millis(100), client_transport.receive_packet()).await {
+                Ok(Ok(packet)) => {
+                    if let Some(msg) = client_reassembler.process_packet([0; 32], &packet.payload).unwrap() {
+                        let _ = decode_test_msg(&mut client_cache, &msg, &static_dict);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // 3. Submit "voidtrader" action from main menu (Form ID 10)
+        let voidtrader_select_json = r#"{"submit":"voidtrader"}"#;
+        let voidtrader_msg = MeshBbsMessage::new(0x02, 0x02, 0x00, voidtrader_select_json.as_bytes().to_vec());
+        let voidtrader_payloads = voidtrader_msg.to_fragments(200).unwrap();
+        let packet = RadioPacket {
+            is_broadcast: false,
+            src_node: client_key,
+            dst_node: [0; 32],
+            payload: voidtrader_payloads[0].clone(),
+            signal_rssi: -50,
+            signal_snr: 10,
+        };
+        client_transport.send_packet(packet).await.unwrap();
+
+        // 4. Receive Void Trader Sector screen
+        let mut vt_screen = None;
+        let start_time = tokio::time::Instant::now();
+        while start_time.elapsed() < tokio::time::Duration::from_millis(1500) {
+            match tokio::time::timeout(tokio::time::Duration::from_millis(100), client_transport.receive_packet()).await {
+                Ok(Ok(packet)) => {
+                    if let Some(msg) = client_reassembler.process_packet([0; 32], &packet.payload).unwrap() {
+                        vt_screen = Some(msg);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let resp = vt_screen.expect("Should receive Void Trader screen");
+        let uncompressed_payload = decode_test_msg(&mut client_cache, &resp, &static_dict);
+        let screen_text = String::from_utf8_lossy(&uncompressed_payload);
+        assert!(screen_text.contains("Sector: 1") || screen_text.contains("Alpha Stardock"), "Should contain Void Trader sector view, got: {}", screen_text);
+
+        let _ = server_handle.await;
+    }
+
+    #[test]
     fn test_parse_meshcore_advert_full_packet_framing() {
         let node_key = [0x42u8; 32];
         let mut packet_bytes = Vec::new();
@@ -3469,12 +3748,14 @@ max_asset_broadcast_duty_cycle = 0.15
             "minidungeon".to_string(),
             "admin".to_string(),
             "marketplace".to_string(),
-            "tradewars".to_string(),
+            "weather".to_string(),
+            "voidtrader".to_string(),
         ];
         let manifest_map = load_app_manifests(&enabled);
-        assert!(manifest_map.contains_key(&0x0101)); // dungeon banner
+        assert!(manifest_map.contains_key(&0x0101)); // main menu banner
         assert!(manifest_map.contains_key(&0x0102)); // main menu border
-        assert!(manifest_map.contains_key(&0x0103)); // main menu banner
+        assert!(manifest_map.contains_key(&0x0103)); // dungeon banner
+        assert!(manifest_map.contains_key(&0x0104)); // voidtrader banner
 
         // Verify each main.lua exists
         for app_id in &enabled {

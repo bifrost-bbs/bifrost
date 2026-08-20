@@ -794,6 +794,10 @@ async fn main() -> Result<()> {
         .await
         {
             Ok(Ok(packet)) => {
+                if !packet.is_broadcast && packet.dst_node != [0; 32] && packet.dst_node != client_key {
+                    continue;
+                }
+
                 if packet.src_node != [0; 32] && packet.src_node != connected_bbs_node {
                     connected_bbs_node = packet.src_node;
                     client_dict = load_client_dictionary(&connected_bbs_node);

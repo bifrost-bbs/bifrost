@@ -45,9 +45,10 @@ function menu.on_start(session)
         term.define_form(10)
         term.add_submit_button("read_boards", 2, 12)
         term.add_submit_button("door_game", 18, 12)
-        term.add_submit_button("profile", 34, 12)
+        term.add_submit_button("voidtrader", 34, 12)
         term.add_submit_button("marketplace", 2, 13)
-        term.add_submit_button("tradewars", 18, 13)
+        term.add_submit_button("weather", 18, 13)
+        term.add_submit_button("profile", 34, 13)
         
         -- Show Admin Panel only if the user has admin permission
         local is_admin = session.has_permission("admin")
@@ -75,10 +76,12 @@ function menu.on_start(session)
                 session.load_app("marketplace")
             elseif action == "door_game" then
                 session.load_app("minidungeon")
-            elseif action == "tradewars" then
-                session.load_app("tradewars")
+            elseif action == "voidtrader" then
+                session.load_app("voidtrader")
             elseif action == "profile" then
                 session.load_app("profile")
+            elseif action == "weather" then
+                session.load_app("weather")
             elseif action == "admin" then
                 if session.has_permission("admin") then
                     session.load_app("admin")

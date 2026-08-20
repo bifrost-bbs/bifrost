@@ -51,6 +51,11 @@ pub enum Opcode {
     CursorRel = 0xC4,
     RenderAsset = 0xC5,
     DeltaBlock = 0xC6,
+    FormStart = 0xD0,
+    FormField = 0xD1,
+    FormSubmit = 0xD2,
+    FormEnd = 0xD3,
+    DictToken = 0xFD,
     RawCp437 = 0xFE,
 }
 
@@ -69,6 +74,11 @@ impl Opcode {
             0xC4 => Some(Self::CursorRel),
             0xC5 => Some(Self::RenderAsset),
             0xC6 => Some(Self::DeltaBlock),
+            0xD0 => Some(Self::FormStart),
+            0xD1 => Some(Self::FormField),
+            0xD2 => Some(Self::FormSubmit),
+            0xD3 => Some(Self::FormEnd),
+            0xFD => Some(Self::DictToken),
             0xFE => Some(Self::RawCp437),
             _ => None,
         }
