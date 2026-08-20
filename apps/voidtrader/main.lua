@@ -126,8 +126,7 @@ local function init_player(session)
         fighters = 15,
         shields = 15,
         kills = 0,
-        trades = 0,
-        last_turn_day = os.date("%Y%m%d")
+        trades = 0
     }
 end
 
@@ -142,11 +141,8 @@ local function get_player(session)
     local user = db.get("users", session.node_id()) or {}
     if user.nickname then p.nickname = user.nickname end
 
-    -- Daily Turn Replenishment
-    local today = os.date("%Y%m%d")
-    if p.last_turn_day ~= today or p.turns <= 0 then
+    if not p.turns or p.turns <= 0 then
         p.turns = MAX_TURNS
-        p.last_turn_day = today
         db.set("vt_players", session.node_id(), p)
     end
 

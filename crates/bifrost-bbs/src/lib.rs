@@ -3529,14 +3529,14 @@ max_asset_broadcast_duty_cycle = 0.15
     async fn test_voidtrader_session_navigation() {
         let _ = env_logger::builder().is_test(true).try_init();
         let config = default_config();
-        let server_transport = Arc::new(MockSocketTransport::new_server("127.0.0.1:9096".to_string(), 0.0, 0, 200));
+        let server_transport = Arc::new(MockSocketTransport::new_server("127.0.0.1:9102".to_string(), 0.0, 0, 200));
 
         let server_handle = tokio::spawn(async move {
             start_server(config, server_transport, Some(4)).await
         });
 
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-        let client_transport = MockSocketTransport::new_client("127.0.0.1:9096".to_string(), 0.0, 0, 200);
+        let client_transport = MockSocketTransport::new_client("127.0.0.1:9102".to_string(), 0.0, 0, 200);
         let client_key = [14u8; 32];
         let mut client_cache = bifrost_transport::SessionPayloadCache::new(100);
         let static_dict = bifrost_compression::CompressionDictionary::standard_static();
