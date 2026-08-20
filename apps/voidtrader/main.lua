@@ -3,7 +3,11 @@
 
 local app = {}
 
-local NUM_SECTORS = 500
+local GRID_X = 25
+local GRID_Y = 25
+local GRID_Z = 5
+local NUM_SECTORS = GRID_X * GRID_Y * GRID_Z -- 3,125 sectors
+
 local MAX_TURNS = 120
 local WARP_FUEL_COST = 3
 local ORE_TO_FUEL_RATIO = 10
@@ -18,10 +22,10 @@ local SHIP_CLASSES = {
 
 -- Navigation Computers: name, max_jumps, max_favorites, price
 local NAV_COMPUTERS = {
-    { name = "Mark I Basic Nav", max_jumps = 4, max_favorites = 2, price = 0 },
-    { name = "Mark II Enhanced Nav", max_jumps = 8, max_favorites = 5, price = 1500 },
-    { name = "Mark III Hyper-Nav", max_jumps = 15, max_favorites = 10, price = 4500 },
-    { name = "Mark IV Quantum Core", max_jumps = 35, max_favorites = 25, price = 12000 }
+    { name = "Mark I Basic Nav", max_jumps = 5, max_favorites = 3, price = 0 },
+    { name = "Mark II Enhanced Nav", max_jumps = 10, max_favorites = 6, price = 1500 },
+    { name = "Mark III Hyper-Nav", max_jumps = 20, max_favorites = 12, price = 4500 },
+    { name = "Mark IV Quantum Core", max_jumps = 50, max_favorites = 30, price = 12000 }
 }
 
 -- Port Classes: [Ore, Org, Eqp] where 1 = Port BUYS (Player Sells), 0 = Port SELLS (Player Buys)
@@ -40,31 +44,38 @@ local PORT_CLASSES = {
 local BASE_PRICES = { ore = 15, org = 35, eqp = 80 }
 
 -- ---------------------------------------------------------------------------
+-- 3D GRID COORDINATES & TOPOLOGY
+-- ---------------------------------------------------------------------------
+
+local function to_coords(id)
+    local z = math.floor((id - 1) / (GRID_X * GRID_Y)) + 1
+    local rem = (id - 1) % (GRID_X * GRID_Y)
+    local y = math.floor(rem / GRID_X) + 1
+    local x = (rem % GRID_X) + 1
+    return x, y, z
+end
+
+local function to_sector_id(x, y, z)
+    if x < 1 or x > GRID_X or y < 1 or y > GRID_Y or z < 1 or z > GRID_Z then
+        return nil
+    end
+    return (z - 1) * (GRID_X * GRID_Y) + (y - 1) * GRID_X + x
+end
+
+-- ---------------------------------------------------------------------------
 -- UNIVERSE & PLAYER DATABASE MANAGEMENT
 -- ---------------------------------------------------------------------------
 
 local function init_universe()
     local sectors = {}
-    for i = 1, NUM_SECTORS do
-        -- 1 to 4 warps per sector (allowing dead-ends and max 4 warps)
-        local num_warps = math.random(1, 4)
-        local warps = {}
-        for _ = 1, num_warps do
-            local dest = math.random(1, NUM_SECTORS)
-            if dest ~= i then
-                local exists = false
-                for _, w in ipairs(warps) do
-                    if w == dest then exists = true break end
-                end
-                if not exists then table.insert(warps, dest) end
-            end
-        end
 
+    -- Step 1: Initialize sector nodes
+    for i = 1, NUM_SECTORS do
         local port = nil
         if i == 1 then
-            -- Sector 1 is Stardock Central Starbase
+            -- Sector 1 is Alpha Stardock Prime at (1, 1, 1)
             port = { class = 0, name = "Alpha Stardock Prime", ore = 9999, org = 9999, eqp = 9999 }
-        elseif math.random(1, 100) <= 60 then -- 60% chance of a port
+        elseif math.random(1, 100) <= 60 then -- 60% chance of port
             local p_class = math.random(1, 8)
             port = {
                 class = p_class,
@@ -75,7 +86,6 @@ local function init_universe()
             }
         end
 
-        -- Sector hazards and cosmic anomalies
         local hazard = nil
         local roll = math.random(1, 100)
         if i > 1 then
@@ -94,7 +104,7 @@ local function init_universe()
 
         sectors[i] = {
             id = i,
-            warps = warps,
+            warps = {},
             port = port,
             hazard = hazard,
             defense_fighters = 0,
@@ -102,14 +112,57 @@ local function init_universe()
         }
     end
 
-    -- Ensure Sector 1 has fixed bidirectional warps
-    sectors[1].warps = { 2, 3, 4, 5 }
-    for _, dest in ipairs({ 2, 3, 4, 5 }) do
-        local has_back = false
-        for _, w in ipairs(sectors[dest].warps) do
-            if w == 1 then has_back = true break end
+    -- Helper to add a strictly bidirectional link between adjacent cells
+    local function add_link(a, b)
+        if not a or not b or a == b then return false end
+        if #sectors[a].warps >= 4 or #sectors[b].warps >= 4 then return false end
+        for _, w in ipairs(sectors[a].warps) do
+            if w == b then return false end
         end
-        if not has_back then table.insert(sectors[dest].warps, 1) end
+        table.insert(sectors[a].warps, b)
+        table.insert(sectors[b].warps, a)
+        return true
+    end
+
+    -- Step 2: Ensure spanning tree connectivity from (1, 1, 1)
+    for z = 1, GRID_Z do
+        for y = 1, GRID_Y do
+            for x = 1, GRID_X do
+                local cur_id = to_sector_id(x, y, z)
+                if x > 1 and math.random(1, 100) <= 70 then
+                    add_link(cur_id, to_sector_id(x - 1, y, z))
+                end
+                if y > 1 and math.random(1, 100) <= 70 then
+                    add_link(cur_id, to_sector_id(x, y - 1, z))
+                end
+                if z > 1 and math.random(1, 100) <= 60 then
+                    add_link(cur_id, to_sector_id(x, y, z - 1))
+                end
+            end
+        end
+    end
+
+    -- Step 3: Ensure every sector has at least 1 bidirectional link (no isolated islands)
+    for i = 1, NUM_SECTORS do
+        if #sectors[i].warps == 0 then
+            local x, y, z = to_coords(i)
+            local neighbors = {
+                to_sector_id(x + 1, y, z), to_sector_id(x - 1, y, z),
+                to_sector_id(x, y + 1, z), to_sector_id(x, y - 1, z),
+                to_sector_id(x, y, z + 1), to_sector_id(x, y, z - 1)
+            }
+            -- Shuffle and pick first valid neighbor
+            for _ = 1, 6 do
+                local n_id = neighbors[math.random(1, #neighbors)]
+                if n_id and add_link(i, n_id) then break end
+            end
+        end
+    end
+
+    -- Ensure Sector 1 has its adjacent warps
+    local s1_neighbors = { to_sector_id(2, 1, 1), to_sector_id(1, 2, 1), to_sector_id(1, 1, 2) }
+    for _, n in ipairs(s1_neighbors) do
+        if n then add_link(1, n) end
     end
 
     db.set("vt_sectors", "all", sectors)
@@ -152,7 +205,8 @@ local function init_player(session)
         kills = 0,
         trades = 0,
         favorites = {},
-        plotted_course = {}
+        plotted_course = {},
+        explored = { [1] = true }
     }
 end
 
@@ -172,7 +226,6 @@ local function get_player(session)
         db.set("vt_players", session.node_id(), p)
     end
 
-    -- Refresh user nickname if updated
     local user = db.get("users", session.node_id()) or {}
     if user.nickname then p.nickname = user.nickname end
 
@@ -186,6 +239,8 @@ local function get_player(session)
     if p.nav_level == nil then p.nav_level = 1 end
     if p.favorites == nil then p.favorites = {} end
     if p.plotted_course == nil then p.plotted_course = {} end
+    if p.explored == nil then p.explored = { [1] = true } end
+    p.explored[p.sector] = true
 
     return p
 end
@@ -291,14 +346,22 @@ function app.view_sector(session, player, msg)
     local sec = sectors[player.sector] or sectors[1]
     local ship_info = SHIP_CLASSES[player.ship_class or 1] or SHIP_CLASSES[1]
 
+    -- Mark current sector and its direct warps as explored in Starchart
+    player.explored = player.explored or {}
+    player.explored[player.sector] = true
+    for _, w in ipairs(sec.warps or {}) do
+        player.explored[w] = true
+    end
+
     local is_fav = is_favorite_sector(player, player.sector)
     local is_stranded = (player.fuel < WARP_FUEL_COST) and (player.ore <= 0)
+    local cur_x, cur_y, cur_z = to_coords(player.sector)
 
     term.clear()
     term.render_asset("voidtrader_banner")
     term.move_to(2, 6)
     term.set_color(14, 0) -- Yellow
-    term.print(string.format("Sector: %-3d   Turns: %-3d   Credits: %-7d cr   Bank: %-7d cr", player.sector, player.turns, player.credits, player.bank or 0))
+    term.print(string.format("Sector: %-4d [%02d,%02d,%d]   Turns: %-3d   Credits: %-7d cr   Bank: %-7d cr", player.sector, cur_x, cur_y, cur_z, player.turns, player.credits, player.bank or 0))
 
     term.move_to(2, 7)
     term.set_color(11, 0) -- Cyan
@@ -308,7 +371,8 @@ function app.view_sector(session, player, msg)
     term.set_color(15, 0) -- White
     local warp_str = ""
     for _, w in ipairs(sec.warps or {}) do
-        warp_str = warp_str .. tostring(w) .. " "
+        local wx, wy, wz = to_coords(w)
+        warp_str = warp_str .. string.format("%d[%02d,%02d,%d] ", w, wx, wy, wz)
     end
     if warp_str == "" then warp_str = "(Dead End - No Warps)" end
     term.print("Warp Lanes: " .. warp_str)
@@ -377,10 +441,11 @@ function app.view_sector(session, player, msg)
     term.define_form(10)
     if is_stranded then
         term.add_submit_button("distress", 2, 14)
-        term.add_submit_button("scan", 14, 14)
-        term.add_submit_button("status", 22, 14)
-        term.add_submit_button("ranks", 32, 14)
-        term.add_submit_button("exit", 42, 14)
+        term.add_submit_button("chart", 14, 14)
+        term.add_submit_button("scan", 24, 14)
+        term.add_submit_button("status", 32, 14)
+        term.add_submit_button("ranks", 42, 14)
+        term.add_submit_button("exit", 52, 14)
     else
         term.add_submit_button("warp", 2, 14)
         if next_course_hop then
@@ -390,36 +455,38 @@ function app.view_sector(session, player, msg)
             term.add_submit_button("plot", 10, 14)
         end
 
+        term.add_submit_button("chart", 20, 14)
+
         if player.sector == 1 then
-            term.add_submit_button("stardock", 20, 14)
+            term.add_submit_button("stardock", 28, 14)
         elseif sec.port then
-            term.add_submit_button("dock", 20, 14)
+            term.add_submit_button("dock", 28, 14)
             if is_fav then
-                term.add_submit_button("unfav", 28, 14)
+                term.add_submit_button("unfav", 36, 14)
             else
-                term.add_submit_button("fav", 28, 14)
+                term.add_submit_button("fav", 36, 14)
             end
         end
 
         -- Hazard Interaction Buttons
         if sec.hazard == "WORMHOLE" then
-            term.add_submit_button("wormhole", 36, 14)
+            term.add_submit_button("wormhole", 44, 14)
         elseif sec.hazard == "ASTEROID_FIELD" then
-            term.add_submit_button("mine_ore", 36, 14)
+            term.add_submit_button("mine_ore", 44, 14)
         elseif sec.hazard == "DERELICT_GRAVEYARD" then
-            term.add_submit_button("salvage", 36, 14)
+            term.add_submit_button("salvage", 44, 14)
         elseif sec.hazard == "BLACK_HOLE" then
-            term.add_submit_button("slingshot", 36, 14)
+            term.add_submit_button("slingshot", 44, 14)
         end
 
         if player.ore > 0 and player.fuel < ship_info.fuel_max then
-            term.add_submit_button("refuel", 48, 14)
+            term.add_submit_button("refuel", 56, 14)
         end
 
-        term.add_submit_button("scan", 56, 14)
-        term.add_submit_button("status", 64, 14)
-        term.add_submit_button("ranks", 72, 14)
-        term.add_submit_button("exit", 2, 16)
+        term.add_submit_button("scan", 64, 14)
+        term.add_submit_button("status", 72, 14)
+        term.add_submit_button("ranks", 2, 16)
+        term.add_submit_button("exit", 10, 16)
     end
     term.flush_form()
 
@@ -433,6 +500,9 @@ function app.view_sector(session, player, msg)
             app.execute_autowarp(session, player)
         elseif act == "plot" then
             app.plot_menu(session, player)
+        elseif act == "chart" then
+            local _, _, z = to_coords(player.sector)
+            app.starchart_view(session, player, z, 1)
         elseif act == "dock" then
             app.port_menu(session, player)
         elseif act == "stardock" then
@@ -469,6 +539,127 @@ function app.view_sector(session, player, msg)
 end
 
 -- ---------------------------------------------------------------------------
+-- 3D STARCHART VIEWER (FOG OF WAR DISCOVERY)
+-- ---------------------------------------------------------------------------
+
+function app.starchart_view(session, player, plane_z, y_page)
+    plane_z = math.max(1, math.min(GRID_Z, plane_z or 1))
+    y_page = y_page or 1 -- 1: rows 1..13, 2: rows 14..25
+    local sectors = get_sectors()
+
+    local cur_x, cur_y, cur_z = to_coords(player.sector)
+
+    term.clear()
+    term.move_to(2, 2)
+    term.set_color(11, 0)
+    term.print(string.format("=== 3D STARCHART - PLANE Z=%d/%d (Page %d/2) ===", plane_z, GRID_Z, y_page))
+    term.move_to(2, 3)
+    term.set_color(14, 0)
+    term.print(string.format("Your Position: Sector %d [%02d, %02d, %d]", player.sector, cur_x, cur_y, cur_z))
+
+    term.move_to(2, 4)
+    term.set_color(15, 0)
+    term.print("Legend: @=You  S=Stardock  P=Port  A=Asteroid  W=Wormhole  B=Singularity  +=Space  .=Fog")
+
+    -- Column header numbers (X: 1..25)
+    term.move_to(2, 5)
+    term.set_color(7, 0)
+    term.print(" Y\\X 01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25")
+
+    local y_start = (y_page == 1) and 1 or 14
+    local y_end = (y_page == 1) and 13 or 25
+
+    player.explored = player.explored or {}
+
+    for row_y = y_start, y_end do
+        local screen_line = 5 + (row_y - y_start + 1)
+        term.move_to(2, screen_line)
+        term.set_color(7, 0)
+        term.print(string.format("%02d:  ", row_y))
+
+        for col_x = 1, GRID_X do
+            local sec_id = to_sector_id(col_x, row_y, plane_z)
+            local is_here = (player.sector == sec_id)
+            local is_exp = player.explored[sec_id]
+
+            local ch = "."
+            local col = 8 -- Grey fog
+
+            if is_here then
+                ch = "@"
+                col = 14 -- Bright Yellow
+            elseif is_exp then
+                local s_data = sectors[sec_id]
+                if sec_id == 1 then
+                    ch = "S"
+                    col = 10 -- Green Stardock
+                elseif s_data and s_data.hazard == "BLACK_HOLE" then
+                    ch = "B"
+                    col = 12 -- Red
+                elseif s_data and s_data.hazard == "WORMHOLE" then
+                    ch = "W"
+                    col = 13 -- Magenta
+                elseif s_data and s_data.hazard == "ASTEROID_FIELD" then
+                    ch = "A"
+                    col = 14 -- Yellow
+                elseif s_data and s_data.hazard == "COSMIC_STORM" then
+                    ch = "C"
+                    col = 11 -- Cyan
+                elseif s_data and s_data.hazard == "DERELICT_GRAVEYARD" then
+                    ch = "D"
+                    col = 15 -- White
+                elseif s_data and s_data.port then
+                    ch = "P"
+                    col = 10 -- Green
+                else
+                    ch = "+"
+                    col = 7 -- Light Grey space
+                end
+            end
+
+            term.set_color(col, 0)
+            term.print(ch .. " ")
+        end
+    end
+
+    term.define_form(35)
+    if plane_z > 1 then
+        term.add_submit_button("plane_down", 2, 20)
+    end
+    if plane_z < GRID_Z then
+        term.add_submit_button("plane_up", 16, 20)
+    end
+    if y_page == 1 then
+        term.add_submit_button("rows_14_25", 30, 20)
+    else
+        term.add_submit_button("rows_1_13", 30, 20)
+    end
+    term.add_submit_button("back", 48, 20)
+    term.flush_form()
+
+    session.await_input(35, function(sub)
+        if type(sub) == "string" then app.starchart_view(session, player, plane_z, y_page) return end
+        local act = sub.submit
+        if act == "back" then
+            app.view_sector(session, player, "")
+            return
+        end
+
+        if act == "plane_down" then
+            app.starchart_view(session, player, plane_z - 1, y_page)
+        elseif act == "plane_up" then
+            app.starchart_view(session, player, plane_z + 1, y_page)
+        elseif act == "rows_14_25" then
+            app.starchart_view(session, player, plane_z, 2)
+        elseif act == "rows_1_13" then
+            app.starchart_view(session, player, plane_z, 1)
+        else
+            app.starchart_view(session, player, plane_z, y_page)
+        end
+    end)
+end
+
+-- ---------------------------------------------------------------------------
 -- HAZARD INTERACTIONS: WORMHOLE, MINING, SALVAGE, SLINGSHOT
 -- ---------------------------------------------------------------------------
 
@@ -480,14 +671,12 @@ function app.traverse_wormhole(session, player)
 
     player.turns = player.turns - 1
 
-    -- Pick a random distant sector across the 500 sectors
     local dest = math.random(1, NUM_SECTORS)
     while dest == player.sector do dest = math.random(1, NUM_SECTORS) end
 
     player.sector = dest
-    player.plotted_course = {} -- Clear plotted course on jump
+    player.plotted_course = {}
 
-    -- Small chance of turbulence shield damage
     local dmg_msg = ""
     if math.random(1, 100) <= 25 then
         local dmg = math.random(2, 5)
@@ -518,13 +707,11 @@ function app.mine_asteroid_field(session, player)
 
     local roll = math.random(1, 100)
     if roll <= 65 then
-        -- Mining Success
         local yield = math.min(free_holds, math.random(6, 18))
         player.ore = player.ore + yield
         save_player(session, player)
         app.view_sector(session, player, string.format("Mining lasers extracted %d units of raw Fuel Ore! (Free holds: %d)", yield, free_holds - yield))
     elseif roll <= 85 then
-        -- Micro-meteorite impact while mining
         local yield = math.min(free_holds, math.random(3, 8))
         player.ore = player.ore + yield
         local dmg = math.random(2, 6)
@@ -536,7 +723,6 @@ function app.mine_asteroid_field(session, player)
         save_player(session, player)
         app.view_sector(session, player, string.format("Mined %d Fuel Ore, but micrometeorites struck ship (%d shield dmg)!", yield, dmg))
     else
-        -- Disturbed hostile pirate mining drone
         app.pirate_encounter(session, player, math.random(8, 20))
     end
 end
@@ -581,7 +767,6 @@ function app.black_hole_slingshot(session, player)
         return
     end
 
-    -- Slingshot propels player 2 steps forward
     local next1 = warps[math.random(1, #warps)]
     local next2 = next1
     local sec2 = sectors[next1]
@@ -638,6 +823,7 @@ end
 function app.plot_menu(session, player)
     local sectors = get_sectors()
     local nav_info = NAV_COMPUTERS[player.nav_level or 1] or NAV_COMPUTERS[1]
+    local cur_x, cur_y, cur_z = to_coords(player.sector)
 
     term.clear()
     term.render_asset("voidtrader_banner")
@@ -646,7 +832,7 @@ function app.plot_menu(session, player)
     term.print(string.format("=== HYPERSPACE COURSE PLOTTER (%s) ===", nav_info.name))
     term.move_to(2, 6)
     term.set_color(14, 0)
-    term.print(string.format("Location: Sector %d | Universe: %d Sectors | Max Jumps Plottable: %d", player.sector, NUM_SECTORS, nav_info.max_jumps))
+    term.print(string.format("Position: Sec %d [%02d,%02d,%d] | Max Jumps Plottable: %d", player.sector, cur_x, cur_y, cur_z, nav_info.max_jumps))
 
     term.move_to(2, 8)
     term.set_color(15, 0)
@@ -655,10 +841,11 @@ function app.plot_menu(session, player)
         for idx, fav_sec in ipairs(player.favorites) do
             if idx <= 4 then
                 local sec = sectors[fav_sec]
+                local fx, fy, fz = to_coords(fav_sec)
                 local port_name = (sec and sec.port and sec.port.name) or "Deep Space"
                 term.move_to(4, 8 + idx)
                 term.set_color(10, 0)
-                term.print(string.format("[%d] Sector %-3d - %s", idx, fav_sec, port_name))
+                term.print(string.format("[%d] Sector %-4d [%02d,%02d,%d] - %s", idx, fav_sec, fx, fy, fz, port_name))
             end
         end
     else
@@ -812,15 +999,19 @@ end
 function app.nav_prompt(session, player)
     local sectors = get_sectors()
     local sec = sectors[player.sector]
+    local cur_x, cur_y, cur_z = to_coords(player.sector)
 
     term.clear()
     term.render_asset("voidtrader_banner")
     term.move_to(2, 6)
     term.set_color(11, 0)
-    term.print(string.format("Current Sector: %d (Turns: %d | Fuel: %d)", player.sector, player.turns, player.fuel))
+    term.print(string.format("Current Sector: %d [%02d,%02d,%d] (Turns: %d | Fuel: %d)", player.sector, cur_x, cur_y, cur_z, player.turns, player.fuel))
     term.move_to(2, 7)
     local warp_str = ""
-    for _, w in ipairs(sec.warps or {}) do warp_str = warp_str .. tostring(w) .. " " end
+    for _, w in ipairs(sec.warps or {}) do
+        local wx, wy, wz = to_coords(w)
+        warp_str = warp_str .. string.format("%d[%02d,%02d,%d] ", w, wx, wy, wz)
+    end
     if warp_str == "" then warp_str = "(Dead End)" end
     term.print("Available Warp Coordinates: " .. warp_str)
 
@@ -1453,7 +1644,7 @@ function app.outfitter_menu(session, player)
             end
         elseif act == "top_fuel" then
             local missing = ship_info.fuel_max - player.fuel
-            local max_afford = player.credits -- 1 cr per fuel unit
+            local max_afford = player.credits
             local to_add = math.min(missing, max_afford)
             if to_add > 0 then
                 player.credits = player.credits - to_add
@@ -1524,12 +1715,13 @@ end
 function app.scan_sector(session, player)
     local sectors = get_sectors()
     local sec = sectors[player.sector]
+    local cur_x, cur_y, cur_z = to_coords(player.sector)
 
     term.clear()
     term.render_asset("voidtrader_banner")
     term.move_to(2, 5)
     term.set_color(11, 0)
-    term.print(string.format("=== LONG RANGE SCAN (Sector %d) ===", player.sector))
+    term.print(string.format("=== LONG RANGE SCAN (Sector %d [%02d,%02d,%d]) ===", player.sector, cur_x, cur_y, cur_z))
 
     if sec.hazard == "COSMIC_STORM" then
         term.move_to(2, 7)
@@ -1541,13 +1733,17 @@ function app.scan_sector(session, player)
     else
         term.move_to(2, 7)
         term.set_color(14, 0)
-        term.print("Target   Port Status           Hazards          Adjacent Warps")
+        term.print("Target   Coords       Port Status           Hazards          Adjacent Warps")
         term.move_to(2, 8)
-        term.print("------   -----------           -------          --------------")
+        term.print("------   ------       -----------           -------          --------------")
+
+        player.explored = player.explored or {}
 
         for idx, dest in ipairs(sec.warps or {}) do
+            player.explored[dest] = true -- Sensor discovery
             term.move_to(2, 8 + idx)
             local d_sec = sectors[dest]
+            local dx, dy, dz = to_coords(dest)
             local port_str = "Deep Space (None)"
             if dest == 1 then
                 port_str = "Stardock Prime"
@@ -1561,7 +1757,7 @@ function app.scan_sector(session, player)
             if w_list == "" then w_list = "(Dead End)" end
 
             term.set_color(15, 0)
-            term.print(string.format("Sec %-3d  %-20s  %-15s  %s", dest, port_str, hazard_str, w_list))
+            term.print(string.format("Sec %-4d [%02d,%02d,%d]   %-20s  %-15s  %s", dest, dx, dy, dz, port_str, hazard_str, w_list))
         end
     end
 
@@ -1575,6 +1771,7 @@ end
 function app.view_status(session, player)
     local ship_info = SHIP_CLASSES[player.ship_class or 1] or SHIP_CLASSES[1]
     local nav_info = NAV_COMPUTERS[player.nav_level or 1] or NAV_COMPUTERS[1]
+    local cur_x, cur_y, cur_z = to_coords(player.sector)
 
     term.clear()
     term.render_asset("voidtrader_banner")
@@ -1586,7 +1783,7 @@ function app.view_status(session, player)
     term.set_color(15, 0)
     term.print(string.format("Commander: %-15s   Ship Class: %s", player.nickname, ship_info.name))
     term.move_to(2, 8)
-    term.print(string.format("Location:  Sector %-8d   Turns Left: %d / %d   Fuel: %d / %d", player.sector, player.turns, MAX_TURNS, player.fuel, ship_info.fuel_max))
+    term.print(string.format("Location:  Sector %d [%02d,%02d,%d]   Turns: %d/%d   Fuel: %d/%d", player.sector, cur_x, cur_y, cur_z, player.turns, MAX_TURNS, player.fuel, ship_info.fuel_max))
     term.move_to(2, 9)
     term.print(string.format("Cash:      %-10d cr   Bank Vault: %d cr      Nav: %s", player.credits, player.bank or 0, nav_info.name))
     term.move_to(2, 10)
