@@ -229,7 +229,7 @@ function app.view_sector(session, player, msg)
     term.move_to(2, 9)
     if player.sector == 1 then
         term.set_color(10, 0) -- Green
-        term.print("Facilities: [ Alpha Stardock Prime ] (Shipyard, Bank, Outfitter, Lounge)")
+        term.print("Facilities: [ Alpha Stardock Prime ] (Shipyard, Bank, Outfitter)")
     elseif sec.port then
         term.set_color(10, 0)
         local p_info = PORT_CLASSES[sec.port.class] or { name = "Trading Station" }
@@ -243,12 +243,6 @@ function app.view_sector(session, player, msg)
         term.move_to(2, 10)
         term.set_color(12, 0) -- Bright Red
         term.print("HAZARD DETECTED: " .. sec.hazard)
-    end
-
-    if (sec.defense_fighters or 0) > 0 then
-        term.move_to(2, 10)
-        term.set_color(13, 0)
-        term.print(string.format("Sector Guard: %d Combat Drones deployed by %s", sec.defense_fighters, sec.defense_owner or "Unknown"))
     end
 
     term.move_to(2, 11)
@@ -427,7 +421,6 @@ function app.pirate_encounter(session, player, enemy_fighters)
                 app.pirate_encounter(session, player, enemy_fighters)
             end
         elseif act == "shields_up" then
-            -- Tactical defensive posture: recharge shields slightly or absorb hit
             local e_dmg = math.random(1, math.max(2, math.floor(enemy_fighters * 0.4)))
             if player.shields > 0 then
                 player.shields = math.max(0, player.shields - e_dmg)
@@ -481,11 +474,11 @@ function app.player_death(session, player, cause)
     term.render_asset("voidtrader_banner")
     term.move_to(2, 6)
     term.set_color(12, 0)
-    term.print("══════════════════════════════════════════════════════════")
+    term.print("==========================================================")
     term.move_to(2, 7)
     term.print("                   VESSEL DESTROYED                       ")
     term.move_to(2, 8)
-    term.print("══════════════════════════════════════════════════════════")
+    term.print("==========================================================")
     term.move_to(2, 10)
     term.set_color(15, 0)
     term.print(cause)
@@ -509,7 +502,7 @@ function app.player_death(session, player, cause)
 end
 
 -- ---------------------------------------------------------------------------
--- COMMODITY TRADING AT STARPORTS
+-- COMMODITY TRADING AT STARPORTS (WITH CUSTOM QUANTITY SPECIFICATION)
 -- ---------------------------------------------------------------------------
 
 function app.port_menu(session, player)
@@ -533,7 +526,7 @@ function app.port_menu(session, player)
     term.set_color(14, 0)
     term.print("Commodity    Port Supply   In Cargo   Station Action   Market Price")
     term.move_to(2, 8)
-    term.print("─────────    ───────────   ────────   ──────────────   ────────────")
+    term.print("---------    -----------   --------   --------------   ------------")
 
     local function port_item(y, name, port_amt, pl_amt, rule, base_p)
         term.move_to(2, y)
@@ -570,51 +563,117 @@ function app.port_menu(session, player)
             return
         end
 
-        local function execute_trade(item_key, rule, price, port_amt, pl_amt, item_name)
-            local free_h = player.holds - (player.ore + player.org + player.eqp)
-            if rule == 1 then
-                -- Station buys from player -> player sells cargo
-                if pl_amt > 0 then
-                    local total_val = pl_amt * price
-                    player.credits = player.credits + total_val
-                    player[item_key] = 0
-                    port[item_key] = port[item_key] + pl_amt
-                    player.trades = (player.trades or 0) + 1
-                    save_player(session, player)
-                    save_sectors(sectors)
-                    app.port_menu(session, player)
-                else
-                    app.view_sector(session, player, "You do not have any " .. item_name .. " in cargo.")
-                end
-            else
-                -- Station sells to player -> player buys cargo
-                if free_h <= 0 then
-                    app.view_sector(session, player, "Cargo bays full! Upgrade holds at Stardock.")
-                    return
-                end
-                local max_afford = math.floor(player.credits / price)
-                local buy_qty = math.min(free_h, max_afford, port_amt)
-                if buy_qty > 0 then
-                    player.credits = player.credits - (buy_qty * price)
-                    player[item_key] = player[item_key] + buy_qty
-                    port[item_key] = port[item_key] - buy_qty
-                    player.trades = (player.trades or 0) + 1
-                    save_player(session, player)
-                    save_sectors(sectors)
-                    app.port_menu(session, player)
-                else
-                    app.view_sector(session, player, "Insufficient credits or out of station stock.")
-                end
-            end
+        if act == "trade_ore" then
+            app.trade_quantity_prompt(session, player, "ore", "Fuel Ore", p_rules[1], pr_ore, port)
+        elseif act == "trade_org" then
+            app.trade_quantity_prompt(session, player, "org", "Organics", p_rules[2], pr_org, port)
+        elseif act == "trade_eqp" then
+            app.trade_quantity_prompt(session, player, "eqp", "Equipment", p_rules[3], pr_eqp, port)
+        end
+    end)
+end
+
+function app.trade_quantity_prompt(session, player, item_key, item_name, rule, price, port)
+    local sectors = get_sectors()
+    local free_holds = player.holds - (player.ore + player.org + player.eqp)
+    local pl_amt = player[item_key] or 0
+    local port_amt = port[item_key] or 0
+
+    local is_station_buying = (rule == 1)
+    local max_qty = 0
+
+    if is_station_buying then
+        -- Station is BUYING from player (Player SELLS)
+        max_qty = pl_amt
+    else
+        -- Station is SELLING to player (Player BUYS)
+        local max_afford = math.floor(player.credits / price)
+        max_qty = math.min(free_holds, max_afford, port_amt)
+    end
+
+    term.clear()
+    term.render_asset("voidtrader_banner")
+    term.move_to(2, 5)
+    term.set_color(10, 0)
+    term.print("=== COMMODITY TRANSACTION: " .. string.upper(item_name) .. " ===")
+
+    term.move_to(2, 7)
+    term.set_color(15, 0)
+    if is_station_buying then
+        term.print(string.format("Mode: Station is BUYING from you (You SELL) @ %d cr/unit", price))
+        term.move_to(2, 8)
+        term.print(string.format("Cargo on Ship: %d units | Maximum Tradable: %d units", pl_amt, max_qty))
+    else
+        term.print(string.format("Mode: Station is SELLING to you (You BUY) @ %d cr/unit", price))
+        term.move_to(2, 8)
+        term.print(string.format("Port Stock: %d | Empty Holds: %d | Max Afford: %d", port_amt, free_holds, math.floor(player.credits / price)))
+        term.move_to(2, 9)
+        term.print(string.format("Maximum Tradable: %d units", max_qty))
+    end
+
+    term.move_to(2, 11)
+    term.set_color(14, 0)
+    term.print(string.format("Cash: %d cr   |   Holds: %d / %d", player.credits, (player.holds - free_holds), player.holds))
+
+    term.define_form(55)
+    term.move_to(2, 13)
+    term.set_color(15, 0)
+    term.print("Trade Quantity: ")
+    term.add_input_field("qty", 18, 13, 6, tostring(max_qty))
+
+    term.add_submit_button("trade", 2, 15)
+    term.add_submit_button("trade_all", 14, 15)
+    term.add_submit_button("cancel", 28, 15)
+    term.flush_form()
+
+    session.await_input(55, function(sub)
+        if type(sub) == "string" then
+            app.trade_quantity_prompt(session, player, item_key, item_name, rule, price, port)
+            return
         end
 
-        if act == "trade_ore" then
-            execute_trade("ore", p_rules[1], pr_ore, port.ore, player.ore, "Fuel Ore")
-        elseif act == "trade_org" then
-            execute_trade("org", p_rules[2], pr_org, port.org, player.org, "Organics")
-        elseif act == "trade_eqp" then
-            execute_trade("eqp", p_rules[3], pr_eqp, port.eqp, player.eqp, "Equipment")
+        local act = sub.submit
+        if act == "cancel" then
+            app.port_menu(session, player)
+            return
         end
+
+        local qty_to_trade = 0
+        if act == "trade_all" then
+            qty_to_trade = max_qty
+        else
+            local input_num = tonumber(sub.qty)
+            if not input_num or input_num < 0 then
+                app.port_menu(session, player)
+                return
+            end
+            qty_to_trade = math.min(input_num, max_qty)
+        end
+
+        if qty_to_trade <= 0 then
+            app.port_menu(session, player)
+            return
+        end
+
+        if is_station_buying then
+            -- Player SELLS qty_to_trade
+            local total_val = qty_to_trade * price
+            player.credits = player.credits + total_val
+            player[item_key] = player[item_key] - qty_to_trade
+            port[item_key] = port[item_key] + qty_to_trade
+            player.trades = (player.trades or 0) + 1
+        else
+            -- Player BUYS qty_to_trade
+            local total_cost = qty_to_trade * price
+            player.credits = player.credits - total_cost
+            player[item_key] = player[item_key] + qty_to_trade
+            port[item_key] = port[item_key] - qty_to_trade
+            player.trades = (player.trades or 0) + 1
+        end
+
+        save_player(session, player)
+        save_sectors(sectors)
+        app.port_menu(session, player)
     end)
 end
 
@@ -627,11 +686,11 @@ function app.stardock_menu(session, player)
     term.render_asset("voidtrader_banner")
     term.move_to(2, 5)
     term.set_color(10, 0)
-    term.print("══════════════════════════════════════════════════════════════")
+    term.print("==============================================================")
     term.move_to(2, 6)
     term.print("               ALPHA STARDOCK PRIME - CENTRAL HUB              ")
     term.move_to(2, 7)
-    term.print("══════════════════════════════════════════════════════════════")
+    term.print("==============================================================")
 
     term.move_to(2, 9)
     term.set_color(14, 0)
@@ -671,7 +730,7 @@ function app.shipyard_menu(session, player)
     term.set_color(14, 0)
     term.print("Ship Class            Max Holds   Combat Drones   Shields   Price")
     term.move_to(2, 8)
-    term.print("──────────            ─────────   ─────────────   ───────   ─────")
+    term.print("----------            ---------   -------------   -------   -----")
 
     for i, ship in ipairs(SHIP_CLASSES) do
         term.move_to(2, 8 + i)
@@ -834,7 +893,7 @@ function app.scan_sector(session, player)
     term.set_color(14, 0)
     term.print("Target   Port Status           Hazards          Adjacent Warps")
     term.move_to(2, 8)
-    term.print("──────   ───────────           ───────          ──────────────")
+    term.print("------   -----------           -------          --------------")
 
     for idx, dest in ipairs(sec.warps or {}) do
         term.move_to(2, 8 + idx)
@@ -882,11 +941,11 @@ function app.view_status(session, player)
     term.set_color(11, 0)
     term.print(string.format("Cargo Hold Manifest: %d / %d bays utilized", (player.ore + player.org + player.eqp), player.holds))
     term.move_to(2, 13)
-    term.print(string.format("  • Fuel Ore:  %-5d units   (Est. Value: %d cr)", player.ore, player.ore * BASE_PRICES.ore))
+    term.print(string.format("  * Fuel Ore:  %-5d units   (Est. Value: %d cr)", player.ore, player.ore * BASE_PRICES.ore))
     term.move_to(2, 14)
-    term.print(string.format("  • Organics:  %-5d units   (Est. Value: %d cr)", player.org, player.org * BASE_PRICES.org))
+    term.print(string.format("  * Organics:  %-5d units   (Est. Value: %d cr)", player.org, player.org * BASE_PRICES.org))
     term.move_to(2, 15)
-    term.print(string.format("  • Equipment: %-5d units   (Est. Value: %d cr)", player.eqp, player.eqp * BASE_PRICES.eqp))
+    term.print(string.format("  * Equipment: %-5d units   (Est. Value: %d cr)", player.eqp, player.eqp * BASE_PRICES.eqp))
 
     term.define_form(95)
     term.add_submit_button("back", 2, 17)
@@ -906,7 +965,7 @@ function app.view_leaderboard(session, player)
     term.set_color(11, 0)
     term.print("Rank   Commander           Vessel Class        Sector   Kills   Net Worth")
     term.move_to(2, 8)
-    term.print("────   ─────────           ────────────        ──────   ─────   ─────────")
+    term.print("----   ---------           ------------        ------   -----   ---------")
 
     for i = 1, math.min(10, math.max(1, #board)) do
         term.move_to(2, 8 + i)
