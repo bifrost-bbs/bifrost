@@ -1,0 +1,7 @@
+# form_id=85
+# tag,id,label,col,row,key
+deposit_all,deposit_all,DepositAll,2,10,A
+deposit_half,deposit_half,DepositHalf,18,10,H
+withdraw_1000,withdraw_1000,Withdraw1k,36,10,W
+withdraw_all,withdraw_all,WithdrawAll,54,10,X
+back,back,Back,2,12,B

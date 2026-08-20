@@ -1,0 +1,6 @@
+# form_id=70
+# tag,id,label,col,row,key
+shipyard,shipyard,Shipyard,2,12,S
+outfitter,outfitter,Outfitter,16,12,O
+bank,bank,Bank,30,12,B
+launch,launch,Launch,42,12,L

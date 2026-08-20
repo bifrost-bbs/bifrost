@@ -1,0 +1,25 @@
+# form_id=10
+# tag,id,label,col,row,key
+north,warp_north,North,2,14,N
+south,warp_south,South,10,14,S
+east,warp_east,East,18,14,E
+west,warp_west,West,26,14,W
+up,warp_up,Up,34,14,U
+down,warp_down,Down,40,14,D
+autowarp,autowarp,Autowarp,48,14,A
+chart,chart,Chart,58,14,C
+stardock,stardock,Stardock,2,16,K
+dock,dock,Dock,2,16,K
+fav,fav,Fav,12,16,F
+unfav,unfav,Unfav,12,16,F
+wormhole,wormhole,Wormhole,20,16,W
+mine_ore,mine_ore,MineOre,20,16,M
+salvage,salvage,Salvage,20,16,L
+slingshot,slingshot,Slingshot,20,16,G
+refuel,refuel,Refuel,32,16,U
+plot,plot,Plot,40,16,P
+scan,scan,Scan,46,16,S
+status,status,Status,52,16,T
+ranks,ranks,Ranks,60,16,R
+exit,exit,Exit,68,16,X
+distress,distress,Distress,2,14,D

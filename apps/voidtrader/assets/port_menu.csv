@@ -1,0 +1,7 @@
+# form_id=50
+# tag,id,label,col,row,key
+trade_ore,trade_ore,TradeOre,2,15,O
+trade_org,trade_org,TradeOrg,16,15,G
+trade_eqp,trade_eqp,TradeEqp,30,15,E
+refuel_tank,refuel_tank,RefuelTank,44,15,R
+depart,depart,Depart,60,15,D

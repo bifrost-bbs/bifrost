@@ -98,14 +98,24 @@ function app.view_room(session, player, msg)
     term.clear()
     term.render_asset("dungeon_banner")
     term.move_to(2, 6)
-    term.set_color(14, 0)
-    term.print(string.format("Level %d - Lvl %d %s", player.dungeon_level, player.level, session.callsign()))
-    term.move_to(2, 7)
-    term.set_color(7, 0)
-    term.print(string.format("HP: %d/%d | Gold: %d | XP: %d/%d | Pots: %d", player.hp, player.max_hp, player.gold, player.xp, xp_needed(player.level), player.potions))
-    term.move_to(2, 8)
-    term.set_color(10, 0)
-    term.print(string.format("STR:%d DEX:%d CON:%d INT:%d WIS:%d CHA:%d", player.str, player.dex, player.con, player.int, player.wis, player.cha))
+
+    term.render_template("dungeon_hud", {
+        tostring(player.dungeon_level),
+        tostring(player.level),
+        session.callsign() or "Adventurer",
+        tostring(player.hp),
+        tostring(player.max_hp),
+        tostring(player.gold),
+        tostring(player.xp),
+        tostring(xp_needed(player.level)),
+        tostring(player.potions),
+        tostring(player.str),
+        tostring(player.dex),
+        tostring(player.con),
+        tostring(player.int),
+        tostring(player.wis),
+        tostring(player.cha)
+    })
 
     term.move_to(2, 10)
     term.set_color(11, 0)
@@ -137,21 +147,17 @@ function app.view_room(session, player, msg)
         term.print(row_str)
     end
 
-    term.define_form(10)
-    local btn_y = 12
-    if player.y > 1 then term.add_submit_button("north", 2, btn_y) end
-    if player.y < 5 then term.add_submit_button("south", 10, btn_y) end
-    if player.x < 5 then term.add_submit_button("east", 18, btn_y) end
-    if player.x > 1 then term.add_submit_button("west", 26, btn_y) end
-
-    btn_y = 14
     local current_room = player.map[player.y][player.x]
-    if current_room.type == "EXIT" then
-        term.add_submit_button("descend", 2, btn_y)
-    end
-    term.add_submit_button("rest", 12, btn_y)
-    term.add_submit_button("quit", 22, btn_y)
-    
+    term.render_menu("dungeon_menu", {
+        north = (player.y > 1),
+        south = (player.y < 5),
+        east = (player.x < 5),
+        west = (player.x > 1),
+        potion = (player.potions > 0 and player.hp < player.max_hp),
+        rest = true,
+        descend = (current_room.type == "EXIT"),
+        exit = true
+    })
     term.flush_form()
 
     session.await_input(10, function(sub)
@@ -163,6 +169,15 @@ function app.view_room(session, player, msg)
         elseif act == "east" then player.x = player.x + 1; app.do_event(session, player)
         elseif act == "west" then player.x = player.x - 1; app.do_event(session, player)
         elseif act == "descend" then app.descend(session, player)
+        elseif act == "potion" then
+            if player.potions > 0 then
+                player.potions = player.potions - 1
+                player.hp = math.min(player.max_hp, player.hp + 15)
+                save_player(session, player)
+                app.view_room(session, player, "Gulp! Restored 15 HP.")
+            else
+                app.view_room(session, player, "No potions left!")
+            end
         elseif act == "rest" then
             local cost = rest_cost(player)
             if player.gold >= cost then
@@ -173,7 +188,7 @@ function app.view_room(session, player, msg)
             else
                 app.view_room(session, player, "Not enough Gold to rest! Need " .. cost .. "G.")
             end
-        elseif act == "quit" then
+        elseif act == "exit" or act == "quit" then
             save_player(session, player)
             session.load_app("main_menu")
         else

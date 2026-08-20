@@ -512,6 +512,34 @@ pub fn load_app_manifests(enabled_apps: &[String]) -> HashMap<u16, (String, Stri
     map
 }
 
+pub use bifrost_ansi::{parse_menu_csv, substitute_template, MenuAssetDef, MenuButtonDef};
+
+/// Resolves an asset ID and string content from the manifest.
+pub fn resolve_asset_id_and_content(
+    manifest_map: &HashMap<u16, (String, String)>,
+    current_app: &str,
+    asset_name: &str,
+) -> (u16, Option<String>) {
+    let normalized_target = asset_name.replace("::", "/").replace(':', "/");
+    let relative_target = format!("{}/{}", current_app, normalized_target);
+
+    let matched = manifest_map.iter().find(|(_, (n, _))| {
+        let n_norm = n.replace("::", "/").replace(':', "/");
+        n_norm == normalized_target
+            || n_norm == relative_target
+            || n_norm.ends_with(&format!("/{}", normalized_target))
+            || n_norm.to_ascii_uppercase().contains(&asset_name.to_ascii_uppercase())
+    });
+
+    if let Some((&id, (_, rel_path))) = matched {
+        let full_path = find_workspace_path(rel_path);
+        let content = std::fs::read_to_string(&full_path).ok();
+        (id, content)
+    } else {
+        (0x0101, None)
+    }
+}
+
 /// Loads the active compression dictionary (custom trained from config/bbs_dict.bin or static default).
 pub fn load_active_dictionary() -> bifrost_compression::CompressionDictionary {
     let dict_path = find_workspace_path("config/bbs_dict.bin");
@@ -1222,6 +1250,223 @@ fn run_session_task(
                 }
             };
             buf.extend_from_slice(&id.to_be_bytes());
+            Ok(())
+        })?,
+    )?;
+
+    let out_buf_for_tmpl = output_buf.clone();
+    let manifest_for_tmpl = asset_manifest.clone();
+    let app_for_tmpl = active_app.clone();
+    term.set(
+        "render_template",
+        lua.create_function(move |_, (asset_name, params): (String, mlua::Value)| {
+            let current_app = app_for_tmpl.lock().unwrap().clone();
+            let (id, _content) = resolve_asset_id_and_content(&manifest_for_tmpl, &current_app, &asset_name);
+
+            let mut param_strings = Vec::new();
+            match params {
+                mlua::Value::Table(tbl) => {
+                    let len = tbl.len().unwrap_or(0);
+                    if len > 0 {
+                        for i in 1..=len {
+                            if let Ok(v) = tbl.get::<i64, mlua::Value>(i) {
+                                param_strings.push(match v {
+                                    mlua::Value::String(s) => s.to_str()?.to_string(),
+                                    mlua::Value::Integer(n) => n.to_string(),
+                                    mlua::Value::Number(n) => n.to_string(),
+                                    mlua::Value::Boolean(b) => b.to_string(),
+                                    _ => String::new(),
+                                });
+                            }
+                        }
+                    } else {
+                        for pair in tbl.pairs::<mlua::Value, mlua::Value>() {
+                            if let Ok((_k, v)) = pair {
+                                param_strings.push(match v {
+                                    mlua::Value::String(s) => s.to_str()?.to_string(),
+                                    mlua::Value::Integer(n) => n.to_string(),
+                                    mlua::Value::Number(n) => n.to_string(),
+                                    mlua::Value::Boolean(b) => b.to_string(),
+                                    _ => String::new(),
+                                });
+                            }
+                        }
+                    }
+                }
+                mlua::Value::String(s) => {
+                    param_strings.push(s.to_str()?.to_string());
+                }
+                mlua::Value::Integer(n) => {
+                    param_strings.push(n.to_string());
+                }
+                _ => {}
+            }
+
+            let mut buf = out_buf_for_tmpl.lock().unwrap();
+            buf.push(0xC7); // OP_RENDER_TEMPLATE
+            buf.extend_from_slice(&id.to_be_bytes());
+            buf.push(param_strings.len() as u8);
+            for p in &param_strings {
+                let p_bytes = p.as_bytes();
+                buf.push(p_bytes.len() as u8);
+                buf.extend_from_slice(p_bytes);
+            }
+            Ok(())
+        })?,
+    )?;
+
+    let out_buf_for_menu = output_buf.clone();
+    let manifest_for_menu = asset_manifest.clone();
+    let app_for_menu = active_app.clone();
+    let form_colors_menu = form_colors.clone();
+    term.set(
+        "render_menu",
+        lua.create_function(move |_, (asset_name, toggle_arg): (String, Option<mlua::Value>)| {
+            let current_app = app_for_menu.lock().unwrap().clone();
+            let (id, content_opt) = resolve_asset_id_and_content(&manifest_for_menu, &current_app, &asset_name);
+
+            let menu_def = if let Some(content) = content_opt {
+                parse_menu_csv(&content)
+            } else {
+                MenuAssetDef {
+                    form_id: 1,
+                    field_fg: None,
+                    field_bg: None,
+                    submit_fg: None,
+                    submit_bg: None,
+                    buttons: Vec::new(),
+                }
+            };
+
+            let mut toggle_mask: u32 = 0;
+            match toggle_arg {
+                Some(mlua::Value::Integer(n)) => {
+                    toggle_mask = n as u32;
+                }
+                Some(mlua::Value::Table(tbl)) => {
+                    for (idx, btn) in menu_def.buttons.iter().enumerate() {
+                        if idx < 32 {
+                            let is_enabled = if let Ok(val) = tbl.get::<&str, mlua::Value>(&btn.tag) {
+                                match val {
+                                    mlua::Value::Boolean(b) => b,
+                                    mlua::Value::Nil => true,
+                                    _ => true,
+                                }
+                            } else if let Ok(val) = tbl.get::<&str, mlua::Value>(&btn.id) {
+                                match val {
+                                    mlua::Value::Boolean(b) => b,
+                                    mlua::Value::Nil => true,
+                                    _ => true,
+                                }
+                            } else {
+                                true
+                            };
+                            if is_enabled {
+                                toggle_mask |= 1 << idx;
+                            }
+                        }
+                    }
+                }
+                _ => {
+                    for idx in 0..menu_def.buttons.len() {
+                        if idx < 32 {
+                            toggle_mask |= 1 << idx;
+                        }
+                    }
+                }
+            }
+
+            let mut buf = out_buf_for_menu.lock().unwrap();
+            let f_fg = menu_def.field_fg.unwrap_or(form_colors_menu.field_fg);
+            let f_bg = menu_def.field_bg.unwrap_or(form_colors_menu.field_bg);
+            let s_fg = menu_def.submit_fg.unwrap_or(form_colors_menu.submit_fg);
+            let s_bg = menu_def.submit_bg.unwrap_or(form_colors_menu.submit_bg);
+
+            buf.push(0xD0); // OP_FORM_START
+            buf.push(menu_def.form_id);
+            buf.push(f_fg);
+            buf.push(f_bg);
+            buf.push(s_fg);
+            buf.push(s_bg);
+
+            buf.push(0xC8); // OP_RENDER_MENU
+            buf.extend_from_slice(&id.to_be_bytes());
+            buf.extend_from_slice(&toggle_mask.to_be_bytes());
+            Ok(())
+        })?,
+    )?;
+
+    let out_buf_for_table = output_buf.clone();
+    term.set(
+        "render_table",
+        lua.create_function(move |_, (start_col, start_row, config): (u8, u8, mlua::Table)| {
+            let mut buf = out_buf_for_table.lock().unwrap();
+            let headers: Vec<String> = config.get("headers").unwrap_or_default();
+            let widths: Vec<usize> = config.get("widths").unwrap_or_default();
+            let rows: Vec<Vec<String>> = config.get("rows").unwrap_or_default();
+            let h_fg: u8 = config.get("header_fg").unwrap_or(14);
+            let h_bg: u8 = config.get("header_bg").unwrap_or(0);
+            let r_fg: u8 = config.get("row_fg").unwrap_or(15);
+            let r_bg: u8 = config.get("row_bg").unwrap_or(0);
+            let divider: bool = config.get("divider").unwrap_or(true);
+
+            let mut cur_row = start_row;
+            if !headers.is_empty() {
+                buf.push(0xC3); // OP_CURSOR_ABS
+                buf.push(start_col);
+                buf.push(cur_row);
+                buf.push(0xC0); // OP_SET_COLOR
+                buf.push((h_bg << 4) | (h_fg & 0x0F));
+
+                let mut header_line = String::new();
+                for (idx, h) in headers.iter().enumerate() {
+                    let w = widths.get(idx).copied().unwrap_or(h.len() + 2);
+                    header_line.push_str(&format!("{:<width$}", h, width = w));
+                    if idx + 1 < headers.len() {
+                        header_line.push_str("  ");
+                    }
+                }
+                buf.extend_from_slice(header_line.as_bytes());
+                cur_row += 1;
+
+                if divider {
+                    buf.push(0xC3);
+                    buf.push(start_col);
+                    buf.push(cur_row);
+                    buf.push(0xC0);
+                    buf.push((h_bg << 4) | (h_fg & 0x0F));
+                    let mut div_line = String::new();
+                    for (idx, h) in headers.iter().enumerate() {
+                        let w = widths.get(idx).copied().unwrap_or(h.len() + 2);
+                        div_line.push_str(&"-".repeat(w));
+                        if idx + 1 < headers.len() {
+                            div_line.push_str("  ");
+                        }
+                    }
+                    buf.extend_from_slice(div_line.as_bytes());
+                    cur_row += 1;
+                }
+            }
+
+            for row in rows {
+                buf.push(0xC3);
+                buf.push(start_col);
+                buf.push(cur_row);
+                buf.push(0xC0);
+                buf.push((r_bg << 4) | (r_fg & 0x0F));
+
+                let mut row_line = String::new();
+                for (idx, cell) in row.iter().enumerate() {
+                    let w = widths.get(idx).copied().unwrap_or(cell.len() + 2);
+                    row_line.push_str(&format!("{:<width$}", cell, width = w));
+                    if idx + 1 < row.len() {
+                        row_line.push_str("  ");
+                    }
+                }
+                buf.extend_from_slice(row_line.as_bytes());
+                cur_row += 1;
+            }
+
             Ok(())
         })?,
     )?;
@@ -2270,7 +2515,98 @@ max_asset_broadcast_duty_cycle = 0.1
             board_msg.expect("Failed to reassemble discussion boards screen response");
         assert_eq!(board_response.opcode, 0x03);
 
-        let _ = server_handle.await;
+        let _ = server_handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_main_menu_form_rendering_on_client() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let config = default_config();
+        let server_transport = Arc::new(MockSocketTransport::new_server(
+            "127.0.0.1:9096".to_string(),
+            0.0,
+            0,
+            200,
+        ));
+
+        let server_handle =
+            tokio::spawn(async move { start_server(config, server_transport, Some(1)).await });
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        let client_transport =
+            MockSocketTransport::new_client("127.0.0.1:9096".to_string(), 0.0, 0, 200);
+
+        let client_key = [6u8; 32];
+        let handshake_msg = MeshBbsMessage::new(0x03, 0x01, 0x00, Vec::new());
+        let handshake_payloads = handshake_msg.to_fragments(200).unwrap();
+
+        let packet = RadioPacket {
+            is_broadcast: false,
+            src_node: client_key,
+            dst_node: [0; 32],
+            payload: handshake_payloads[0].clone(),
+            signal_rssi: -50,
+            signal_snr: 10,
+        };
+        client_transport.send_packet(packet).await.unwrap();
+
+        // 1. Receive registration form
+        let mut client_reassembler = MessageReassembler::new();
+        let mut reg_msg = None;
+        let start_time = tokio::time::Instant::now();
+        while start_time.elapsed() < tokio::time::Duration::from_millis(1500) {
+            if let Ok(Ok(packet)) = tokio::time::timeout(
+                tokio::time::Duration::from_millis(100),
+                client_transport.receive_packet(),
+            ).await {
+                if let Some(msg) = client_reassembler.process_packet([0; 32], &packet.payload).unwrap() {
+                    reg_msg = Some(msg);
+                    break;
+                }
+            }
+        }
+        let _ = reg_msg.expect("Registration form expected");
+
+        // 2. Submit nickname
+        let form_submit_json = r#"{"nickname":"TestClient","submit":"register"}"#;
+        let submit_msg = MeshBbsMessage::new(0x02, 0x02, 0x00, form_submit_json.as_bytes().to_vec());
+        let submit_payloads = submit_msg.to_fragments(200).unwrap();
+        let packet = RadioPacket {
+            is_broadcast: false,
+            src_node: client_key,
+            dst_node: [0; 32],
+            payload: submit_payloads[0].clone(),
+            signal_rssi: -50,
+            signal_snr: 10,
+        };
+        client_transport.send_packet(packet).await.unwrap();
+
+        // 3. Receive main menu frame
+        let mut main_menu_msg = None;
+        let start_time = tokio::time::Instant::now();
+        while start_time.elapsed() < tokio::time::Duration::from_millis(1500) {
+            if let Ok(Ok(packet)) = tokio::time::timeout(
+                tokio::time::Duration::from_millis(100),
+                client_transport.receive_packet(),
+            ).await {
+                if let Some(msg) = client_reassembler.process_packet([0; 32], &packet.payload).unwrap() {
+                    main_menu_msg = Some(msg);
+                    break;
+                }
+            }
+        }
+        let msg = main_menu_msg.expect("Main menu frame expected");
+        println!("Main menu msg flags: {:02x}, len: {}", msg.flags, msg.payload.len());
+
+        let dict = bifrost_compression::CompressionDictionary::standard_static();
+        let decomp = if (msg.flags & 0x06) != 0 {
+            bifrost_ansi::decompress_bytecode_adaptive(msg.flags, &msg.payload, Some(&dict)).unwrap()
+        } else {
+            msg.payload
+        };
+        println!("Decompressed main menu payload (len {}): {:?}", decomp.len(), decomp);
+
+        let _ = server_handle.abort();
     }
 
     #[test]

@@ -1,0 +1,8 @@
+# form_id=80
+# tag,id,label,col,row,key
+buy_5holds,buy_5holds,BuyHolds(+5),2,12,H
+buy_10fighters,buy_10fighters,BuyDrones(+10),18,12,D
+buy_10shields,buy_10shields,BuyShields(+10),36,12,S
+top_fuel,top_fuel,RefuelTank,54,12,R
+upgrade_nav,upgrade_nav,UpgradeNav,2,14,N
+back,back,Back,18,14,B

@@ -1,0 +1,6 @@
+# form_id=75
+# tag,id,label,col,row,key
+buy_hauler,buy_hauler,BuyHauler,2,15,H
+buy_freighter,buy_freighter,BuyFreighter,18,15,F
+buy_dreadnought,buy_dreadnought,BuyDreadnought,36,15,D
+back,back,Back,56,15,B

@@ -9,6 +9,7 @@ description = "Interactive client terminal emulator for Bifrost testing over moc
 bifrost-ansi = { path = "../bifrost-ansi" }
 bifrost-transport = { path = "../bifrost-transport" }
 bifrost-compression = { path = "../bifrost-compression" }
+bifrost-bbs = { path = "../bifrost-bbs" }
 
 tokio.workspace = true
 serde.workspace = true

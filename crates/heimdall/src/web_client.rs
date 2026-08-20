@@ -42,6 +42,7 @@ pub struct FormFieldClient {
     pub height: u8,
     pub val: String,
     pub is_submit: bool,
+    pub key: Option<char>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -224,7 +225,8 @@ impl VirtualTerminalCanvas {
                         (form.submit_fg, form.submit_bg)
                     };
                     let attr = (bg << 4) | (fg & 0x0F);
-                    let label = format!("[ {} ]", field.id);
+                    let label_text = if !field.val.is_empty() { &field.val } else { &field.id };
+                    let label = format!("[ {} ]", label_text);
                     let r = field.row as usize;
                     let c = field.col as usize;
                     for (w, ch) in label.chars().enumerate() {
@@ -326,13 +328,53 @@ impl VirtualTerminalCanvas {
                         let ch = c_str.chars().next().unwrap();
                         if !ch.is_control() {
                             let idx = form.active_idx;
-                            let field = &mut form.fields[idx];
-                            let max_len = field.width as usize * field.height as usize;
-                            if !field.is_submit && field.val.chars().count() < max_len {
-                                field.val.push(ch);
-                                self.render_form_fields();
+                            let current_is_submit = form.fields[idx].is_submit;
+                            if !current_is_submit {
+                                let field = &mut form.fields[idx];
+                                let max_len = field.width as usize * field.height as usize;
+                                if field.val.chars().count() < max_len {
+                                    field.val.push(ch);
+                                    self.render_form_fields();
+                                }
+                                return KeyAction::HandledLocally;
+                            } else {
+                                // In submit mode, check hotkeys
+                                let lower_c = ch.to_ascii_lowercase();
+                                let mut matched_idx = None;
+                                for (i, f) in form.fields.iter().enumerate() {
+                                    if f.is_submit {
+                                        if let Some(k) = f.key {
+                                            if k.to_ascii_lowercase() == lower_c {
+                                                matched_idx = Some(i);
+                                                break;
+                                            }
+                                        }
+                                        let label_first = f.val.chars().next().map(|c| c.to_ascii_lowercase());
+                                        let id_first = f.id.chars().next().map(|c| c.to_ascii_lowercase());
+                                        if label_first == Some(lower_c) || id_first == Some(lower_c) {
+                                            matched_idx = Some(i);
+                                            break;
+                                        }
+                                    }
+                                }
+
+                                if let Some(target_idx) = matched_idx {
+                                    let submit_id = form.fields[target_idx].id.clone();
+                                    let mut map = HashMap::new();
+                                    for f in &form.fields {
+                                        if !f.is_submit {
+                                            map.insert(f.id.clone(), f.val.clone());
+                                        }
+                                    }
+                                    map.insert("submit".to_string(), submit_id);
+                                    form.active = false;
+                                    form.fields.clear();
+                                    let json = serde_json::to_string(&map).unwrap_or_default();
+                                    return KeyAction::SendBytes(json.into_bytes());
+                                } else {
+                                    return KeyAction::HandledLocally;
+                                }
                             }
-                            return KeyAction::HandledLocally;
                         }
                     }
                     _ => {}
@@ -455,6 +497,83 @@ impl VirtualTerminalCanvas {
                         self.render_asset_by_id(asset_id);
                     }
                 }
+                0xC7 => {
+                    // OP_RENDER_TEMPLATE (asset_id u16, param_count u8, [param_len u8, param_bytes]*)
+                    if idx + 2 < bytecode.len() {
+                        let asset_id = u16::from_be_bytes([bytecode[idx], bytecode[idx + 1]]);
+                        let param_count = bytecode[idx + 2] as usize;
+                        idx += 3;
+                        let mut params = Vec::new();
+                        for _ in 0..param_count {
+                            if idx < bytecode.len() {
+                                let p_len = bytecode[idx] as usize;
+                                idx += 1;
+                                if idx + p_len <= bytecode.len() {
+                                    let s = String::from_utf8_lossy(&bytecode[idx..idx + p_len]).to_string();
+                                    idx += p_len;
+                                    params.push(s);
+                                }
+                            }
+                        }
+                        if let Some((template_str, desc)) = get_asset_content_by_id(asset_id) {
+                            if let Some(ref lb) = self.log_buffer {
+                                lb.push("web_client", "INFO", &format!("Rendering template ID 0x{:04X} -> '{}'", asset_id, desc));
+                            }
+                            let expanded = bifrost_bbs::substitute_template(&template_str, &params);
+                            self.apply_ansi_str(&expanded);
+                        } else if let Some(ref lb) = self.log_buffer {
+                            lb.push("web_client", "WARN", &format!("Failed to resolve template ID 0x{:04X}", asset_id));
+                        }
+                    }
+                }
+                0xC8 => {
+                    // OP_RENDER_MENU (asset_id u16, toggle_mask u32)
+                    if idx + 5 < bytecode.len() {
+                        let asset_id = u16::from_be_bytes([bytecode[idx], bytecode[idx + 1]]);
+                        let mask = u32::from_be_bytes([bytecode[idx + 2], bytecode[idx + 3], bytecode[idx + 4], bytecode[idx + 5]]);
+                        idx += 6;
+
+                        if let Some((menu_csv, desc)) = get_asset_content_by_id(asset_id) {
+                            if let Some(ref lb) = self.log_buffer {
+                                lb.push("web_client", "INFO", &format!("Rendering menu ID 0x{:04X} -> '{}'", asset_id, desc));
+                            }
+                            let menu_def = bifrost_bbs::parse_menu_csv(&menu_csv);
+                            let f_fg = menu_def.field_fg.unwrap_or(7);
+                            let f_bg = menu_def.field_bg.unwrap_or(0);
+                            let s_fg = menu_def.submit_fg.unwrap_or(0);
+                            let s_bg = menu_def.submit_bg.unwrap_or(7);
+
+                            let mut fields = Vec::new();
+                            for (b_idx, btn) in menu_def.buttons.iter().enumerate() {
+                                if b_idx < 32 && (mask & (1 << b_idx)) != 0 {
+                                    fields.push(FormFieldClient {
+                                        id: btn.id.clone(),
+                                        col: btn.col,
+                                        row: btn.row,
+                                        width: (btn.label.len() as u8) + 4,
+                                        height: 1,
+                                        val: btn.label.clone(),
+                                        is_submit: true,
+                                        key: btn.key,
+                                    });
+                                }
+                            }
+
+                            self.active_form = Some(FormStateClient {
+                                active: true,
+                                form_id: menu_def.form_id,
+                                fields,
+                                active_idx: 0,
+                                field_fg: f_fg,
+                                field_bg: f_bg,
+                                submit_fg: s_fg,
+                                submit_bg: s_bg,
+                            });
+                        } else if let Some(ref lb) = self.log_buffer {
+                            lb.push("web_client", "WARN", &format!("Failed to resolve menu ID 0x{:04X}", asset_id));
+                        }
+                    }
+                }
                 0xD0 => {
                     // OP_FORM_START (form_id, field_fg, field_bg, submit_fg, submit_bg)
                     if idx + 4 < bytecode.len() {
@@ -510,6 +629,7 @@ impl VirtualTerminalCanvas {
                                         height: 1,
                                         val: val_str,
                                         is_submit: false,
+                                        key: None,
                                     });
                                 }
                             }
@@ -536,6 +656,7 @@ impl VirtualTerminalCanvas {
                                     height: 1,
                                     val: String::new(),
                                     is_submit: true,
+                                    key: None,
                                 });
                             }
                             if let Some(ref lb) = self.log_buffer {
@@ -583,6 +704,7 @@ impl VirtualTerminalCanvas {
                                         height,
                                         val: val_str,
                                         is_submit: false,
+                                        key: None,
                                     });
                                 }
                             }
@@ -1151,16 +1273,49 @@ mod tests {
         assert!(content1.contains("Bifrost") || content1.contains("___"), "Should contain Bifrost banner art");
         assert!(desc1.contains("main_menu_banner.ans"));
 
-        let dungeon_banner = get_asset_content_by_id(0x0103);
-        assert!(dungeon_banner.is_some(), "Dungeon banner 0x0103 should resolve");
+        // With new template and menu assets registered, find dungeon and voidtrader assets
+        let dungeon_banner = get_asset_content_by_id(0x0104);
+        assert!(dungeon_banner.is_some(), "Dungeon banner 0x0104 should resolve");
         let (content2, desc2) = dungeon_banner.unwrap();
         assert!(desc2.contains("dungeon_banner.ans"));
         assert_ne!(content1, content2, "Dungeon banner must be distinct from main menu banner");
 
-        let vt_banner = get_asset_content_by_id(0x0104);
-        assert!(vt_banner.is_some(), "Void Trader banner 0x0104 should resolve");
+        let vt_banner = get_asset_content_by_id(0x0108);
+        assert!(vt_banner.is_some(), "Void Trader banner 0x0108 should resolve");
         let (content3, desc3) = vt_banner.unwrap();
         assert!(desc3.contains("voidtrader_banner.ans"));
         assert_ne!(content1, content3, "Void Trader banner must be distinct from main menu banner");
+    }
+
+    #[test]
+    fn test_main_menu_canvas_rendering() {
+        let mut canvas = VirtualTerminalCanvas::new(80, 25, None);
+        let payload = [
+            1, 197, 1, 1, 195, 2, 7, 192, 7, 72, 101, 108, 108, 111, 44, 32, 84, 101, 115, 116,
+            67, 108, 105, 101, 110, 116, 33, 10, 10, 83, 101, 108, 101, 99, 116, 32, 111, 112,
+            116, 105, 111, 110, 115, 32, 117, 115, 105, 110, 103, 32, 84, 97, 98, 47, 65, 114,
+            114, 111, 119, 115, 32, 97, 110, 100, 32, 69, 110, 116, 101, 114, 58, 10, 10, 208,
+            10, 15, 4, 0, 7, 200, 1, 3, 0, 0, 0, 255, 211, 4,
+        ];
+        canvas.apply_bytecode(&payload);
+        println!("Canvas raw text:\n{}", canvas.to_raw_text());
+        let html_lines = canvas.to_html_lines();
+        for (idx, line) in html_lines.iter().enumerate() {
+            println!("Line {:02}: {}", idx, line);
+        }
+        assert!(canvas.active_form.is_some(), "Form should be active");
+        let form = canvas.active_form.as_ref().unwrap();
+        assert_eq!(form.fields.len(), 8, "Should have 8 buttons");
+        assert_eq!(form.fields[0].id, "read_boards");
+        assert_eq!(form.fields[0].val, "MessageBoards");
+
+        // Test hotkey submission with 'v' for Void Trader
+        match canvas.process_key("v") {
+            KeyAction::SendBytes(bytes) => {
+                let json_str = String::from_utf8(bytes).unwrap();
+                assert!(json_str.contains("\"submit\":\"voidtrader\""), "Should submit voidtrader on 'v' hotkey");
+            }
+            _ => panic!("Expected SendBytes on 'v' hotkey"),
+        }
     }
 }

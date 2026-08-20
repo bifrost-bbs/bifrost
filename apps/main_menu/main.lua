@@ -1,4 +1,4 @@
--- Bifrost BBS Main Menu Application using Declarative Forms
+-- Bifrost BBS Main Menu Application using Declarative Forms & Menu Assets
 local menu = {}
 
 function menu.on_start(session)
@@ -7,7 +7,7 @@ function menu.on_start(session)
 
     term.clear()
     term.render_asset("main_menu_banner")
-    term.move_to(2, 7)
+    term.move_to(2, 6)
     term.set_color(7, 0) -- White on Black
 
     if not user or not user.nickname then
@@ -17,12 +17,12 @@ function menu.on_start(session)
         end
 
         -- Force register nickname on very first connection
-        term.print("Welcome to Bifrost! Please set a nickname:\n\n")
+        term.print("Welcome to Bifrost! Please set a nickname:\n")
         term.define_form(1)
         term.print("  Your Nickname: ")
-        term.add_input_field("nickname", 18, 9, 15, default_nick)
-        term.print("\n\n")
-        term.add_submit_button("register", 2, 12)
+        term.add_input_field("nickname", 18, 8, 15, default_nick)
+        term.print("\n")
+        term.add_submit_button("register", 2, 10)
         term.flush_form()
 
         session.await_input(1, function(submission)
@@ -38,27 +38,23 @@ function menu.on_start(session)
             menu.on_start(session)
         end)
     else
-        -- Hello [nickname]
-        term.print("Hello, " .. user.nickname .. "!\n\n")
-        term.print("Select options using Tab/Arrows and Enter:\n\n")
+        term.print("Hello, " .. user.nickname .. "!\n")
+        term.print("Select options using Tab/Arrows or Hotkeys:\n\n")
 
-        term.define_form(10)
-        term.add_submit_button("read_boards", 2, 12)
-        term.add_submit_button("door_game", 18, 12)
-        term.add_submit_button("voidtrader", 34, 12)
-        term.add_submit_button("marketplace", 2, 13)
-        term.add_submit_button("weather", 18, 13)
-        term.add_submit_button("profile", 34, 13)
-        
-        -- Show Admin Panel only if the user has admin permission
         local is_admin = session.has_permission("admin")
         log.info("Session admin check: " .. tostring(is_admin))
-        if is_admin then
-            term.add_submit_button("admin", 2, 15)
-            term.add_submit_button("logout", 18, 15)
-        else
-            term.add_submit_button("logout", 2, 15)
-        end
+
+        -- Render navigation menu using cached Menu Asset
+        term.render_menu("main_nav", {
+            read_boards = true,
+            door_game = true,
+            voidtrader = true,
+            marketplace = true,
+            weather = true,
+            profile = true,
+            admin = is_admin,
+            logout = true
+        })
         term.flush_form()
 
         session.await_input(10, function(submission)

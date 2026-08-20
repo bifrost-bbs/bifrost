@@ -10,3 +10,31 @@ entry_point = "main.lua"
 [[assets]]
 name = "voidtrader_banner"
 path = "assets/voidtrader_banner.ans"
+
+[[assets]]
+name = "sector_hud"
+path = "assets/sector_hud.tmpl"
+
+[[assets]]
+name = "sector_menu"
+path = "assets/sector_menu.csv"
+
+[[assets]]
+name = "stardock_menu"
+path = "assets/stardock_menu.csv"
+
+[[assets]]
+name = "shipyard_menu"
+path = "assets/shipyard_menu.csv"
+
+[[assets]]
+name = "port_menu"
+path = "assets/port_menu.csv"
+
+[[assets]]
+name = "bank_menu"
+path = "assets/bank_menu.csv"
+
+[[assets]]
+name = "outfitter_menu"
+path = "assets/outfitter_menu.csv"

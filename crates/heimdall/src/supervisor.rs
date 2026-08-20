@@ -316,11 +316,22 @@ impl Supervisor {
         let debug_bin = self.workspace_root.join("target/debug").join(bin_name);
         let release_bin = self.workspace_root.join("target/release").join(bin_name);
 
-        if debug_bin.exists() {
-            return Ok(debug_bin);
-        }
-        if release_bin.exists() {
-            return Ok(release_bin);
+        let debug_meta = debug_bin.metadata().ok();
+        let release_meta = release_bin.metadata().ok();
+
+        match (debug_meta, release_meta) {
+            (Some(d), Some(r)) => {
+                let d_time = d.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                let r_time = r.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                if r_time >= d_time {
+                    return Ok(release_bin);
+                } else {
+                    return Ok(debug_bin);
+                }
+            }
+            (Some(_), None) => return Ok(debug_bin),
+            (None, Some(_)) => return Ok(release_bin),
+            (None, None) => {}
         }
 
         // Try compiling if missing
