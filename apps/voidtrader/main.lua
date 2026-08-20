@@ -121,13 +121,25 @@ local function init_player(session)
         ship_class = 1, -- Scout Sloop
         holds = 20,
         ore = 0,
+        ore_cost = 0,
         org = 0,
+        org_cost = 0,
         eqp = 0,
+        eqp_cost = 0,
         fighters = 15,
         shields = 15,
         kills = 0,
         trades = 0
     }
+end
+
+local function get_cargo_avg_cost(player, item_key)
+    local qty = player[item_key] or 0
+    local cost = player[item_key .. "_cost"] or 0
+    if qty > 0 and cost > 0 then
+        return math.floor((cost / qty) + 0.5)
+    end
+    return 0
 end
 
 local function get_player(session)
@@ -464,6 +476,7 @@ function app.derelict_salvage(session, player)
 
     player.credits = player.credits + credits_found
     player.ore = player.ore + ore_taken
+    -- Cost basis doesn't increase for free salvage
     save_player(session, player)
 
     app.view_sector(session, player, string.format("Discovered a drifting derelict freighter! Salvaged %d cr and %d Fuel Ore.", credits_found, ore_taken))
@@ -502,7 +515,7 @@ function app.player_death(session, player, cause)
 end
 
 -- ---------------------------------------------------------------------------
--- COMMODITY TRADING AT STARPORTS (WITH CUSTOM QUANTITY SPECIFICATION)
+-- COMMODITY TRADING AT STARPORTS (WITH COST BASIS & PROFIT/LOSS TRACKING)
 -- ---------------------------------------------------------------------------
 
 function app.port_menu(session, player)
@@ -524,23 +537,52 @@ function app.port_menu(session, player)
 
     term.move_to(2, 7)
     term.set_color(14, 0)
-    term.print("Commodity    Port Supply   In Cargo   Station Action   Market Price")
+    term.print("Commodity    Port Supply   Cargo (Avg Paid)   Action / Price   Margin / Diff")
     term.move_to(2, 8)
-    term.print("---------    -----------   --------   --------------   ------------")
+    term.print("---------    -----------   ----------------   --------------   -------------")
 
-    local function port_item(y, name, port_amt, pl_amt, rule, base_p)
+    local function port_item(y, key, name, port_amt, pl_amt, rule, base_p)
         term.move_to(2, y)
-        local act = rule == 1 and "BUYING" or "SELLING"
-        local color = rule == 1 and 10 or 11
-        local price = rule == 1 and math.floor(base_p * 0.9) or math.floor(base_p * 1.15)
-        term.set_color(color, 0)
-        term.print(string.format("%-11s  %-11d   %-8d   %-14s   %d cr/unit", name, port_amt, pl_amt, act, price))
+        local is_station_buying = (rule == 1)
+        local price = is_station_buying and math.floor(base_p * 0.9) or math.floor(base_p * 1.15)
+        local act_str = is_station_buying and string.format("BUY  @ %-3d cr", price) or string.format("SELL @ %-3d cr", price)
+
+        local cargo_str = ""
+        local avg_p = get_cargo_avg_cost(player, key)
+        if pl_amt > 0 then
+            cargo_str = string.format("%d (%d cr)", pl_amt, avg_p)
+        else
+            cargo_str = "0 (-)"
+        end
+
+        local margin_str = "---"
+        local margin_color = 15
+        if is_station_buying and pl_amt > 0 then
+            local diff = price - avg_p
+            local pct = avg_p > 0 and math.floor((diff / avg_p) * 100) or 0
+            if diff >= 0 then
+                margin_str = string.format("+%d cr (+%d%%)", diff, pct)
+                margin_color = 10 -- Green (Profit)
+            else
+                margin_str = string.format("%d cr (%d%%)", diff, pct)
+                margin_color = 12 -- Red (Loss)
+            end
+        elseif not is_station_buying and pl_amt > 0 then
+            margin_str = string.format("Hold: %d cr", avg_p)
+            margin_color = 11
+        end
+
+        term.set_color(15, 0)
+        term.print(string.format("%-11s  %-11d   %-16s   %-14s   ", name, port_amt, cargo_str, act_str))
+        term.set_color(margin_color, 0)
+        term.print(margin_str)
+
         return price
     end
 
-    local pr_ore = port_item(9, "Fuel Ore", port.ore, player.ore, p_rules[1], BASE_PRICES.ore)
-    local pr_org = port_item(10, "Organics", port.org, player.org, p_rules[2], BASE_PRICES.org)
-    local pr_eqp = port_item(11, "Equipment", port.eqp, player.eqp, p_rules[3], BASE_PRICES.eqp)
+    local pr_ore = port_item(9, "ore", "Fuel Ore", port.ore, player.ore, p_rules[1], BASE_PRICES.ore)
+    local pr_org = port_item(10, "org", "Organics", port.org, player.org, p_rules[2], BASE_PRICES.org)
+    local pr_eqp = port_item(11, "eqp", "Equipment", port.eqp, player.eqp, p_rules[3], BASE_PRICES.eqp)
 
     term.move_to(2, 13)
     term.set_color(15, 0)
@@ -578,6 +620,7 @@ function app.trade_quantity_prompt(session, player, item_key, item_name, rule, p
     local free_holds = player.holds - (player.ore + player.org + player.eqp)
     local pl_amt = player[item_key] or 0
     local port_amt = port[item_key] or 0
+    local avg_paid = get_cargo_avg_cost(player, item_key)
 
     local is_station_buying = (rule == 1)
     local max_qty = 0
@@ -602,18 +645,33 @@ function app.trade_quantity_prompt(session, player, item_key, item_name, rule, p
     if is_station_buying then
         term.print(string.format("Mode: Station is BUYING from you (You SELL) @ %d cr/unit", price))
         term.move_to(2, 8)
-        term.print(string.format("Cargo on Ship: %d units | Maximum Tradable: %d units", pl_amt, max_qty))
+        term.print(string.format("In Cargo: %d units (Avg Paid: %d cr/unit) | Max Tradable: %d units", pl_amt, avg_paid, max_qty))
+
+        term.move_to(2, 9)
+        local diff = price - avg_paid
+        local pct = avg_paid > 0 and math.floor((diff / avg_paid) * 100) or 0
+        if diff >= 0 then
+            term.set_color(10, 0)
+            term.print(string.format("Profit Margin: +%d cr/unit (+%d%%) [ PROFITABLE TRANSACTION ]", diff, pct))
+        else
+            term.set_color(12, 0)
+            term.print(string.format("Loss Warning:  %d cr/unit (%d%%) [ SELLING AT A LOSS ]", diff, pct))
+        end
     else
         term.print(string.format("Mode: Station is SELLING to you (You BUY) @ %d cr/unit", price))
         term.move_to(2, 8)
         term.print(string.format("Port Stock: %d | Empty Holds: %d | Max Afford: %d", port_amt, free_holds, math.floor(player.credits / price)))
         term.move_to(2, 9)
-        term.print(string.format("Maximum Tradable: %d units", max_qty))
+        if pl_amt > 0 then
+            term.print(string.format("Current Cargo: %d units (Avg Paid: %d cr/unit) | Max Tradable: %d", pl_amt, avg_paid, max_qty))
+        else
+            term.print(string.format("Maximum Tradable: %d units", max_qty))
+        end
     end
 
     term.move_to(2, 11)
     term.set_color(14, 0)
-    term.print(string.format("Cash: %d cr   |   Holds: %d / %d", player.credits, (player.holds - free_holds), player.holds))
+    term.print(string.format("Cash on Hand: %d cr   |   Holds: %d / %d", player.credits, (player.holds - free_holds), player.holds))
 
     term.define_form(55)
     term.move_to(2, 13)
@@ -659,14 +717,31 @@ function app.trade_quantity_prompt(session, player, item_key, item_name, rule, p
             -- Player SELLS qty_to_trade
             local total_val = qty_to_trade * price
             player.credits = player.credits + total_val
-            player[item_key] = player[item_key] - qty_to_trade
+
+            local current_qty = player[item_key] or 0
+            local current_cost = player[item_key .. "_cost"] or 0
+            local avg_cost_per_unit = current_qty > 0 and (current_cost / current_qty) or 0
+
+            player[item_key] = current_qty - qty_to_trade
+            if player[item_key] <= 0 then
+                player[item_key] = 0
+                player[item_key .. "_cost"] = 0
+            else
+                player[item_key .. "_cost"] = math.floor(player[item_key] * avg_cost_per_unit)
+            end
+
             port[item_key] = port[item_key] + qty_to_trade
             player.trades = (player.trades or 0) + 1
         else
             -- Player BUYS qty_to_trade
             local total_cost = qty_to_trade * price
             player.credits = player.credits - total_cost
-            player[item_key] = player[item_key] + qty_to_trade
+
+            local current_qty = player[item_key] or 0
+            local current_cost = player[item_key .. "_cost"] or 0
+
+            player[item_key] = current_qty + qty_to_trade
+            player[item_key .. "_cost"] = current_cost + total_cost
             port[item_key] = port[item_key] - qty_to_trade
             player.trades = (player.trades or 0) + 1
         end
@@ -940,12 +1015,17 @@ function app.view_status(session, player)
     term.move_to(2, 12)
     term.set_color(11, 0)
     term.print(string.format("Cargo Hold Manifest: %d / %d bays utilized", (player.ore + player.org + player.eqp), player.holds))
+
+    local avg_ore = get_cargo_avg_cost(player, "ore")
+    local avg_org = get_cargo_avg_cost(player, "org")
+    local avg_eqp = get_cargo_avg_cost(player, "eqp")
+
     term.move_to(2, 13)
-    term.print(string.format("  * Fuel Ore:  %-5d units   (Est. Value: %d cr)", player.ore, player.ore * BASE_PRICES.ore))
+    term.print(string.format("  * Fuel Ore:  %-5d units (Avg Paid: %-3d cr/unit | Basis: %d cr)", player.ore, avg_ore, player.ore_cost or 0))
     term.move_to(2, 14)
-    term.print(string.format("  * Organics:  %-5d units   (Est. Value: %d cr)", player.org, player.org * BASE_PRICES.org))
+    term.print(string.format("  * Organics:  %-5d units (Avg Paid: %-3d cr/unit | Basis: %d cr)", player.org, avg_org, player.org_cost or 0))
     term.move_to(2, 15)
-    term.print(string.format("  * Equipment: %-5d units   (Est. Value: %d cr)", player.eqp, player.eqp * BASE_PRICES.eqp))
+    term.print(string.format("  * Equipment: %-5d units (Avg Paid: %-3d cr/unit | Basis: %d cr)", player.eqp, avg_eqp, player.eqp_cost or 0))
 
     term.define_form(95)
     term.add_submit_button("back", 2, 17)
