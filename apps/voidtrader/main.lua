@@ -3,7 +3,7 @@
 
 local app = {}
 
-local NUM_SECTORS = 100
+local NUM_SECTORS = 500
 local MAX_TURNS = 120
 local WARP_FUEL_COST = 3
 local ORE_TO_FUEL_RATIO = 10
@@ -18,10 +18,10 @@ local SHIP_CLASSES = {
 
 -- Navigation Computers: name, max_jumps, max_favorites, price
 local NAV_COMPUTERS = {
-    { name = "Mark I Basic Nav", max_jumps = 3, max_favorites = 2, price = 0 },
-    { name = "Mark II Enhanced Nav", max_jumps = 6, max_favorites = 5, price = 1500 },
-    { name = "Mark III Hyper-Nav", max_jumps = 10, max_favorites = 10, price = 4500 },
-    { name = "Mark IV Quantum Core", max_jumps = 25, max_favorites = 20, price = 12000 }
+    { name = "Mark I Basic Nav", max_jumps = 4, max_favorites = 2, price = 0 },
+    { name = "Mark II Enhanced Nav", max_jumps = 8, max_favorites = 5, price = 1500 },
+    { name = "Mark III Hyper-Nav", max_jumps = 15, max_favorites = 10, price = 4500 },
+    { name = "Mark IV Quantum Core", max_jumps = 35, max_favorites = 25, price = 12000 }
 }
 
 -- Port Classes: [Ore, Org, Eqp] where 1 = Port BUYS (Player Sells), 0 = Port SELLS (Player Buys)
@@ -46,7 +46,8 @@ local BASE_PRICES = { ore = 15, org = 35, eqp = 80 }
 local function init_universe()
     local sectors = {}
     for i = 1, NUM_SECTORS do
-        local num_warps = math.random(2, 5)
+        -- 1 to 4 warps per sector (allowing dead-ends and max 4 warps)
+        local num_warps = math.random(1, 4)
         local warps = {}
         for _ = 1, num_warps do
             local dest = math.random(1, NUM_SECTORS)
@@ -63,7 +64,7 @@ local function init_universe()
         if i == 1 then
             -- Sector 1 is Stardock Central Starbase
             port = { class = 0, name = "Alpha Stardock Prime", ore = 9999, org = 9999, eqp = 9999 }
-        elseif math.random(1, 100) <= 75 then
+        elseif math.random(1, 100) <= 60 then -- 60% chance of a port
             local p_class = math.random(1, 8)
             port = {
                 class = p_class,
@@ -74,13 +75,21 @@ local function init_universe()
             }
         end
 
-        -- Sector hazards and anomaly events
+        -- Sector hazards and cosmic anomalies
         local hazard = nil
         local roll = math.random(1, 100)
-        if i > 1 and roll <= 8 then
-            hazard = "ASTEROID_FIELD"
-        elseif i > 1 and roll <= 14 then
-            hazard = "COSMIC_STORM"
+        if i > 1 then
+            if roll <= 2 then
+                hazard = "BLACK_HOLE"
+            elseif roll <= 5 then
+                hazard = "WORMHOLE"
+            elseif roll <= 11 then
+                hazard = "ASTEROID_FIELD"
+            elseif roll <= 17 then
+                hazard = "COSMIC_STORM"
+            elseif roll <= 20 then
+                hazard = "DERELICT_GRAVEYARD"
+            end
         end
 
         sectors[i] = {
@@ -93,7 +102,7 @@ local function init_universe()
         }
     end
 
-    -- Ensure Sector 1 has fixed bidirectional warps for exploration
+    -- Ensure Sector 1 has fixed bidirectional warps
     sectors[1].warps = { 2, 3, 4, 5 }
     for _, dest in ipairs({ 2, 3, 4, 5 }) do
         local has_back = false
@@ -172,7 +181,6 @@ local function get_player(session)
         db.set("vt_players", session.node_id(), p)
     end
 
-    -- Ensure fuel, nav_level, favorites, and plotted_course exist
     local ship_info = SHIP_CLASSES[p.ship_class or 1] or SHIP_CLASSES[1]
     if p.fuel == nil then p.fuel = ship_info.fuel_max end
     if p.nav_level == nil then p.nav_level = 1 end
@@ -282,7 +290,6 @@ function app.view_sector(session, player, msg)
     local sectors = get_sectors()
     local sec = sectors[player.sector] or sectors[1]
     local ship_info = SHIP_CLASSES[player.ship_class or 1] or SHIP_CLASSES[1]
-    local nav_info = NAV_COMPUTERS[player.nav_level or 1] or NAV_COMPUTERS[1]
 
     local is_fav = is_favorite_sector(player, player.sector)
     local is_stranded = (player.fuel < WARP_FUEL_COST) and (player.ore <= 0)
@@ -303,6 +310,7 @@ function app.view_sector(session, player, msg)
     for _, w in ipairs(sec.warps or {}) do
         warp_str = warp_str .. tostring(w) .. " "
     end
+    if warp_str == "" then warp_str = "(Dead End - No Warps)" end
     term.print("Warp Lanes: " .. warp_str)
 
     term.move_to(2, 9)
@@ -319,73 +327,99 @@ function app.view_sector(session, player, msg)
         term.print("Port: None in this sector (Deep Space)")
     end
 
-    if sec.hazard then
+    -- Display Hazard Warning
+    if sec.hazard == "BLACK_HOLE" then
         term.move_to(2, 10)
-        term.set_color(12, 0) -- Bright Red
-        term.print("HAZARD DETECTED: " .. sec.hazard)
+        term.set_color(12, 0) -- Red
+        term.print("HAZARD: BLACK HOLE SINGULARITY (Extreme Gravity Well!)")
+    elseif sec.hazard == "WORMHOLE" then
+        term.move_to(2, 10)
+        term.set_color(13, 0) -- Magenta
+        term.print("ANOMALY: UNSTABLE WORMHOLE RIFT (Trans-Galactic Conduit)")
+    elseif sec.hazard == "ASTEROID_FIELD" then
+        term.move_to(2, 10)
+        term.set_color(14, 0) -- Yellow
+        term.print("ANOMALY: DENSE ASTEROID BELT (Fuel Ore Deposits Available)")
+    elseif sec.hazard == "COSMIC_STORM" then
+        term.move_to(2, 10)
+        term.set_color(11, 0) -- Cyan
+        term.print("HAZARD: IONIZED COSMIC STORM (Sensor Static & Shield Drain)")
+    elseif sec.hazard == "DERELICT_GRAVEYARD" then
+        term.move_to(2, 10)
+        term.set_color(15, 0) -- White
+        term.print("ANOMALY: DERELICT SHIP GRAVEYARD (Salvage Potential)")
     end
 
     -- Plotted Course summary line
     local next_course_hop = nil
     if player.plotted_course and #player.plotted_course > 0 then
         next_course_hop = player.plotted_course[1]
-        term.move_to(2, 10)
-        term.set_color(13, 0) -- Magenta
+        term.move_to(2, 11)
+        term.set_color(13, 0)
         local course_str = ""
         for idx, hop in ipairs(player.plotted_course) do
-            if idx <= 5 then
-                course_str = course_str .. " -> " .. hop
-            end
+            if idx <= 5 then course_str = course_str .. " -> " .. hop end
         end
         if #player.plotted_course > 5 then course_str = course_str .. " ..." end
         term.print(string.format("Course Plotted (%d hops):%s", #player.plotted_course, course_str))
     end
 
     if is_stranded then
-        term.move_to(2, 10)
+        term.move_to(2, 11)
         term.set_color(12, 0)
         term.print("STRANDED: Out of fuel & fuel ore! Send distress signal.")
     end
 
-    term.move_to(2, 11)
+    term.move_to(2, 12)
     term.set_color(15, 0)
     term.print(msg or "")
 
     term.define_form(10)
     if is_stranded then
-        term.add_submit_button("distress", 2, 13)
-        term.add_submit_button("scan", 14, 13)
-        term.add_submit_button("status", 22, 13)
-        term.add_submit_button("ranks", 32, 13)
-        term.add_submit_button("exit", 42, 13)
+        term.add_submit_button("distress", 2, 14)
+        term.add_submit_button("scan", 14, 14)
+        term.add_submit_button("status", 22, 14)
+        term.add_submit_button("ranks", 32, 14)
+        term.add_submit_button("exit", 42, 14)
     else
-        term.add_submit_button("warp", 2, 13)
+        term.add_submit_button("warp", 2, 14)
         if next_course_hop then
-            term.add_submit_button("autowarp", 10, 13)
-            term.add_submit_button("plot", 22, 13)
+            term.add_submit_button("autowarp", 10, 14)
+            term.add_submit_button("plot", 22, 14)
         else
-            term.add_submit_button("plot", 10, 13)
+            term.add_submit_button("plot", 10, 14)
         end
 
         if player.sector == 1 then
-            term.add_submit_button("stardock", 20, 13)
+            term.add_submit_button("stardock", 20, 14)
         elseif sec.port then
-            term.add_submit_button("dock", 20, 13)
+            term.add_submit_button("dock", 20, 14)
             if is_fav then
-                term.add_submit_button("unfav", 28, 13)
+                term.add_submit_button("unfav", 28, 14)
             else
-                term.add_submit_button("fav", 28, 13)
+                term.add_submit_button("fav", 28, 14)
             end
         end
 
-        if player.ore > 0 and player.fuel < ship_info.fuel_max then
-            term.add_submit_button("refuel", 36, 13)
+        -- Hazard Interaction Buttons
+        if sec.hazard == "WORMHOLE" then
+            term.add_submit_button("wormhole", 36, 14)
+        elseif sec.hazard == "ASTEROID_FIELD" then
+            term.add_submit_button("mine_ore", 36, 14)
+        elseif sec.hazard == "DERELICT_GRAVEYARD" then
+            term.add_submit_button("salvage", 36, 14)
+        elseif sec.hazard == "BLACK_HOLE" then
+            term.add_submit_button("slingshot", 36, 14)
         end
 
-        term.add_submit_button("scan", 46, 13)
-        term.add_submit_button("status", 54, 13)
-        term.add_submit_button("ranks", 64, 13)
-        term.add_submit_button("exit", 72, 13)
+        if player.ore > 0 and player.fuel < ship_info.fuel_max then
+            term.add_submit_button("refuel", 48, 14)
+        end
+
+        term.add_submit_button("scan", 56, 14)
+        term.add_submit_button("status", 64, 14)
+        term.add_submit_button("ranks", 72, 14)
+        term.add_submit_button("exit", 2, 16)
     end
     term.flush_form()
 
@@ -407,6 +441,14 @@ function app.view_sector(session, player, msg)
             app.add_favorite(session, player)
         elseif act == "unfav" then
             app.remove_favorite(session, player)
+        elseif act == "wormhole" then
+            app.traverse_wormhole(session, player)
+        elseif act == "mine_ore" then
+            app.mine_asteroid_field(session, player)
+        elseif act == "salvage" then
+            app.salvage_derelict_graveyard(session, player)
+        elseif act == "slingshot" then
+            app.black_hole_slingshot(session, player)
         elseif act == "refuel" then
             app.refuel_from_ore(session, player)
         elseif act == "distress" then
@@ -424,6 +466,138 @@ function app.view_sector(session, player, msg)
             app.view_sector(session, player, "")
         end
     end)
+end
+
+-- ---------------------------------------------------------------------------
+-- HAZARD INTERACTIONS: WORMHOLE, MINING, SALVAGE, SLINGSHOT
+-- ---------------------------------------------------------------------------
+
+function app.traverse_wormhole(session, player)
+    if player.turns <= 0 then
+        app.view_sector(session, player, "Out of turns to traverse wormhole.")
+        return
+    end
+
+    player.turns = player.turns - 1
+
+    -- Pick a random distant sector across the 500 sectors
+    local dest = math.random(1, NUM_SECTORS)
+    while dest == player.sector do dest = math.random(1, NUM_SECTORS) end
+
+    player.sector = dest
+    player.plotted_course = {} -- Clear plotted course on jump
+
+    -- Small chance of turbulence shield damage
+    local dmg_msg = ""
+    if math.random(1, 100) <= 25 then
+        local dmg = math.random(2, 5)
+        if player.shields > 0 then
+            player.shields = math.max(0, player.shields - dmg)
+            dmg_msg = string.format(" (Turbulence: Shields absorbed %d dmg)", dmg)
+        end
+    end
+
+    save_player(session, player)
+    app.view_sector(session, player, string.format("Traversed wormhole rift! Spacetime collapsed and ejected vessel into Sector %d.%s", dest, dmg_msg))
+end
+
+function app.mine_asteroid_field(session, player)
+    local holds_used = player.ore + player.org + player.eqp
+    local free_holds = player.holds - holds_used
+    if free_holds <= 0 then
+        app.view_sector(session, player, "Cargo bays full! Upgrade holds at Stardock or sell cargo.")
+        return
+    end
+
+    if player.turns <= 0 then
+        app.view_sector(session, player, "Out of turns to operate mining lasers.")
+        return
+    end
+
+    player.turns = player.turns - 1
+
+    local roll = math.random(1, 100)
+    if roll <= 65 then
+        -- Mining Success
+        local yield = math.min(free_holds, math.random(6, 18))
+        player.ore = player.ore + yield
+        save_player(session, player)
+        app.view_sector(session, player, string.format("Mining lasers extracted %d units of raw Fuel Ore! (Free holds: %d)", yield, free_holds - yield))
+    elseif roll <= 85 then
+        -- Micro-meteorite impact while mining
+        local yield = math.min(free_holds, math.random(3, 8))
+        player.ore = player.ore + yield
+        local dmg = math.random(2, 6)
+        if player.shields > 0 then
+            player.shields = math.max(0, player.shields - dmg)
+        else
+            player.fighters = math.max(0, player.fighters - 1)
+        end
+        save_player(session, player)
+        app.view_sector(session, player, string.format("Mined %d Fuel Ore, but micrometeorites struck ship (%d shield dmg)!", yield, dmg))
+    else
+        -- Disturbed hostile pirate mining drone
+        app.pirate_encounter(session, player, math.random(8, 20))
+    end
+end
+
+function app.salvage_derelict_graveyard(session, player)
+    if player.turns <= 0 then
+        app.view_sector(session, player, "Out of turns to conduct salvage operations.")
+        return
+    end
+
+    player.turns = player.turns - 1
+
+    local roll = math.random(1, 100)
+    if roll <= 60 then
+        local creds = math.random(250, 900)
+        player.credits = player.credits + creds
+        save_player(session, player)
+        app.view_sector(session, player, string.format("Salvaged intact credit vaults from drifting hulks! Found %d cr.", creds))
+    elseif roll <= 85 then
+        local holds_used = player.ore + player.org + player.eqp
+        local free_holds = player.holds - holds_used
+        local eqp_found = math.min(free_holds, math.random(2, 6))
+        player.eqp = player.eqp + eqp_found
+        save_player(session, player)
+        app.view_sector(session, player, string.format("Salvaged %d units of high-tech Equipment components from wreckage!", eqp_found))
+    else
+        app.pirate_encounter(session, player, math.random(10, 22))
+    end
+end
+
+function app.black_hole_slingshot(session, player)
+    local sectors = get_sectors()
+    local sec = sectors[player.sector]
+    local warps = (sec and sec.warps) or {}
+    if #warps == 0 then
+        app.view_sector(session, player, "No exit vectors from singularity!")
+        return
+    end
+
+    if player.shields <= 0 and player.fighters <= 0 then
+        app.player_death(session, player, "Vessel pulled past event horizon and crushed by singularity.")
+        return
+    end
+
+    -- Slingshot propels player 2 steps forward
+    local next1 = warps[math.random(1, #warps)]
+    local next2 = next1
+    local sec2 = sectors[next1]
+    if sec2 and #sec2.warps > 0 then
+        next2 = sec2.warps[math.random(1, #sec2.warps)]
+    end
+
+    player.sector = next2
+    local dmg = math.random(3, 8)
+    if player.shields > 0 then
+        player.shields = math.max(0, player.shields - dmg)
+    end
+    player.plotted_course = {}
+    save_player(session, player)
+
+    app.view_sector(session, player, string.format("Executed gravitational slingshot! Accelerated past event horizon into Sector %d (Shields absorbed %d dmg).", next2, dmg))
 end
 
 -- ---------------------------------------------------------------------------
@@ -472,18 +646,20 @@ function app.plot_menu(session, player)
     term.print(string.format("=== HYPERSPACE COURSE PLOTTER (%s) ===", nav_info.name))
     term.move_to(2, 6)
     term.set_color(14, 0)
-    term.print(string.format("Current Location: Sector %d | Max Jumps Plottable: %d", player.sector, nav_info.max_jumps))
+    term.print(string.format("Location: Sector %d | Universe: %d Sectors | Max Jumps Plottable: %d", player.sector, NUM_SECTORS, nav_info.max_jumps))
 
     term.move_to(2, 8)
     term.set_color(15, 0)
     term.print("Favorite Starports:")
     if player.favorites and #player.favorites > 0 then
         for idx, fav_sec in ipairs(player.favorites) do
-            local sec = sectors[fav_sec]
-            local port_name = (sec and sec.port and sec.port.name) or "Deep Space"
-            term.move_to(4, 8 + idx)
-            term.set_color(10, 0)
-            term.print(string.format("[%d] Sector %-3d - %s", idx, fav_sec, port_name))
+            if idx <= 4 then
+                local sec = sectors[fav_sec]
+                local port_name = (sec and sec.port and sec.port.name) or "Deep Space"
+                term.move_to(4, 8 + idx)
+                term.set_color(10, 0)
+                term.print(string.format("[%d] Sector %-3d - %s", idx, fav_sec, port_name))
+            end
         end
     else
         term.move_to(4, 9)
@@ -494,8 +670,8 @@ function app.plot_menu(session, player)
     term.define_form(25)
     term.move_to(2, 13)
     term.set_color(15, 0)
-    term.print("Enter Target Sector: ")
-    term.add_input_field("target", 23, 13, 5, "")
+    term.print("Enter Target Sector (1 - " .. NUM_SECTORS .. "): ")
+    term.add_input_field("target", 34, 13, 5, "")
 
     term.add_submit_button("plot_course", 2, 15)
     term.add_submit_button("clear_course", 16, 15)
@@ -559,7 +735,6 @@ function app.execute_autowarp(session, player)
         return
     end
 
-    -- Pop the hop and perform warp
     table.remove(player.plotted_course, 1)
     app.perform_warp_to(session, player, dest)
 end
@@ -611,13 +786,11 @@ function app.distress_beacon(session, player)
 
     local roll = math.random(1, 100)
     if roll <= 35 then
-        -- Benevolent Patrol
         local fuel_given = 15
         player.fuel = player.fuel + fuel_given
         save_player(session, player)
         app.view_sector(session, player, string.format("Alpha Patrol Corvette answered distress call! Transfused %d free fuel.", fuel_given))
     elseif roll <= 70 then
-        -- Scavenger extortion
         local price = math.random(200, 600)
         if player.credits >= price then
             player.credits = player.credits - price
@@ -628,7 +801,6 @@ function app.distress_beacon(session, player)
             app.view_sector(session, player, "Scavenger answered beacon, but you couldn't afford their price. They left.")
         end
     else
-        -- Hostile Pirate Ambush
         app.pirate_encounter(session, player, math.random(10, 25))
     end
 end
@@ -649,6 +821,7 @@ function app.nav_prompt(session, player)
     term.move_to(2, 7)
     local warp_str = ""
     for _, w in ipairs(sec.warps or {}) do warp_str = warp_str .. tostring(w) .. " " end
+    if warp_str == "" then warp_str = "(Dead End)" end
     term.print("Available Warp Coordinates: " .. warp_str)
 
     term.define_form(20)
@@ -712,20 +885,18 @@ function app.perform_warp_to(session, player, dest)
 
     local dest_sec = sectors[dest]
 
-    -- Sector Hazard check
-    if dest_sec.hazard == "ASTEROID_FIELD" then
-        if player.shields > 0 then
-            local dmg = math.min(player.shields, math.random(2, 5))
-            player.shields = player.shields - dmg
-            save_player(session, player)
-        end
+    -- Storm interference
+    if dest_sec.hazard == "COSMIC_STORM" and player.shields > 0 then
+        local dmg = math.random(1, 3)
+        player.shields = math.max(0, player.shields - dmg)
+        save_player(session, player)
     end
 
     -- Random Encounters (Pirate ambush or Derelict salvage)
     local roll = math.random(1, 100)
-    if dest > 1 and roll <= 18 then
+    if dest > 1 and roll <= 16 then
         app.pirate_encounter(session, player, math.random(8, 25))
-    elseif dest > 1 and roll <= 28 then
+    elseif dest > 1 and roll <= 26 then
         app.derelict_salvage(session, player)
     else
         app.view_sector(session, player, "Warp jump successful: Arrived in Sector " .. dest .. ".")
@@ -740,7 +911,7 @@ function app.pirate_encounter(session, player, enemy_fighters)
     term.clear()
     term.render_asset("voidtrader_banner")
     term.move_to(2, 6)
-    term.set_color(12, 0) -- Bright Red
+    term.set_color(12, 0)
     term.print("RED ALERT: Void Marauder Corsair dropping out of warp!")
 
     term.move_to(2, 8)
@@ -763,7 +934,6 @@ function app.pirate_encounter(session, player, enemy_fighters)
             local p_dmg = math.random(2, math.max(3, math.floor(player.fighters * 0.8)))
             local e_dmg = math.random(2, math.max(3, math.floor(enemy_fighters * 0.7)))
 
-            -- Shields absorb damage first
             if player.shields > 0 then
                 local abs = math.min(player.shields, e_dmg)
                 player.shields = player.shields - abs
@@ -865,7 +1035,7 @@ function app.player_death(session, player, cause)
 end
 
 -- ---------------------------------------------------------------------------
--- COMMODITY TRADING AT STARPORTS (WITH COST BASIS & PROFIT/LOSS TRACKING)
+-- COMMODITY TRADING AT STARPORTS (WITH 1 CREDIT/UNIT REFUELING)
 -- ---------------------------------------------------------------------------
 
 function app.port_menu(session, player)
@@ -913,10 +1083,10 @@ function app.port_menu(session, player)
             local pct = avg_p > 0 and math.floor((diff / avg_p) * 100) or 0
             if diff >= 0 then
                 margin_str = string.format("+%d cr (+%d%%)", diff, pct)
-                margin_color = 10 -- Green (Profit)
+                margin_color = 10
             else
                 margin_str = string.format("%d cr (%d%%)", diff, pct)
-                margin_color = 12 -- Red (Loss)
+                margin_color = 12
             end
         elseif not is_station_buying and pl_amt > 0 then
             margin_str = string.format("Hold: %d cr", avg_p)
@@ -938,7 +1108,7 @@ function app.port_menu(session, player)
     term.move_to(2, 13)
     term.set_color(15, 0)
     local holds_used = player.ore + player.org + player.eqp
-    term.print(string.format("Cash: %-8d cr   Holds: %d / %d   Fuel: %d / %d (Refuel: 2 cr/unit)", player.credits, (player.holds - holds_used), player.holds, player.fuel, ship_info.fuel_max))
+    term.print(string.format("Cash: %-8d cr   Holds: %d / %d   Fuel: %d / %d (Refuel: 1 cr/unit)", player.credits, (player.holds - holds_used), player.holds, player.fuel, ship_info.fuel_max))
 
     term.define_form(50)
     term.add_submit_button("trade_ore", 2, 15)
@@ -963,10 +1133,10 @@ function app.port_menu(session, player)
 
         if act == "refuel_tank" then
             local missing = ship_info.fuel_max - player.fuel
-            local max_afford = math.floor(player.credits / 2)
+            local max_afford = player.credits -- 1 cr per fuel unit
             local to_add = math.min(missing, max_afford)
             if to_add > 0 then
-                player.credits = player.credits - (to_add * 2)
+                player.credits = player.credits - to_add
                 player.fuel = player.fuel + to_add
                 save_player(session, player)
             end
@@ -1232,7 +1402,7 @@ function app.outfitter_menu(session, player)
     term.move_to(2, 8)
     term.print(string.format("Combat Drones: %d / %d max (50 cr each) | Shields: %d / %d (75 cr each)", player.fighters, ship_info.max_fighters, player.shields, ship_info.max_shields))
     term.move_to(2, 9)
-    term.print(string.format("Fuel Tank: %d / %d max (Refuel: 2 cr/unit)", player.fuel, ship_info.fuel_max))
+    term.print(string.format("Fuel Tank: %d / %d max (Refuel: 1 cr/unit)", player.fuel, ship_info.fuel_max))
     term.move_to(2, 10)
     term.set_color(14, 0)
     if next_nav then
@@ -1283,10 +1453,10 @@ function app.outfitter_menu(session, player)
             end
         elseif act == "top_fuel" then
             local missing = ship_info.fuel_max - player.fuel
-            local max_afford = math.floor(player.credits / 2)
+            local max_afford = player.credits -- 1 cr per fuel unit
             local to_add = math.min(missing, max_afford)
             if to_add > 0 then
-                player.credits = player.credits - (to_add * 2)
+                player.credits = player.credits - to_add
                 player.fuel = player.fuel + to_add
                 save_player(session, player)
             end
@@ -1361,28 +1531,38 @@ function app.scan_sector(session, player)
     term.set_color(11, 0)
     term.print(string.format("=== LONG RANGE SCAN (Sector %d) ===", player.sector))
 
-    term.move_to(2, 7)
-    term.set_color(14, 0)
-    term.print("Target   Port Status           Hazards          Adjacent Warps")
-    term.move_to(2, 8)
-    term.print("------   -----------           -------          --------------")
+    if sec.hazard == "COSMIC_STORM" then
+        term.move_to(2, 7)
+        term.set_color(12, 0)
+        term.print(">>> SENSOR ARRAY SCRAMBLED BY IONIZED STORM INTERFERENCE <<<")
+        term.move_to(2, 9)
+        term.set_color(8, 0)
+        term.print("Sensor telemetry offline. Clear nebula to restore LRS feed.")
+    else
+        term.move_to(2, 7)
+        term.set_color(14, 0)
+        term.print("Target   Port Status           Hazards          Adjacent Warps")
+        term.move_to(2, 8)
+        term.print("------   -----------           -------          --------------")
 
-    for idx, dest in ipairs(sec.warps or {}) do
-        term.move_to(2, 8 + idx)
-        local d_sec = sectors[dest]
-        local port_str = "Deep Space (None)"
-        if dest == 1 then
-            port_str = "Stardock Prime"
-        elseif d_sec and d_sec.port then
-            local fav_tag = is_favorite_sector(player, dest) and " [*]" or ""
-            port_str = string.format("Class %d (%s)%s", d_sec.port.class, d_sec.port.name or "Port", fav_tag)
+        for idx, dest in ipairs(sec.warps or {}) do
+            term.move_to(2, 8 + idx)
+            local d_sec = sectors[dest]
+            local port_str = "Deep Space (None)"
+            if dest == 1 then
+                port_str = "Stardock Prime"
+            elseif d_sec and d_sec.port then
+                local fav_tag = is_favorite_sector(player, dest) and " [*]" or ""
+                port_str = string.format("Class %d (%s)%s", d_sec.port.class, d_sec.port.name or "Port", fav_tag)
+            end
+            local hazard_str = (d_sec and d_sec.hazard) or "Clear"
+            local w_list = ""
+            for _, w in ipairs((d_sec and d_sec.warps) or {}) do w_list = w_list .. tostring(w) .. " " end
+            if w_list == "" then w_list = "(Dead End)" end
+
+            term.set_color(15, 0)
+            term.print(string.format("Sec %-3d  %-20s  %-15s  %s", dest, port_str, hazard_str, w_list))
         end
-        local hazard_str = (d_sec and d_sec.hazard) or "Clear"
-        local w_list = ""
-        for _, w in ipairs((d_sec and d_sec.warps) or {}) do w_list = w_list .. tostring(w) .. " " end
-
-        term.set_color(15, 0)
-        term.print(string.format("Sec %-3d  %-20s  %-15s  %s", dest, port_str, hazard_str, w_list))
     end
 
     term.define_form(90)
