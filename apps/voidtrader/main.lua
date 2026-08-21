@@ -273,15 +273,29 @@ local function init_universe()
     return sectors
 end
 
+local _cached_sectors = nil
+
 local function get_sectors()
+    if _cached_sectors and #_cached_sectors >= NUM_SECTORS then
+        return _cached_sectors
+    end
     local s = db.get("vt_sectors", "all")
     if not s or type(s) ~= "table" or #s < NUM_SECTORS then
         s = init_universe()
     end
+    _cached_sectors = s
     return s
 end
 
+local function save_sector(sector_id, sector)
+    if _cached_sectors then
+        _cached_sectors[sector_id] = sector
+    end
+    db.set("vt_sectors", sector_id, sector)
+end
+
 local function save_sectors(sectors)
+    _cached_sectors = sectors
     db.set("vt_sectors", "all", sectors)
 end
 
@@ -1752,7 +1766,7 @@ function app.trade_quantity_prompt(session, player, item_key, item_name, rule, p
         end
 
         save_player(session, player)
-        save_sectors(sectors)
+        save_sector(player.sector, sectors[player.sector])
         app.port_menu(session, player)
     end)
 end

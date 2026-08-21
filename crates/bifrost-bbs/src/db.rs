@@ -80,6 +80,22 @@ impl DatabaseStore {
         Ok(())
     }
 
+    pub fn set_batch(&self, namespace: &str, entries: &[(String, String)]) -> SqlResult<()> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        {
+            let mut stmt = tx.prepare(
+                "INSERT INTO store (namespace, key, value) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(namespace, key) DO UPDATE SET value = ?3",
+            )?;
+            for (k, v) in entries {
+                stmt.execute(params![namespace, k, v])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn remove(&self, namespace: &str, key: &str) -> SqlResult<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
@@ -91,7 +107,9 @@ impl DatabaseStore {
 
     pub fn keys(&self, namespace: &str) -> SqlResult<Vec<String>> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare("SELECT key FROM store WHERE namespace = ?1")?;
+        let mut stmt = conn.prepare(
+            "SELECT key FROM store WHERE namespace = ?1 ORDER BY CASE WHEN key GLOB '[0-9]*' THEN CAST(key AS INTEGER) ELSE NULL END ASC, key ASC"
+        )?;
         let rows = stmt.query_map(params![namespace], |row| row.get(0))?;
         let mut keys = Vec::new();
         for key in rows {
@@ -109,7 +127,9 @@ impl DatabaseStore {
 
     pub fn get_all(&self, namespace: &str) -> SqlResult<Vec<(String, String)>> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare("SELECT key, value FROM store WHERE namespace = ?1 ORDER BY key ASC")?;
+        let mut stmt = conn.prepare(
+            "SELECT key, value FROM store WHERE namespace = ?1 ORDER BY CASE WHEN key GLOB '[0-9]*' THEN CAST(key AS INTEGER) ELSE NULL END ASC, key ASC"
+        )?;
         let rows = stmt.query_map(params![namespace], |row| {
             let k: String = row.get(0)?;
             let v: Option<String> = row.get(1)?;
@@ -220,5 +240,26 @@ mod tests {
         }
 
         let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_database_store_set_batch() {
+        let db = DatabaseStore::new_in_memory().unwrap();
+        let batch = vec![
+            ("1".to_string(), r#"{"name":"Sol"}"#.to_string()),
+            ("2".to_string(), r#"{"name":"Alpha Centauri"}"#.to_string()),
+            ("10".to_string(), r#"{"name":"Sirius"}"#.to_string()),
+        ];
+        db.set_batch("sectors", &batch).unwrap();
+
+        assert_eq!(db.count("sectors").unwrap(), 3);
+        let keys = db.keys("sectors").unwrap();
+        assert_eq!(keys, vec!["1", "2", "10"]);
+
+        let all = db.get_all("sectors").unwrap();
+        assert_eq!(all.len(), 3);
+        assert_eq!(all[0].0, "1");
+        assert_eq!(all[1].0, "2");
+        assert_eq!(all[2].0, "10");
     }
 }

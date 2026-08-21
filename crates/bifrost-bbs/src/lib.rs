@@ -1102,6 +1102,187 @@ pub async fn start_server_with_stats(
     Ok(())
 }
 
+pub fn register_lua_db(lua: &mlua::Lua, db_store: DatabaseStore) -> mlua::Result<mlua::Table> {
+    let db = lua.create_table()?;
+
+    // db.get(table, [key])
+    let db_store_get = db_store.clone();
+    db.set(
+        "get",
+        lua.create_function(move |lua, args: mlua::MultiValue| {
+            let mut iter = args.into_iter();
+            let table = match iter.next() {
+                Some(mlua::Value::String(s)) => s.to_str()?.to_string(),
+                _ => return Ok(mlua::Value::Nil),
+            };
+            let key_opt = match iter.next() {
+                Some(mlua::Value::String(s)) => Some(s.to_str()?.to_string()),
+                Some(mlua::Value::Integer(i)) => Some(i.to_string()),
+                _ => None,
+            };
+
+            if let Some(ref key) = key_opt {
+                if key != "all" && key != "*" {
+                    // Specific single key requested
+                    if let Ok(Some(val)) = db_store_get.get(&table, key) {
+                        if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(&val) {
+                            if json_val.is_null() {
+                                return Ok(mlua::Value::Nil);
+                            }
+                            if let Ok(lua_val) = lua.to_value(&json_val) {
+                                return Ok(mlua::Value::from(lua_val));
+                            }
+                        }
+                    }
+                    return Ok(mlua::Value::Nil);
+                }
+
+                // If key is "all", check if a literal "all" record exists first
+                if let Ok(Some(val)) = db_store_get.get(&table, "all") {
+                    if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(&val) {
+                        if !json_val.is_null() {
+                            if let Ok(lua_val) = lua.to_value(&json_val) {
+                                return Ok(mlua::Value::from(lua_val));
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Either key is omitted, or key is "all"/"*" and no literal "all" row exists.
+            // Retrieve all granular rows in this table/namespace.
+            if let Ok(entries) = db_store_get.get_all(&table) {
+                if entries.is_empty() {
+                    return Ok(mlua::Value::Nil);
+                }
+                let tbl = lua.create_table()?;
+                let mut is_array = true;
+                let mut parsed_entries = Vec::new();
+                for (k, v) in entries {
+                    if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(&v) {
+                        if !json_val.is_null() {
+                            if let Ok(lua_val) = lua.to_value(&json_val) {
+                                let idx_opt = k.parse::<usize>().ok();
+                                if idx_opt.is_none() {
+                                    is_array = false;
+                                }
+                                parsed_entries.push((k, idx_opt, lua_val));
+                            }
+                        }
+                    }
+                }
+
+                if parsed_entries.is_empty() {
+                    return Ok(mlua::Value::Nil);
+                }
+
+                for (k, idx_opt, lua_val) in parsed_entries {
+                    if is_array {
+                        if let Some(idx) = idx_opt {
+                            tbl.set(idx, lua_val)?;
+                        }
+                    } else {
+                        tbl.set(k, lua_val)?;
+                    }
+                }
+                return Ok(mlua::Value::Table(tbl));
+            }
+
+            Ok(mlua::Value::Nil)
+        })?,
+    )?;
+
+    // db.set(table, [key], val)
+    let db_store_set = db_store.clone();
+    db.set(
+        "set",
+        lua.create_function(move |lua, args: mlua::MultiValue| {
+            let mut iter = args.into_iter();
+            let table = match iter.next() {
+                Some(mlua::Value::String(s)) => s.to_str()?.to_string(),
+                _ => return Ok(()),
+            };
+            let (key_opt, val) = match (iter.next(), iter.next()) {
+                (Some(k_val), Some(v)) => {
+                    let key_str = match k_val {
+                        mlua::Value::String(s) => s.to_str()?.to_string(),
+                        mlua::Value::Integer(i) => i.to_string(),
+                        _ => "default".to_string(),
+                    };
+                    (Some(key_str), v)
+                }
+                (Some(v), None) => (None, v),
+                _ => return Ok(()),
+            };
+
+            // If key is "all" (or omitted) and val is a Lua Table, store its records granularly!
+            if key_opt.as_deref() == Some("all") || key_opt.is_none() {
+                if val.is_nil() {
+                    let _ = db_store_set.clear_namespace(&table);
+                    return Ok(());
+                }
+
+                if let mlua::Value::Table(tbl) = &val {
+                    let mut batch = Vec::new();
+                    for pair in tbl.clone().pairs::<mlua::Value, mlua::Value>() {
+                        if let Ok((k, v)) = pair {
+                            let k_str = match k {
+                                mlua::Value::Integer(i) => i.to_string(),
+                                mlua::Value::String(s) => s.to_str()?.to_string(),
+                                _ => continue,
+                            };
+                            if !v.is_nil() {
+                                if let Ok(json_val) = lua.from_value::<serde_json::Value>(v) {
+                                    if !json_val.is_null() {
+                                        if let Ok(json_str) = serde_json::to_string(&json_val) {
+                                            batch.push((k_str, json_str));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if !batch.is_empty() {
+                        let _ = db_store_set.clear_namespace(&table);
+                        let _ = db_store_set.set_batch(&table, &batch);
+                        return Ok(());
+                    }
+                }
+            }
+
+            let key = key_opt.unwrap_or_else(|| "default".to_string());
+            if val.is_nil() {
+                let _ = db_store_set.remove(&table, &key);
+            } else if let Ok(json_val) = lua.from_value::<serde_json::Value>(val) {
+                if json_val.is_null() {
+                    let _ = db_store_set.remove(&table, &key);
+                } else if let Ok(json_str) = serde_json::to_string(&json_val) {
+                    let _ = db_store_set.set(&table, &key, &json_str);
+                }
+            }
+            Ok(())
+        })?,
+    )?;
+
+    // db.keys(table)
+    let db_store_keys = db_store.clone();
+    db.set(
+        "keys",
+        lua.create_function(move |lua, table: String| {
+            let table_tbl = lua.create_table()?;
+            if let Ok(keys) = db_store_keys.keys(&table) {
+                for (i, key) in keys.into_iter().enumerate() {
+                    table_tbl.set(i + 1, key)?;
+                }
+            }
+            Ok(table_tbl)
+        })?,
+    )?;
+
+    Ok(db)
+}
+
 fn run_session_task(
     node_id: [u8; 32],
     mut rx: mpsc::Receiver<MeshBbsMessage>,
@@ -1785,82 +1966,7 @@ fn run_session_task(
     globals.set("term", term)?;
 
     // db table
-    let db = lua.create_table()?;
-    let db_store_get = db_store.clone();
-    db.set(
-        "get",
-        lua.create_function(move |lua, args: mlua::MultiValue| {
-            let mut iter = args.into_iter();
-            let table = match iter.next() {
-                Some(mlua::Value::String(s)) => s.to_str()?.to_string(),
-                _ => return Ok(mlua::Value::Nil),
-            };
-            let key = match iter.next() {
-                Some(mlua::Value::String(s)) => s.to_str()?.to_string(),
-                Some(mlua::Value::Integer(i)) => i.to_string(),
-                _ => "default".to_string(),
-            };
-            if let Ok(Some(val)) = db_store_get.get(&table, &key) {
-                if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(&val) {
-                    if json_val.is_null() {
-                        return Ok(mlua::Value::Nil);
-                    }
-                    if let Ok(lua_val) = lua.to_value(&json_val) {
-                        return Ok(mlua::Value::from(lua_val));
-                    }
-                }
-            }
-            Ok(mlua::Value::Nil)
-        })?,
-    )?;
-
-    let db_store_set = db_store.clone();
-    db.set(
-        "set",
-        lua.create_function(move |lua, args: mlua::MultiValue| {
-            let mut iter = args.into_iter();
-            let table = match iter.next() {
-                Some(mlua::Value::String(s)) => s.to_str()?.to_string(),
-                _ => return Ok(()),
-            };
-            let (key, val) = match (iter.next(), iter.next()) {
-                (Some(k_val), Some(v)) => {
-                    let key_str = match k_val {
-                        mlua::Value::String(s) => s.to_str()?.to_string(),
-                        mlua::Value::Integer(i) => i.to_string(),
-                        _ => "default".to_string(),
-                    };
-                    (key_str, v)
-                }
-                (Some(v), None) => ("default".to_string(), v),
-                _ => return Ok(()),
-            };
-            if val.is_nil() {
-                let _ = db_store_set.remove(&table, &key);
-            } else if let Ok(json_val) = lua.from_value::<serde_json::Value>(val) {
-                if json_val.is_null() {
-                    let _ = db_store_set.remove(&table, &key);
-                } else if let Ok(json_str) = serde_json::to_string(&json_val) {
-                    let _ = db_store_set.set(&table, &key, &json_str);
-                }
-            }
-            Ok(())
-        })?,
-    )?;
-
-    let db_store_keys = db_store.clone();
-    db.set(
-        "keys",
-        lua.create_function(move |lua, table: String| {
-            let table_tbl = lua.create_table()?;
-            if let Ok(keys) = db_store_keys.keys(&table) {
-                for (i, key) in keys.into_iter().enumerate() {
-                    table_tbl.set(i + 1, key)?;
-                }
-            }
-            Ok(table_tbl)
-        })?,
-    )?;
+    let db = register_lua_db(&lua, db_store.clone())?;
     globals.set("db", db)?;
 
     // log table for app scripts
@@ -3369,74 +3475,7 @@ max_asset_broadcast_duty_cycle = 0.15
     fn test_db_set_nil_and_null_handling() {
         let lua = mlua::Lua::new();
         let db_store = DatabaseStore::new_in_memory().unwrap();
-
-        let db = lua.create_table().unwrap();
-        let db_store_get = db_store.clone();
-        db.set(
-            "get",
-            lua.create_function(move |lua, args: mlua::MultiValue| {
-                let mut iter = args.into_iter();
-                let table = match iter.next() {
-                    Some(mlua::Value::String(s)) => s.to_str()?.to_string(),
-                    _ => return Ok(mlua::Value::Nil),
-                };
-                let key = match iter.next() {
-                    Some(mlua::Value::String(s)) => s.to_str()?.to_string(),
-                    Some(mlua::Value::Integer(i)) => i.to_string(),
-                    _ => "default".to_string(),
-                };
-                if let Ok(Some(val)) = db_store_get.get(&table, &key) {
-                    if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(&val) {
-                        if json_val.is_null() {
-                            return Ok(mlua::Value::Nil);
-                        }
-                        if let Ok(lua_val) = lua.to_value(&json_val) {
-                            return Ok(mlua::Value::from(lua_val));
-                        }
-                    }
-                }
-                Ok(mlua::Value::Nil)
-            })
-            .unwrap(),
-        )
-        .unwrap();
-
-        let db_store_set = db_store.clone();
-        db.set(
-            "set",
-            lua.create_function(move |lua, args: mlua::MultiValue| {
-                let mut iter = args.into_iter();
-                let table = match iter.next() {
-                    Some(mlua::Value::String(s)) => s.to_str()?.to_string(),
-                    _ => return Ok(()),
-                };
-                let (key, val) = match (iter.next(), iter.next()) {
-                    (Some(k_val), Some(v)) => {
-                        let key_str = match k_val {
-                            mlua::Value::String(s) => s.to_str()?.to_string(),
-                            mlua::Value::Integer(i) => i.to_string(),
-                            _ => "default".to_string(),
-                        };
-                        (key_str, v)
-                    }
-                    (Some(v), None) => ("default".to_string(), v),
-                    _ => return Ok(()),
-                };
-                if val.is_nil() {
-                    let _ = db_store_set.remove(&table, &key);
-                } else if let Ok(json_val) = lua.from_value::<serde_json::Value>(val) {
-                    if json_val.is_null() {
-                        let _ = db_store_set.remove(&table, &key);
-                    } else if let Ok(json_str) = serde_json::to_string(&json_val) {
-                        let _ = db_store_set.set(&table, &key, &json_str);
-                    }
-                }
-                Ok(())
-            })
-            .unwrap(),
-        )
-        .unwrap();
-
+        let db = register_lua_db(&lua, db_store).unwrap();
         lua.globals().set("db", db).unwrap();
 
         // 1. Set a table
@@ -3511,90 +3550,7 @@ max_asset_broadcast_duty_cycle = 0.15
     fn test_db_flexible_args() {
         let lua = mlua::Lua::new();
         let db_store = DatabaseStore::new_in_memory().unwrap();
-
-        let db = lua.create_table().unwrap();
-        let db_store_get = db_store.clone();
-        db.set(
-            "get",
-            lua.create_function(move |lua, args: mlua::MultiValue| {
-                let mut iter = args.into_iter();
-                let table = match iter.next() {
-                    Some(mlua::Value::String(s)) => s.to_str()?.to_string(),
-                    _ => return Ok(mlua::Value::Nil),
-                };
-                let key = match iter.next() {
-                    Some(mlua::Value::String(s)) => s.to_str()?.to_string(),
-                    Some(mlua::Value::Integer(i)) => i.to_string(),
-                    _ => "default".to_string(),
-                };
-                if let Ok(Some(val)) = db_store_get.get(&table, &key) {
-                    if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(&val) {
-                        if json_val.is_null() {
-                            return Ok(mlua::Value::Nil);
-                        }
-                        if let Ok(lua_val) = lua.to_value(&json_val) {
-                            return Ok(mlua::Value::from(lua_val));
-                        }
-                    }
-                }
-                Ok(mlua::Value::Nil)
-            })
-            .unwrap(),
-        )
-        .unwrap();
-
-        let db_store_set = db_store.clone();
-        db.set(
-            "set",
-            lua.create_function(move |lua, args: mlua::MultiValue| {
-                let mut iter = args.into_iter();
-                let table = match iter.next() {
-                    Some(mlua::Value::String(s)) => s.to_str()?.to_string(),
-                    _ => return Ok(()),
-                };
-                let (key, val) = match (iter.next(), iter.next()) {
-                    (Some(k_val), Some(v)) => {
-                        let key_str = match k_val {
-                            mlua::Value::String(s) => s.to_str()?.to_string(),
-                            mlua::Value::Integer(i) => i.to_string(),
-                            _ => "default".to_string(),
-                        };
-                        (key_str, v)
-                    }
-                    (Some(v), None) => ("default".to_string(), v),
-                    _ => return Ok(()),
-                };
-                if val.is_nil() {
-                    let _ = db_store_set.remove(&table, &key);
-                } else if let Ok(json_val) = lua.from_value::<serde_json::Value>(val) {
-                    if json_val.is_null() {
-                        let _ = db_store_set.remove(&table, &key);
-                    } else if let Ok(json_str) = serde_json::to_string(&json_val) {
-                        let _ = db_store_set.set(&table, &key, &json_str);
-                    }
-                }
-                Ok(())
-            })
-            .unwrap(),
-        )
-        .unwrap();
-
-        let db_store_keys = db_store.clone();
-        db.set(
-            "keys",
-            lua.create_function(move |lua, table: String| {
-                let table_tbl = lua.create_table()?;
-                if let Ok(keys) = db_store_keys.keys(&table) {
-                    for (i, key) in keys.into_iter().enumerate() {
-                        table_tbl.set(i + 1, key)?;
-                    }
-                }
-                Ok(table_tbl)
-            })
-            .unwrap(),
-        )
-        .unwrap();
-
+        let db = register_lua_db(&lua, db_store).unwrap();
         lua.globals().set("db", db).unwrap();
 
         // 1. Two-arg set and get: db.set(table, key, val) and db.get(table, key)
@@ -3611,6 +3567,74 @@ max_asset_broadcast_duty_cycle = 0.15
         lua.load(r#"db.set("users", "user1", nil)"#).exec().unwrap();
         let is_nil: bool = lua.load(r#"return db.get("users", "user1") == nil"#).eval().unwrap();
         assert!(is_nil);
+    }
+
+    #[test]
+    fn test_db_granular_array_storage_and_individual_key_access() {
+        let lua = mlua::Lua::new();
+        let db_store = DatabaseStore::new_in_memory().unwrap();
+        let db = register_lua_db(&lua, db_store.clone()).unwrap();
+        lua.globals().set("db", db).unwrap();
+
+        // Save a collection of sectors under "all"
+        lua.load(
+            r#"
+            local sectors = {
+                [1] = { name = "Sol Central", ore = 100 },
+                [2] = { name = "Alpha Centauri", ore = 50 },
+                [3] = { name = "Sirius Prime", ore = 200 }
+            }
+            db.set("vt_sectors", "all", sectors)
+            "#,
+        )
+        .exec()
+        .unwrap();
+
+        // In SQLite db_store, this must be stored granularly as 3 separate rows!
+        assert_eq!(db_store.count("vt_sectors").unwrap(), 3);
+        let keys = db_store.keys("vt_sectors").unwrap();
+        assert_eq!(keys, vec!["1", "2", "3"]);
+
+        // Reading db.get("vt_sectors", "all") must reconstruct the Lua array of 3 sectors
+        let (len, s1_name, s2_ore): (usize, String, i64) = lua
+            .load(
+                r#"
+                local s = db.get("vt_sectors", "all")
+                return #s, s[1].name, s[2].ore
+                "#,
+            )
+            .eval()
+            .unwrap();
+        assert_eq!(len, 3);
+        assert_eq!(s1_name, "Sol Central");
+        assert_eq!(s2_ore, 50);
+
+        // Reading single sector 2 directly (O(1) row lookup)
+        let s2_name: String = lua
+            .load(r#"local s = db.get("vt_sectors", 2); return s.name"#)
+            .eval()
+            .unwrap();
+        assert_eq!(s2_name, "Alpha Centauri");
+
+        // Updating single sector 2 in-place
+        lua.load(r#"db.set("vt_sectors", 2, { name = "Alpha Outpost", ore = 75 })"#)
+            .exec()
+            .unwrap();
+
+        // Verify SQLite store still has 3 records and sector 2 was updated
+        assert_eq!(db_store.count("vt_sectors").unwrap(), 3);
+        let s2_updated_name: String = lua
+            .load(r#"local s = db.get("vt_sectors", 2); return s.name"#)
+            .eval()
+            .unwrap();
+        assert_eq!(s2_updated_name, "Alpha Outpost");
+
+        // Verify loading "all" reflects the updated sector 2
+        let s2_from_all_name: String = lua
+            .load(r#"local s = db.get("vt_sectors", "all"); return s[2].name"#)
+            .eval()
+            .unwrap();
+        assert_eq!(s2_from_all_name, "Alpha Outpost");
     }
 
     #[test]
