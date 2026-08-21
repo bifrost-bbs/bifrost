@@ -3,6 +3,7 @@
 pub mod app_mgr;
 pub mod auth;
 pub mod config_mgr;
+pub mod db_mgr;
 pub mod logs;
 pub mod stats;
 pub mod supervisor;
@@ -13,6 +14,7 @@ use anyhow::Result;
 use app_mgr::AppManager;
 use auth::AuthConfig;
 use config_mgr::ConfigManager;
+use db_mgr::DatabaseManager;
 use logs::LogBuffer;
 use stats::StatsManager;
 use supervisor::Supervisor;
@@ -30,6 +32,7 @@ pub struct HeimdallConfig {
     pub config_path: PathBuf,
     pub apps_dir: PathBuf,
     pub capture_dir: PathBuf,
+    pub db_path: PathBuf,
     pub auto_start_bbs: bool,
     pub radio_port: String,
 }
@@ -45,6 +48,7 @@ impl Default for HeimdallConfig {
             config_path: root.join("config.toml"),
             apps_dir: root.join("apps"),
             capture_dir: root.join("captured_packets"),
+            db_path: root.join("database.db"),
             workspace_root: root,
             auto_start_bbs: true,
             radio_port: "127.0.0.1:8088".to_string(),
@@ -64,12 +68,14 @@ impl HeimdallServer {
         let config_mgr = Arc::new(ConfigManager::new(&config.config_path));
         let app_mgr = Arc::new(AppManager::new(&config.apps_dir));
         let stats_mgr = Arc::new(StatsManager::new(&config.capture_dir));
+        let db_mgr = Arc::new(DatabaseManager::new(&config.db_path));
 
         let app_state = AppState {
             supervisor,
             config_mgr,
             app_mgr,
             stats_mgr,
+            db_mgr,
             log_buffer,
             auth_config: config.auth.clone(),
             web_dir: config.web_dir.clone(),

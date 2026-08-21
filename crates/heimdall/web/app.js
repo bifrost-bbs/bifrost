@@ -12,6 +12,7 @@ class HeimdallApp {
     this.currentSelectedApp = null;
     this.currentEditingFile = null;
     this.currentConfig = null;
+    this.currentSelectedTable = null;
     
     this.init();
   }
@@ -28,6 +29,7 @@ class HeimdallApp {
     this.fetchConfig();
     this.fetchTelemetry();
     this.fetchCaptures();
+    this.fetchDatabase();
     this.fetchHistoricalLogs();
 
     // Connect Log Stream WebSocket
@@ -40,6 +42,9 @@ class HeimdallApp {
       if (this.activeTab === 'telemetry') {
         this.fetchTelemetry();
         this.fetchCaptures();
+      }
+      if (this.activeTab === 'database') {
+        this.fetchDatabase();
       }
     }, 3000);
   }
@@ -81,6 +86,11 @@ class HeimdallApp {
       this.logIdSet.clear();
       this.renderLogs();
     });
+
+    // Database Controls
+    document.getElementById('btn-refresh-db').addEventListener('click', () => this.fetchDatabase());
+    document.getElementById('btn-clear-table').addEventListener('click', () => this.clearCurrentTable());
+    document.getElementById('btn-save-key').addEventListener('click', () => this.saveCurrentKey());
 
     // Web Terminal Controls & Keyboard capture
     document.getElementById('btn-term-reconnect').addEventListener('click', () => this.connectTerminalWebSocket());
@@ -751,6 +761,161 @@ directory = "${document.getElementById('cfg-capture-dir').value}"
   sendTerminalKey(key) {
     if (this.termWs && this.termWs.readyState === WebSocket.OPEN) {
       this.termWs.send(JSON.stringify({ type: 'key', key: key }));
+    }
+  }
+
+  // --- DATABASE MANAGER ---
+
+  async fetchDatabase() {
+    try {
+      const res = await fetch('/api/database/summary');
+      if (!res.ok) return;
+      const data = await res.json();
+
+      const pathEl = document.getElementById('db-file-path');
+      if (pathEl) pathEl.textContent = data.path;
+      const totalTblEl = document.getElementById('db-total-tables');
+      if (totalTblEl) totalTblEl.textContent = data.total_tables;
+      const totalRecEl = document.getElementById('db-total-records');
+      if (totalRecEl) totalRecEl.textContent = data.total_records;
+
+      const container = document.getElementById('db-tables-container');
+      if (!container) return;
+      container.innerHTML = '';
+
+      if (!data.tables || data.tables.length === 0) {
+        container.innerHTML = '<div class="empty-state" style="padding: 10px; font-size: 11px;">No tables found in database</div>';
+        return;
+      }
+
+      data.tables.forEach(tbl => {
+        const btn = document.createElement('button');
+        btn.className = `retro-btn table-item-btn ${this.currentSelectedTable === tbl.namespace ? 'btn-active' : ''}`;
+        btn.style.textAlign = 'left';
+        btn.style.display = 'flex';
+        btn.style.justifyContent = 'space-between';
+        btn.style.padding = '6px 10px';
+        btn.innerHTML = `<span><strong>${escapeHtml(tbl.namespace)}</strong></span> <span class="badge">${tbl.count}</span>`;
+        btn.addEventListener('click', () => this.selectTable(tbl.namespace));
+        container.appendChild(btn);
+      });
+
+      if (this.currentSelectedTable) {
+        this.selectTable(this.currentSelectedTable, false);
+      }
+    } catch (e) {
+      console.warn('Failed to fetch database summary:', e);
+    }
+  }
+
+  async selectTable(namespace, refreshTables = true) {
+    this.currentSelectedTable = namespace;
+    const titleEl = document.getElementById('db-selected-table-title');
+    if (titleEl) titleEl.textContent = `══ TABLE: ${namespace.toUpperCase()} ══`;
+    const clearBtn = document.getElementById('btn-clear-table');
+    if (clearBtn) clearBtn.style.display = 'inline-block';
+    const actionsBar = document.getElementById('db-actions-bar');
+    if (actionsBar) actionsBar.style.display = 'flex';
+
+    // Highlight active in tables list
+    document.querySelectorAll('.table-item-btn').forEach(btn => {
+      if (btn.textContent.includes(namespace)) {
+        btn.classList.add('btn-active');
+      } else {
+        btn.classList.remove('btn-active');
+      }
+    });
+
+    try {
+      const res = await fetch(`/api/database/table/${encodeURIComponent(namespace)}`);
+      if (!res.ok) return;
+      const records = await res.json();
+
+      const tbody = document.getElementById('db-records-tbody');
+      if (!tbody) return;
+      tbody.innerHTML = '';
+
+      if (!records || records.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="3" class="empty-state">Table is empty</td></tr>';
+        return;
+      }
+
+      records.forEach(rec => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td style="font-family: monospace; font-weight: bold;">${escapeHtml(rec.key)}</td>
+          <td style="font-family: monospace; word-break: break-all;">${escapeHtml(rec.value)}</td>
+          <td style="text-align: center;">
+            <button class="btn-small btn-danger delete-key-btn" data-key="${escapeHtml(rec.key)}">🗑 DEL</button>
+          </td>
+        `;
+        tbody.appendChild(tr);
+      });
+
+      tbody.querySelectorAll('.delete-key-btn').forEach(btn => {
+        btn.addEventListener('click', () => this.deleteKey(namespace, btn.dataset.key));
+      });
+    } catch (e) {
+      console.warn('Failed to load table records:', e);
+    }
+  }
+
+  async saveCurrentKey() {
+    if (!this.currentSelectedTable) return;
+    const keyInput = document.getElementById('db-new-key');
+    const valInput = document.getElementById('db-new-val');
+    const key = keyInput.value.trim();
+    const val = valInput.value.trim();
+
+    if (!key) {
+      alert('Please specify a key.');
+      return;
+    }
+
+    try {
+      const res = await fetch(`/api/database/table/${encodeURIComponent(this.currentSelectedTable)}/key/${encodeURIComponent(key)}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ value: val }),
+      });
+      if (res.ok) {
+        keyInput.value = '';
+        valInput.value = '';
+        this.fetchDatabase();
+      } else {
+        alert('Failed to save key.');
+      }
+    } catch (e) {
+      alert('Error saving key: ' + e);
+    }
+  }
+
+  async deleteKey(namespace, key) {
+    if (!confirm(`Delete key "${key}" from table "${namespace}"?`)) return;
+    try {
+      const res = await fetch(`/api/database/table/${encodeURIComponent(namespace)}/key/${encodeURIComponent(key)}`, {
+        method: 'DELETE',
+      });
+      if (res.ok) {
+        this.fetchDatabase();
+      }
+    } catch (e) {
+      console.warn('Failed to delete key:', e);
+    }
+  }
+
+  async clearCurrentTable() {
+    if (!this.currentSelectedTable) return;
+    if (!confirm(`Clear all records in table "${this.currentSelectedTable}"? This action cannot be undone.`)) return;
+    try {
+      const res = await fetch(`/api/database/table/${encodeURIComponent(this.currentSelectedTable)}`, {
+        method: 'DELETE',
+      });
+      if (res.ok) {
+        this.fetchDatabase();
+      }
+    } catch (e) {
+      console.warn('Failed to clear table:', e);
     }
   }
 }

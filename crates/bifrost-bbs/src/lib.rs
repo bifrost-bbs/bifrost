@@ -12,6 +12,9 @@ use std::sync::Mutex as StdMutex;
 use std::time::Instant;
 use tokio::sync::mpsc;
 
+pub mod db;
+pub use db::{DatabaseConfig, DatabaseStore, default_database_config};
+
 // Pull from sibling workspace crates
 use bifrost_transport::{
     MeshBbsMessage, MessageReassembler, MockSocketTransport, RadioPacket, RadioTransport,
@@ -177,6 +180,8 @@ pub struct AppConfig {
     pub apps: AppsConfig,
     #[serde(default = "default_packet_capture_config")]
     pub packet_capture: PacketCaptureConfig,
+    #[serde(default = "default_database_config")]
+    pub database: DatabaseConfig,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq)]
@@ -372,6 +377,7 @@ pub fn default_config() -> AppConfig {
         admin_nodes: Vec::new(),
         apps: default_apps_config(),
         packet_capture: default_packet_capture_config(),
+        database: default_database_config(),
     }
 }
 
@@ -822,11 +828,21 @@ pub async fn start_server_with_stats(
     // Passive on-demand broadcasting is handled when a connected client requests a missing asset.
     if config.asset_broadcaster.enable_on_demand_broadcast {
         info!("On-demand public asset broadcasting enabled.");
+    }    let active_sessions = Arc::new(StdMutex::new(HashMap::<[u8; 32], Session>::new()));
+    let db_path = find_workspace_path(&config.database.path);
+    if let Some(parent) = db_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
     }
-    let active_sessions = Arc::new(StdMutex::new(HashMap::<[u8; 32], Session>::new()));
-    let db_store = Arc::new(StdMutex::new(
-        HashMap::<String, HashMap<String, String>>::new(),
-    ));
+    let db_store = match DatabaseStore::new(&db_path) {
+        Ok(store) => {
+            info!("SQLite database initialized at {:?}", db_path);
+            store
+        }
+        Err(e) => {
+            warn!("Failed to open SQLite database at {:?}: {:?}. Falling back to in-memory database.", db_path, e);
+            DatabaseStore::new_in_memory().expect("In-memory database should always initialize")
+        }
+    };
     let mut reassembler = MessageReassembler::new();
     let asset_manifest_map = Arc::new(load_app_manifests(&config.apps.enabled));
     let bbs_stats = Arc::new(BbsStats::new());
@@ -923,14 +939,13 @@ pub async fn start_server_with_stats(
                             .iter()
                             .map(|b| format!("{:02x}", b))
                             .collect::<String>();
-                        let mut store = db_store.lock().unwrap();
-                        let users_table =
-                            store.entry("users".to_string()).or_insert_with(HashMap::new);
 
                         // Merge metadata into existing record if present
-                        let mut existing_user = users_table
-                            .get(&node_hex)
-                            .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+                        let mut existing_user = db_store
+                            .get("users", &node_hex)
+                            .ok()
+                            .flatten()
+                            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
                             .and_then(|v| v.as_object().cloned())
                             .unwrap_or_default();
 
@@ -940,7 +955,7 @@ pub async fn start_server_with_stats(
 
                         if let Ok(merged_json) = serde_json::to_string(&existing_user) {
                             log::info!("Processed advert packet for node {}: {}", node_hex, merged_json);
-                            users_table.insert(node_hex, merged_json);
+                            let _ = db_store.set("users", &node_hex, &merged_json);
                         }
 
                         continue;
@@ -1091,7 +1106,7 @@ fn run_session_task(
     node_id: [u8; 32],
     mut rx: mpsc::Receiver<MeshBbsMessage>,
     transport: Arc<dyn RadioTransport>,
-    db_store: Arc<StdMutex<HashMap<String, HashMap<String, String>>>>,
+    db_store: DatabaseStore,
     rt_handle: tokio::runtime::Handle,
     form_colors: FormColorsConfig,
     admin_nodes: Vec<String>,
@@ -1112,12 +1127,9 @@ fn run_session_task(
     let is_configured_admin = admin_nodes.contains(&node_hex_str);
 
     // Check if first user in database
-    let is_first_user = {
-        let store = db_store.lock().unwrap();
-        match store.get("users") {
-            Some(users_map) => users_map.is_empty(),
-            None => true,
-        }
+    let is_first_user = match db_store.keys("users") {
+        Ok(keys) => keys.is_empty(),
+        Err(_) => true,
     };
 
     let mut initial_permissions = vec!["read".to_string(), "write".to_string()];
@@ -1126,18 +1138,10 @@ fn run_session_task(
     }
 
     // Persist initial permissions in DB
-    let node_hex_str_clone = node_hex_str.clone();
-    let db_store_perms = db_store.clone();
-    {
-        let mut store = db_store_perms.lock().unwrap();
-        let perms_table = store
-            .entry("permissions".to_string())
-            .or_insert_with(HashMap::new);
-        if !perms_table.contains_key(&node_hex_str_clone) {
-            let json_str =
-                serde_json::to_string(&initial_permissions).unwrap_or_else(|_| "[]".to_string());
-            perms_table.insert(node_hex_str_clone, json_str);
-        }
+    if let Ok(None) = db_store.get("permissions", &node_hex_str) {
+        let json_str =
+            serde_json::to_string(&initial_permissions).unwrap_or_else(|_| "[]".to_string());
+        let _ = db_store.set("permissions", &node_hex_str, &json_str);
     }
 
     // Accumulates output bytes for term.flush()
@@ -1786,7 +1790,6 @@ fn run_session_task(
     db.set(
         "get",
         lua.create_function(move |lua, args: mlua::MultiValue| {
-            let store = db_store_get.lock().unwrap();
             let mut iter = args.into_iter();
             let table = match iter.next() {
                 Some(mlua::Value::String(s)) => s.to_str()?.to_string(),
@@ -1797,15 +1800,13 @@ fn run_session_task(
                 Some(mlua::Value::Integer(i)) => i.to_string(),
                 _ => "default".to_string(),
             };
-            if let Some(tbl) = store.get(&table) {
-                if let Some(val) = tbl.get(&key) {
-                    if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(val) {
-                        if json_val.is_null() {
-                            return Ok(mlua::Value::Nil);
-                        }
-                        if let Ok(lua_val) = lua.to_value(&json_val) {
-                            return Ok(mlua::Value::from(lua_val));
-                        }
+            if let Ok(Some(val)) = db_store_get.get(&table, &key) {
+                if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(&val) {
+                    if json_val.is_null() {
+                        return Ok(mlua::Value::Nil);
+                    }
+                    if let Ok(lua_val) = lua.to_value(&json_val) {
+                        return Ok(mlua::Value::from(lua_val));
                     }
                 }
             }
@@ -1817,7 +1818,6 @@ fn run_session_task(
     db.set(
         "set",
         lua.create_function(move |lua, args: mlua::MultiValue| {
-            let mut store = db_store_set.lock().unwrap();
             let mut iter = args.into_iter();
             let table = match iter.next() {
                 Some(mlua::Value::String(s)) => s.to_str()?.to_string(),
@@ -1836,19 +1836,12 @@ fn run_session_task(
                 _ => return Ok(()),
             };
             if val.is_nil() {
-                if let Some(tbl) = store.get_mut(&table) {
-                    tbl.remove(&key);
-                }
+                let _ = db_store_set.remove(&table, &key);
             } else if let Ok(json_val) = lua.from_value::<serde_json::Value>(val) {
                 if json_val.is_null() {
-                    if let Some(tbl) = store.get_mut(&table) {
-                        tbl.remove(&key);
-                    }
+                    let _ = db_store_set.remove(&table, &key);
                 } else if let Ok(json_str) = serde_json::to_string(&json_val) {
-                    store
-                        .entry(table)
-                        .or_insert_with(HashMap::new)
-                        .insert(key, json_str);
+                    let _ = db_store_set.set(&table, &key, &json_str);
                 }
             }
             Ok(())
@@ -1859,11 +1852,10 @@ fn run_session_task(
     db.set(
         "keys",
         lua.create_function(move |lua, table: String| {
-            let store = db_store_keys.lock().unwrap();
             let table_tbl = lua.create_table()?;
-            if let Some(tbl) = store.get(&table) {
-                for (i, key) in tbl.keys().enumerate() {
-                    table_tbl.set(i + 1, key.clone())?;
+            if let Ok(keys) = db_store_keys.keys(&table) {
+                for (i, key) in keys.into_iter().enumerate() {
+                    table_tbl.set(i + 1, key)?;
                 }
             }
             Ok(table_tbl)
@@ -1964,13 +1956,10 @@ fn run_session_task(
     session.set(
         "callsign",
         lua.create_function(move |_, (): ()| {
-            let store = db_store_callsign.lock().unwrap();
-            if let Some(users_table) = store.get("users") {
-                if let Some(user_json) = users_table.get(&node_hex_str_clone) {
-                    if let Ok(user_obj) = serde_json::from_str::<serde_json::Value>(user_json) {
-                        if let Some(nickname) = user_obj.get("nickname").and_then(|v| v.as_str()) {
-                            return Ok(nickname.to_string());
-                        }
+            if let Ok(Some(user_json)) = db_store_callsign.get("users", &node_hex_str_clone) {
+                if let Ok(user_obj) = serde_json::from_str::<serde_json::Value>(&user_json) {
+                    if let Some(nickname) = user_obj.get("nickname").and_then(|v| v.as_str()) {
+                        return Ok(nickname.to_string());
                     }
                 }
             }
@@ -2004,16 +1993,13 @@ fn run_session_task(
     session.set(
         "permissions",
         lua.create_function(move |lua, (): ()| {
-            let store = db_store_perms.lock().unwrap();
-            if let Some(perms_table) = store.get("permissions") {
-                if let Some(json_str) = perms_table.get(&node_hex_str_clone) {
-                    if let Ok(perms) = serde_json::from_str::<Vec<String>>(json_str) {
-                        let table = lua.create_table()?;
-                        for (i, p) in perms.into_iter().enumerate() {
-                            table.set(i + 1, p)?;
-                        }
-                        return Ok(table);
+            if let Ok(Some(json_str)) = db_store_perms.get("permissions", &node_hex_str_clone) {
+                if let Ok(perms) = serde_json::from_str::<Vec<String>>(&json_str) {
+                    let table = lua.create_table()?;
+                    for (i, p) in perms.into_iter().enumerate() {
+                        table.set(i + 1, p)?;
                     }
+                    return Ok(table);
                 }
             }
             let empty_tbl = lua.create_table()?;
@@ -2026,12 +2012,9 @@ fn run_session_task(
     session.set(
         "has_permission",
         lua.create_function(move |_, perm: String| {
-            let store = db_store_has_perm.lock().unwrap();
-            if let Some(perms_table) = store.get("permissions") {
-                if let Some(json_str) = perms_table.get(&node_hex_str_clone) {
-                    if let Ok(perms) = serde_json::from_str::<Vec<String>>(json_str) {
-                        return Ok(perms.contains(&perm));
-                    }
+            if let Ok(Some(json_str)) = db_store_has_perm.get("permissions", &node_hex_str_clone) {
+                if let Ok(perms) = serde_json::from_str::<Vec<String>>(&json_str) {
+                    return Ok(perms.contains(&perm));
                 }
             }
             Ok(false)
@@ -2745,15 +2728,15 @@ submit_bg = 5
     #[test]
     fn test_permissions_first_user_gets_admin() {
         // Simulates the permissions initialization logic for the first user
-        let db_store: HashMap<String, HashMap<String, String>> = HashMap::new();
+        let db_store = DatabaseStore::new_in_memory().unwrap();
         let admin_nodes: Vec<String> = Vec::new();
         let node_hex =
             "0505050505050505050505050505050505050505050505050505050505050505".to_string();
 
         let is_configured_admin = admin_nodes.contains(&node_hex);
-        let is_first_user = match db_store.get("users") {
-            Some(users_map) => users_map.is_empty(),
-            None => true,
+        let is_first_user = match db_store.keys("users") {
+            Ok(users_map) => users_map.is_empty(),
+            Err(_) => true,
         };
 
         assert!(!is_configured_admin);
@@ -2772,16 +2755,14 @@ submit_bg = 5
             "aabbccdd00000000000000000000000000000000000000000000000000000000".to_string();
         let admin_nodes = vec![node_hex.clone()];
 
-        let mut db_store: HashMap<String, HashMap<String, String>> = HashMap::new();
+        let db_store = DatabaseStore::new_in_memory().unwrap();
         // Simulate an existing user so this node is NOT the first user
-        let mut users = HashMap::new();
-        users.insert("other_node".to_string(), "{}".to_string());
-        db_store.insert("users".to_string(), users);
+        db_store.set("users", "other_node", "{}").unwrap();
 
         let is_configured_admin = admin_nodes.contains(&node_hex);
-        let is_first_user = match db_store.get("users") {
-            Some(users_map) => users_map.is_empty(),
-            None => true,
+        let is_first_user = match db_store.keys("users") {
+            Ok(users_map) => users_map.is_empty(),
+            Err(_) => true,
         };
 
         assert!(is_configured_admin);
@@ -2800,15 +2781,13 @@ submit_bg = 5
             "1111111111111111111111111111111111111111111111111111111111111111".to_string();
         let admin_nodes: Vec<String> = Vec::new();
 
-        let mut db_store: HashMap<String, HashMap<String, String>> = HashMap::new();
-        let mut users = HashMap::new();
-        users.insert("existing_admin".to_string(), "{}".to_string());
-        db_store.insert("users".to_string(), users);
+        let db_store = DatabaseStore::new_in_memory().unwrap();
+        db_store.set("users", "existing_admin", "{}").unwrap();
 
         let is_configured_admin = admin_nodes.contains(&node_hex);
-        let is_first_user = match db_store.get("users") {
-            Some(users_map) => users_map.is_empty(),
-            None => true,
+        let is_first_user = match db_store.keys("users") {
+            Ok(users_map) => users_map.is_empty(),
+            Err(_) => true,
         };
 
         assert!(!is_configured_admin);
@@ -2820,21 +2799,19 @@ submit_bg = 5
         }
         assert_eq!(perms, vec!["read", "write"]);
     }
+
     #[test]
     fn test_permissions_persistence_in_db() {
-        let mut db_store: HashMap<String, HashMap<String, String>> = HashMap::new();
+        let db_store = DatabaseStore::new_in_memory().unwrap();
         let node_hex = "abcd".to_string();
         let perms = vec!["read".to_string(), "write".to_string(), "admin".to_string()];
         let json_str = serde_json::to_string(&perms).unwrap();
 
-        let perms_table = db_store
-            .entry("permissions".to_string())
-            .or_insert_with(HashMap::new);
-        perms_table.insert(node_hex.clone(), json_str);
+        db_store.set("permissions", &node_hex, &json_str).unwrap();
 
         // Verify we can read them back
-        let stored = db_store.get("permissions").unwrap().get(&node_hex).unwrap();
-        let decoded: Vec<String> = serde_json::from_str(stored).unwrap();
+        let stored = db_store.get("permissions", &node_hex).unwrap().unwrap();
+        let decoded: Vec<String> = serde_json::from_str(&stored).unwrap();
         assert_eq!(decoded, vec!["read", "write", "admin"]);
     }
 
@@ -2874,42 +2851,36 @@ submit_bg = 5
     #[test]
     fn test_permissions_dedup_on_reconnect() {
         // If perms already exist in DB, they should NOT be overwritten
-        let mut db_store: HashMap<String, HashMap<String, String>> = HashMap::new();
+        let db_store = DatabaseStore::new_in_memory().unwrap();
         let node_hex = "node123".to_string();
         let original_perms = vec!["read".to_string()];
         let json_str = serde_json::to_string(&original_perms).unwrap();
 
-        let perms_table = db_store
-            .entry("permissions".to_string())
-            .or_insert_with(HashMap::new);
-        perms_table.insert(node_hex.clone(), json_str);
+        db_store.set("permissions", &node_hex, &json_str).unwrap();
 
         // Simulate reconnect logic: only insert if not present
         let new_perms = vec!["read".to_string(), "write".to_string(), "admin".to_string()];
         let new_json = serde_json::to_string(&new_perms).unwrap();
-        let perms_table = db_store.get_mut("permissions").unwrap();
-        if !perms_table.contains_key(&node_hex) {
-            perms_table.insert(node_hex.clone(), new_json);
+        if db_store.get("permissions", &node_hex).unwrap().is_none() {
+            db_store.set("permissions", &node_hex, &new_json).unwrap();
         }
 
         // Should still have original perms
-        let stored = db_store.get("permissions").unwrap().get(&node_hex).unwrap();
-        let decoded: Vec<String> = serde_json::from_str(stored).unwrap();
+        let stored = db_store.get("permissions", &node_hex).unwrap().unwrap();
+        let decoded: Vec<String> = serde_json::from_str(&stored).unwrap();
         assert_eq!(decoded, vec!["read"]);
     }
 
     #[test]
     fn test_db_keys_pattern() {
-        let mut db_store: HashMap<String, HashMap<String, String>> = HashMap::new();
-        let mut users = HashMap::new();
-        users.insert("node_a".to_string(), r#"{"nickname":"Alice"}"#.to_string());
-        users.insert("node_b".to_string(), r#"{"nickname":"Bob"}"#.to_string());
-        db_store.insert("users".to_string(), users);
+        let db_store = DatabaseStore::new_in_memory().unwrap();
+        db_store.set("users", "node_a", r#"{"nickname":"Alice"}"#).unwrap();
+        db_store.set("users", "node_b", r#"{"nickname":"Bob"}"#).unwrap();
 
-        let keys: Vec<String> = db_store.get("users").unwrap().keys().cloned().collect();
+        let mut keys: Vec<String> = db_store.keys("users").unwrap();
+        keys.sort();
         assert_eq!(keys.len(), 2);
-        assert!(keys.contains(&"node_a".to_string()));
-        assert!(keys.contains(&"node_b".to_string()));
+        assert_eq!(keys, vec!["node_a".to_string(), "node_b".to_string()]);
     }
 
     #[test]
@@ -3397,14 +3368,13 @@ max_asset_broadcast_duty_cycle = 0.15
     #[test]
     fn test_db_set_nil_and_null_handling() {
         let lua = mlua::Lua::new();
-        let db_store = Arc::new(StdMutex::new(HashMap::<String, HashMap<String, String>>::new()));
+        let db_store = DatabaseStore::new_in_memory().unwrap();
 
         let db = lua.create_table().unwrap();
         let db_store_get = db_store.clone();
         db.set(
             "get",
             lua.create_function(move |lua, args: mlua::MultiValue| {
-                let store = db_store_get.lock().unwrap();
                 let mut iter = args.into_iter();
                 let table = match iter.next() {
                     Some(mlua::Value::String(s)) => s.to_str()?.to_string(),
@@ -3415,15 +3385,13 @@ max_asset_broadcast_duty_cycle = 0.15
                     Some(mlua::Value::Integer(i)) => i.to_string(),
                     _ => "default".to_string(),
                 };
-                if let Some(tbl) = store.get(&table) {
-                    if let Some(val) = tbl.get(&key) {
-                        if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(val) {
-                            if json_val.is_null() {
-                                return Ok(mlua::Value::Nil);
-                            }
-                            if let Ok(lua_val) = lua.to_value(&json_val) {
-                                return Ok(mlua::Value::from(lua_val));
-                            }
+                if let Ok(Some(val)) = db_store_get.get(&table, &key) {
+                    if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(&val) {
+                        if json_val.is_null() {
+                            return Ok(mlua::Value::Nil);
+                        }
+                        if let Ok(lua_val) = lua.to_value(&json_val) {
+                            return Ok(mlua::Value::from(lua_val));
                         }
                     }
                 }
@@ -3437,7 +3405,6 @@ max_asset_broadcast_duty_cycle = 0.15
         db.set(
             "set",
             lua.create_function(move |lua, args: mlua::MultiValue| {
-                let mut store = db_store_set.lock().unwrap();
                 let mut iter = args.into_iter();
                 let table = match iter.next() {
                     Some(mlua::Value::String(s)) => s.to_str()?.to_string(),
@@ -3456,19 +3423,12 @@ max_asset_broadcast_duty_cycle = 0.15
                     _ => return Ok(()),
                 };
                 if val.is_nil() {
-                    if let Some(tbl) = store.get_mut(&table) {
-                        tbl.remove(&key);
-                    }
+                    let _ = db_store_set.remove(&table, &key);
                 } else if let Ok(json_val) = lua.from_value::<serde_json::Value>(val) {
                     if json_val.is_null() {
-                        if let Some(tbl) = store.get_mut(&table) {
-                            tbl.remove(&key);
-                        }
+                        let _ = db_store_set.remove(&table, &key);
                     } else if let Ok(json_str) = serde_json::to_string(&json_val) {
-                        store
-                            .entry(table)
-                            .or_insert_with(HashMap::new)
-                            .insert(key, json_str);
+                        let _ = db_store_set.set(&table, &key, &json_str);
                     }
                 }
                 Ok(())
@@ -3550,14 +3510,13 @@ max_asset_broadcast_duty_cycle = 0.15
     #[test]
     fn test_db_flexible_args() {
         let lua = mlua::Lua::new();
-        let db_store = Arc::new(StdMutex::new(HashMap::<String, HashMap<String, String>>::new()));
+        let db_store = DatabaseStore::new_in_memory().unwrap();
 
         let db = lua.create_table().unwrap();
         let db_store_get = db_store.clone();
         db.set(
             "get",
             lua.create_function(move |lua, args: mlua::MultiValue| {
-                let store = db_store_get.lock().unwrap();
                 let mut iter = args.into_iter();
                 let table = match iter.next() {
                     Some(mlua::Value::String(s)) => s.to_str()?.to_string(),
@@ -3568,15 +3527,13 @@ max_asset_broadcast_duty_cycle = 0.15
                     Some(mlua::Value::Integer(i)) => i.to_string(),
                     _ => "default".to_string(),
                 };
-                if let Some(tbl) = store.get(&table) {
-                    if let Some(val) = tbl.get(&key) {
-                        if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(val) {
-                            if json_val.is_null() {
-                                return Ok(mlua::Value::Nil);
-                            }
-                            if let Ok(lua_val) = lua.to_value(&json_val) {
-                                return Ok(mlua::Value::from(lua_val));
-                            }
+                if let Ok(Some(val)) = db_store_get.get(&table, &key) {
+                    if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(&val) {
+                        if json_val.is_null() {
+                            return Ok(mlua::Value::Nil);
+                        }
+                        if let Ok(lua_val) = lua.to_value(&json_val) {
+                            return Ok(mlua::Value::from(lua_val));
                         }
                     }
                 }
@@ -3590,7 +3547,6 @@ max_asset_broadcast_duty_cycle = 0.15
         db.set(
             "set",
             lua.create_function(move |lua, args: mlua::MultiValue| {
-                let mut store = db_store_set.lock().unwrap();
                 let mut iter = args.into_iter();
                 let table = match iter.next() {
                     Some(mlua::Value::String(s)) => s.to_str()?.to_string(),
@@ -3609,22 +3565,31 @@ max_asset_broadcast_duty_cycle = 0.15
                     _ => return Ok(()),
                 };
                 if val.is_nil() {
-                    if let Some(tbl) = store.get_mut(&table) {
-                        tbl.remove(&key);
-                    }
+                    let _ = db_store_set.remove(&table, &key);
                 } else if let Ok(json_val) = lua.from_value::<serde_json::Value>(val) {
                     if json_val.is_null() {
-                        if let Some(tbl) = store.get_mut(&table) {
-                            tbl.remove(&key);
-                        }
+                        let _ = db_store_set.remove(&table, &key);
                     } else if let Ok(json_str) = serde_json::to_string(&json_val) {
-                        store
-                            .entry(table)
-                            .or_insert_with(HashMap::new)
-                            .insert(key, json_str);
+                        let _ = db_store_set.set(&table, &key, &json_str);
                     }
                 }
                 Ok(())
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        let db_store_keys = db_store.clone();
+        db.set(
+            "keys",
+            lua.create_function(move |lua, table: String| {
+                let table_tbl = lua.create_table()?;
+                if let Ok(keys) = db_store_keys.keys(&table) {
+                    for (i, key) in keys.into_iter().enumerate() {
+                        table_tbl.set(i + 1, key)?;
+                    }
+                }
+                Ok(table_tbl)
             })
             .unwrap(),
         )

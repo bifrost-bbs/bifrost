@@ -3,6 +3,7 @@
 use crate::app_mgr::AppManager;
 use crate::auth::{AuthConfig, auth_middleware};
 use crate::config_mgr::ConfigManager;
+use crate::db_mgr::DatabaseManager;
 use crate::logs::{LogBuffer, LogQuery};
 use crate::stats::StatsManager;
 use crate::supervisor::Supervisor;
@@ -29,6 +30,7 @@ pub struct AppState {
     pub config_mgr: Arc<ConfigManager>,
     pub app_mgr: Arc<AppManager>,
     pub stats_mgr: Arc<StatsManager>,
+    pub db_mgr: Arc<DatabaseManager>,
     pub log_buffer: Arc<LogBuffer>,
     pub auth_config: AuthConfig,
     pub web_dir: Option<PathBuf>,
@@ -62,6 +64,11 @@ pub struct AppFileQuery {
     pub path: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct SetKeyBody {
+    pub value: String,
+}
+
 pub fn create_router(state: AppState) -> Router {
     let auth_conf = state.auth_config.clone();
 
@@ -84,6 +91,11 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/apps/:app_id/files", get(list_app_files_handler))
         .route("/api/apps/:app_id/file_content", get(get_app_file_content_handler).post(save_app_file_content_handler))
         .route("/api/apps/:app_id/files/:filename", post(save_app_file_handler))
+        // Database
+        .route("/api/database/summary", get(get_database_summary_handler))
+        .route("/api/database/tables", get(list_database_tables_handler))
+        .route("/api/database/table/:namespace", get(get_database_table_handler).delete(clear_database_table_handler))
+        .route("/api/database/table/:namespace/key/:key", get(get_database_key_handler).post(set_database_key_handler).delete(delete_database_key_handler))
         // Telemetry & Captures
         .route("/api/telemetry/summary", get(get_telemetry_summary_handler))
         .route("/api/telemetry/captures", get(get_captures_handler))
@@ -346,6 +358,82 @@ async fn get_capture_summary_handler(State(state): State<AppState>) -> impl Into
     Json(summary)
 }
 
+async fn get_database_summary_handler(
+    State(state): State<AppState>,
+) -> Result<Json<crate::db_mgr::DatabaseSummary>, (StatusCode, String)> {
+    state
+        .db_mgr
+        .summary()
+        .map(Json)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
+async fn list_database_tables_handler(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<crate::db_mgr::TableSummary>>, (StatusCode, String)> {
+    state
+        .db_mgr
+        .list_tables()
+        .map(Json)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
+async fn get_database_table_handler(
+    State(state): State<AppState>,
+    AxumPath(namespace): AxumPath<String>,
+) -> Result<Json<Vec<crate::db_mgr::KeyValueEntry>>, (StatusCode, String)> {
+    state
+        .db_mgr
+        .get_table_entries(&namespace)
+        .map(Json)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
+async fn clear_database_table_handler(
+    State(state): State<AppState>,
+    AxumPath(namespace): AxumPath<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let count = state
+        .db_mgr
+        .clear_table(&namespace)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(serde_json::json!({ "status": "ok", "cleared_records": count })))
+}
+
+async fn get_database_key_handler(
+    State(state): State<AppState>,
+    AxumPath((namespace, key)): AxumPath<(String, String)>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let val = state
+        .db_mgr
+        .get_key(&namespace, &key)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(serde_json::json!({ "namespace": namespace, "key": key, "value": val })))
+}
+
+async fn set_database_key_handler(
+    State(state): State<AppState>,
+    AxumPath((namespace, key)): AxumPath<(String, String)>,
+    Json(body): Json<SetKeyBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    state
+        .db_mgr
+        .set_key(&namespace, &key, &body.value)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(serde_json::json!({ "status": "ok", "namespace": namespace, "key": key })))
+}
+
+async fn delete_database_key_handler(
+    State(state): State<AppState>,
+    AxumPath((namespace, key)): AxumPath<(String, String)>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    state
+        .db_mgr
+        .delete_key(&namespace, &key)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(serde_json::json!({ "status": "ok", "deleted": true })))
+}
+
 // --- WEBSOCKET HANDLERS ---
 
 async fn ws_logs_handler(
@@ -394,12 +482,14 @@ mod tests {
         let config_mgr = Arc::new(ConfigManager::new(temp_dir.join("config.toml")));
         let app_mgr = Arc::new(AppManager::new(temp_dir.join("apps")));
         let stats_mgr = Arc::new(StatsManager::new(temp_dir.join("captures")));
+        let db_mgr = Arc::new(DatabaseManager::new(temp_dir.join("database.db")));
 
         let state = AppState {
             supervisor,
             config_mgr,
             app_mgr,
             stats_mgr,
+            db_mgr,
             log_buffer: log_buf,
             auth_config: AuthConfig::default(),
             web_dir: None,
@@ -487,6 +577,37 @@ directory = "captured_packets"
         let req_logs = Request::builder().uri("/api/logs").body(Body::empty()).unwrap();
         let resp_logs = app.clone().oneshot(req_logs).await.unwrap();
         assert_eq!(resp_logs.status(), StatusCode::OK);
+
+        // Test GET /api/database/summary
+        let req_db_sum = Request::builder().uri("/api/database/summary").body(Body::empty()).unwrap();
+        let resp_db_sum = app.clone().oneshot(req_db_sum).await.unwrap();
+        assert_eq!(resp_db_sum.status(), StatusCode::OK);
+
+        // Test POST /api/database/table/:namespace/key/:key
+        let set_body = serde_json::json!({ "value": "{\"test\": 123}" }).to_string();
+        let req_set_db = Request::builder()
+            .method("POST")
+            .uri("/api/database/table/unit_test_ns/key/key1")
+            .header("Content-Type", "application/json")
+            .body(Body::from(set_body))
+            .unwrap();
+        let resp_set_db = app.clone().oneshot(req_set_db).await.unwrap();
+        assert_eq!(resp_set_db.status(), StatusCode::OK);
+
+        // Test GET /api/database/tables
+        let req_db_tbls = Request::builder().uri("/api/database/tables").body(Body::empty()).unwrap();
+        let resp_db_tbls = app.clone().oneshot(req_db_tbls).await.unwrap();
+        assert_eq!(resp_db_tbls.status(), StatusCode::OK);
+
+        // Test GET /api/database/table/:namespace
+        let req_db_rows = Request::builder().uri("/api/database/table/unit_test_ns").body(Body::empty()).unwrap();
+        let resp_db_rows = app.clone().oneshot(req_db_rows).await.unwrap();
+        assert_eq!(resp_db_rows.status(), StatusCode::OK);
+
+        // Test DELETE /api/database/table/:namespace/key/:key
+        let req_del_key = Request::builder().method("DELETE").uri("/api/database/table/unit_test_ns/key/key1").body(Body::empty()).unwrap();
+        let resp_del_key = app.clone().oneshot(req_del_key).await.unwrap();
+        assert_eq!(resp_del_key.status(), StatusCode::OK);
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }

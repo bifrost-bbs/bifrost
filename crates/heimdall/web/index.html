@@ -67,6 +67,9 @@
     <button class="nav-tab" data-tab="tuning" id="tab-btn-tuning" aria-controls="tab-tuning" aria-selected="false">
       <span class="tab-key">[7]</span> TUNING &amp; TOOLS
     </button>
+    <button class="nav-tab" data-tab="database" id="tab-btn-database" aria-controls="tab-database" aria-selected="false">
+      <span class="tab-key">[8]</span> DATABASE
+    </button>
   </nav>
 
   <!-- Main Content Container -->
@@ -499,6 +502,65 @@
               <input type="number" id="crawler-steps-input" class="retro-input" min="10" max="1000" value="100">
             </div>
             <button id="btn-run-crawler-custom" class="retro-btn btn-success">🤖 LAUNCH AUTOMATED CRAWLER</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 8: DATABASE MANAGER -->
+    <section id="tab-database" class="tab-pane" role="tabpanel" aria-labelledby="tab-btn-database">
+      <div class="database-grid" style="display: grid; grid-template-columns: 320px 1fr; gap: 15px;">
+        <div class="retro-panel">
+          <div class="panel-header">
+            <span class="panel-title">══ SQLITE PERSISTENCE ══</span>
+            <button id="btn-refresh-db" class="btn-small">🔄 REFRESH</button>
+          </div>
+          <div class="meta-row" style="margin-top: 8px;">
+            <span class="meta-label">DATABASE FILE:</span>
+            <span class="meta-val" id="db-file-path" style="font-family: monospace; font-size: 11px;">database.db</span>
+          </div>
+          <div class="meta-row">
+            <span class="meta-label">TOTAL TABLES:</span>
+            <span class="meta-val" id="db-total-tables">0</span>
+          </div>
+          <div class="meta-row">
+            <span class="meta-label">TOTAL RECORDS:</span>
+            <span class="meta-val" id="db-total-records">0</span>
+          </div>
+          
+          <div class="panel-header" style="margin-top: 15px;">
+            <span class="panel-title">══ NAMESPACES / TABLES ══</span>
+          </div>
+          <div class="db-tables-list" id="db-tables-container" style="margin-top: 8px; display: flex; flex-direction: column; gap: 4px; max-height: 400px; overflow-y: auto;">
+            <!-- Dynamically populated tables list -->
+          </div>
+        </div>
+
+        <div class="retro-panel">
+          <div class="panel-header">
+            <span class="panel-title" id="db-selected-table-title">══ TABLE: SELECT A NAMESPACE ══</span>
+            <button id="btn-clear-table" class="btn-small btn-danger" style="display: none;">🗑 CLEAR TABLE</button>
+          </div>
+          
+          <div class="db-actions-bar" id="db-actions-bar" style="display: none; margin: 10px 0; gap: 8px; align-items: center;">
+            <input type="text" id="db-new-key" class="retro-input" placeholder="Key (e.g. player_id)" style="width: 180px;">
+            <input type="text" id="db-new-val" class="retro-input" placeholder="JSON or Text Value" style="flex: 1;">
+            <button id="btn-save-key" class="retro-btn btn-success" style="padding: 4px 10px;">💾 SET KEY</button>
+          </div>
+
+          <div class="table-container" style="max-height: 500px; overflow-y: auto;">
+            <table class="retro-table" id="db-records-table">
+              <thead>
+                <tr>
+                  <th style="width: 200px;">KEY</th>
+                  <th>VALUE</th>
+                  <th style="width: 80px; text-align: center;">ACTIONS</th>
+                </tr>
+              </thead>
+              <tbody id="db-records-tbody">
+                <tr><td colspan="3" class="empty-state">Select a database table from the left to view records</td></tr>
+              </tbody>
+            </table>
           </div>
         </div>
       </div>
