@@ -1,0 +1,6 @@
+# form_id=10
+# tag,id,label,col,row,key
+deposit,deposit,Deposit,2,9,D
+withdraw,withdraw,Withdraw,2,9,W
+insurance,insurance,Insurance,2,9,I
+return,return,Return,2,9,R

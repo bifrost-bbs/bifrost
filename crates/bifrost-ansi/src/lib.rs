@@ -51,6 +51,8 @@ pub enum Opcode {
     CursorRel = 0xC4,
     RenderAsset = 0xC5,
     DeltaBlock = 0xC6,
+    RenderTemplate = 0xC7,
+    RenderMenu = 0xC8,
     FormStart = 0xD0,
     FormField = 0xD1,
     FormSubmit = 0xD2,
@@ -74,6 +76,8 @@ impl Opcode {
             0xC4 => Some(Self::CursorRel),
             0xC5 => Some(Self::RenderAsset),
             0xC6 => Some(Self::DeltaBlock),
+            0xC7 => Some(Self::RenderTemplate),
+            0xC8 => Some(Self::RenderMenu),
             0xD0 => Some(Self::FormStart),
             0xD1 => Some(Self::FormField),
             0xD2 => Some(Self::FormSubmit),
@@ -129,6 +133,129 @@ pub fn compress_bytecode_adaptive(
 }
 
 /// Decompresses bytecode adaptively based on message flags.
+/// Substitutes positional placeholders `{0}`, `{1}`, ... in a template string.
+pub fn substitute_template(template: &str, params: &[String]) -> String {
+    let mut result = template.to_string();
+    for (idx, val) in params.iter().enumerate() {
+        let placeholder = format!("{{{}}}", idx);
+        result = result.replace(&placeholder, val);
+    }
+    result
+}
+
+/// Representation of an interactive button in a menu asset.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MenuButtonDef {
+    pub tag: String,
+    pub id: String,
+    pub label: String,
+    pub col: u8,
+    pub row: u8,
+    pub key: Option<char>,
+}
+
+/// Representation of a parsed menu asset definition.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MenuAssetDef {
+    pub form_id: u8,
+    pub field_fg: Option<u8>,
+    pub field_bg: Option<u8>,
+    pub submit_fg: Option<u8>,
+    pub submit_bg: Option<u8>,
+    pub align: Option<String>,
+    pub buttons: Vec<MenuButtonDef>,
+}
+
+/// Parses a menu asset definition from CSV format.
+pub fn parse_menu_csv(content: &str) -> MenuAssetDef {
+    let mut form_id = 1;
+    let mut field_fg = None;
+    let mut field_bg = None;
+    let mut submit_fg = None;
+    let mut submit_bg = None;
+    let mut align = None;
+    let mut buttons = Vec::new();
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed.starts_with('#') {
+            let comment_body = trimmed.trim_start_matches('#').trim();
+            if let Some((k, v)) = comment_body.split_once('=') {
+                let k = k.trim().to_ascii_lowercase();
+                let v = v.trim();
+                match k.as_str() {
+                    "form_id" => {
+                        if let Ok(val) = v.parse::<u8>() {
+                            form_id = val;
+                        }
+                    }
+                    "field_fg" => {
+                        if let Ok(val) = v.parse::<u8>() {
+                            field_fg = Some(val);
+                        }
+                    }
+                    "field_bg" => {
+                        if let Ok(val) = v.parse::<u8>() {
+                            field_bg = Some(val);
+                        }
+                    }
+                    "submit_fg" => {
+                        if let Ok(val) = v.parse::<u8>() {
+                            submit_fg = Some(val);
+                        }
+                    }
+                    "submit_bg" => {
+                        if let Ok(val) = v.parse::<u8>() {
+                            submit_bg = Some(val);
+                        }
+                    }
+                    "align" => {
+                        align = Some(v.to_ascii_lowercase());
+                    }
+                    _ => {}
+                }
+            }
+            continue;
+        }
+
+        let parts: Vec<&str> = trimmed.split(',').map(|s| s.trim()).collect();
+        if parts.len() >= 5 {
+            let tag = parts[0].to_string();
+            let id = parts[1].to_string();
+            let label = parts[2].to_string();
+            let col = parts[3].parse::<u8>().unwrap_or(0);
+            let row = parts[4].parse::<u8>().unwrap_or(0);
+            let key = if parts.len() >= 6 && !parts[5].is_empty() {
+                parts[5].chars().next()
+            } else {
+                None
+            };
+            buttons.push(MenuButtonDef {
+                tag,
+                id,
+                label,
+                col,
+                row,
+                key,
+            });
+        }
+    }
+
+    MenuAssetDef {
+        form_id,
+        field_fg,
+        field_bg,
+        submit_fg,
+        submit_bg,
+        align,
+        buttons,
+    }
+}
+
+/// Decompresses bytecode adaptively based on message flags.
 pub fn decompress_bytecode_adaptive(
     flags: u8,
     payload: &[u8],
@@ -155,9 +282,38 @@ mod tests {
         assert_eq!(Opcode::from_u8(0xC4), Some(Opcode::CursorRel));
         assert_eq!(Opcode::from_u8(0xC5), Some(Opcode::RenderAsset));
         assert_eq!(Opcode::from_u8(0xC6), Some(Opcode::DeltaBlock));
+        assert_eq!(Opcode::from_u8(0xC7), Some(Opcode::RenderTemplate));
+        assert_eq!(Opcode::from_u8(0xC8), Some(Opcode::RenderMenu));
         assert_eq!(Opcode::from_u8(0xFE), Some(Opcode::RawCp437));
         assert_eq!(Opcode::from_u8(0xFF), None);
         assert_eq!(Opcode::from_u8(0x55), None);
+    }
+
+    #[test]
+    fn test_substitute_template() {
+        let tmpl = "Sector: {0} [{1},{2}] Turns: {3}";
+        let params = vec!["10".to_string(), "04".to_string(), "08".to_string(), "100".to_string()];
+        let res = substitute_template(tmpl, &params);
+        assert_eq!(res, "Sector: 10 [04,08] Turns: 100");
+    }
+
+    #[test]
+    fn test_parse_menu_csv() {
+        let csv_data = "# form_id=15\n# field_fg=14\n# submit_bg=1\n# align=bottom_center\nnorth,wn,North,2,14,N\nsouth,ws,South,10,14,S\n";
+        let def = parse_menu_csv(csv_data);
+        assert_eq!(def.form_id, 15);
+        assert_eq!(def.field_fg, Some(14));
+        assert_eq!(def.submit_bg, Some(1));
+        assert_eq!(def.align.as_deref(), Some("bottom_center"));
+        assert_eq!(def.buttons.len(), 2);
+        assert_eq!(def.buttons[0].tag, "north");
+        assert_eq!(def.buttons[0].id, "wn");
+        assert_eq!(def.buttons[0].label, "North");
+        assert_eq!(def.buttons[0].col, 2);
+        assert_eq!(def.buttons[0].row, 14);
+        assert_eq!(def.buttons[0].key, Some('N'));
+        assert_eq!(def.buttons[1].tag, "south");
+        assert_eq!(def.buttons[1].key, Some('S'));
     }
 
     #[test]

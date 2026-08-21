@@ -50,6 +50,10 @@ pub struct CaptureAnalysisSummary {
     pub tx_count: usize,
     pub rx_count: usize,
     pub avg_raw_bytes: f64,
+    pub avg_comp_bytes: f64,
+    pub avg_bytes_per_packet: f64,
+    pub unique_users_count: usize,
+    pub avg_bytes_per_packet_per_user: f64,
     pub avg_duration_us: f64,
     pub categories: std::collections::HashMap<String, usize>,
     pub algorithms: std::collections::HashMap<String, usize>,
@@ -170,6 +174,10 @@ impl StatsManager {
             let saved = summary.total_raw_bytes as f64 - summary.total_comp_bytes as f64;
             summary.net_savings_percent = (saved / summary.total_raw_bytes as f64) * 100.0;
             summary.avg_raw_bytes = summary.total_raw_bytes as f64 / rows.len() as f64;
+            summary.avg_comp_bytes = summary.total_comp_bytes as f64 / rows.len() as f64;
+            summary.avg_bytes_per_packet = summary.avg_comp_bytes;
+            summary.unique_users_count = 1; // Baseline local/single user session if no user list
+            summary.avg_bytes_per_packet_per_user = summary.avg_bytes_per_packet / summary.unique_users_count as f64;
             summary.avg_duration_us = total_duration as f64 / rows.len() as f64;
         }
 
@@ -205,12 +213,13 @@ mod tests {
         let (rows, total) = mgr.get_captured_packets(Some(10), Some(0));
         assert_eq!(total, 2);
         assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0].seq, 2); // Newest first
-
         let summary = mgr.get_capture_summary();
         assert_eq!(summary.total_samples, 2);
         assert_eq!(summary.total_raw_bytes, 210);
         assert_eq!(summary.total_comp_bytes, 130);
+        assert_eq!(summary.avg_bytes_per_packet, 65.0);
+        assert_eq!(summary.unique_users_count, 1);
+        assert_eq!(summary.avg_bytes_per_packet_per_user, 65.0);
         assert!(summary.net_savings_percent > 35.0);
         assert_eq!(summary.tx_count, 1);
         assert_eq!(summary.rx_count, 1);

@@ -316,12 +316,16 @@ async fn get_telemetry_summary_handler(State(state): State<AppState>) -> impl In
 
     let snapshot = serde_json::json!({
         "active_sessions": 0,
-        "unique_users_24h": 0,
+        "unique_users_24h": cap_summary.unique_users_count,
         "duty_cycle_percent": 0.0,
         "total_packets_sent": cap_summary.tx_count,
         "total_packets_received": cap_summary.rx_count,
         "total_raw_bytes_sent": cap_summary.total_raw_bytes,
         "total_compressed_bytes_sent": cap_summary.total_comp_bytes,
+        "avg_raw_bytes_per_packet": cap_summary.avg_raw_bytes,
+        "avg_comp_bytes_per_packet": cap_summary.avg_comp_bytes,
+        "avg_bytes_per_packet": cap_summary.avg_bytes_per_packet,
+        "avg_bytes_per_packet_per_user": cap_summary.avg_bytes_per_packet_per_user,
         "compression_savings_percent": cap_summary.net_savings_percent,
         "max_duty_cycle_limit": cfg.rate_limiter.max_duty_cycle_percent,
     });

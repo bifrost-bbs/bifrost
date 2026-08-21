@@ -52,10 +52,11 @@ enabled = [
     "minidungeon",
     "admin",
     "marketplace",
+    "weather",
+    "voidtrader",
 ]
 
 [packet_capture]
 # Enable capturing all in/out raw and compressed packets with CSV metrics logging
 enabled = false
 directory = "captured_packets"
-

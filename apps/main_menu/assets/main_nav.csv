@@ -1,0 +1,10 @@
+# form_id=10
+# tag,id,label,col,row,key
+read_boards,read_boards,MessageBoards,2,10,M
+door_game,door_game,MiniDungeon,18,10,D
+voidtrader,voidtrader,VoidTrader,34,10,V
+marketplace,marketplace,Marketplace,2,12,K
+weather,weather,Weather,18,12,W
+profile,profile,Profile,34,12,P
+admin,admin,AdminPanel,2,14,A
+logout,logout,Logout,18,14,L
