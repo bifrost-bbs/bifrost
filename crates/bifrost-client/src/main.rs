@@ -41,6 +41,7 @@ pub struct FormField {
     pub height: u8,
     pub val: String,
     pub is_submit: bool,
+    pub key: Option<char>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -593,27 +594,90 @@ async fn main() -> Result<()> {
                     }
                 }
                 KeyCode::Char(c) => {
-                    let form_active_and_field_update = {
+                    let mut should_submit_json = None;
+                    let handled = {
                         let mut form = form_clone.lock().unwrap();
                         let layout_val = *layout_clone.lock().unwrap();
                         if form.active && !form.fields.is_empty() {
                             let idx = form.active_idx;
                             let fg = form.field_fg;
                             let bg = form.field_bg;
-                            let field = &mut form.fields[idx];
-                            let max_len = field.width as usize * field.height as usize;
-                            if !field.is_submit && field.val.len() < max_len {
-                                field.val.push(c);
-                                render_field_local(field, fg, bg, layout_val);
-                                position_cursor(&form, layout_val);
-                                let _ = io::stdout().flush();
+                            let current_is_submit = form.fields[idx].is_submit;
+
+                            if !current_is_submit {
+                                let field = &mut form.fields[idx];
+                                let max_len = field.width as usize * field.height as usize;
+                                if field.val.len() < max_len {
+                                    field.val.push(c);
+                                    render_field_local(field, fg, bg, layout_val);
+                                    position_cursor(&form, layout_val);
+                                    let _ = io::stdout().flush();
+                                }
+                                true
+                            } else {
+                                // Submit / menu button mode: check hotkeys!
+                                let lower_c = c.to_ascii_lowercase();
+                                let mut matched_idx = None;
+                                for (i, f) in form.fields.iter().enumerate() {
+                                    if f.is_submit {
+                                        if let Some(k) = f.key {
+                                            if k.to_ascii_lowercase() == lower_c {
+                                                matched_idx = Some(i);
+                                                break;
+                                            }
+                                        }
+                                        let label_first = f.val.chars().next().map(|ch| ch.to_ascii_lowercase());
+                                        let id_first = f.id.chars().next().map(|ch| ch.to_ascii_lowercase());
+                                        if label_first == Some(lower_c) || id_first == Some(lower_c) {
+                                            matched_idx = Some(i);
+                                            break;
+                                        }
+                                    }
+                                }
+
+                                if let Some(target_idx) = matched_idx {
+                                    form.active_idx = target_idx;
+                                    let target_field = form.fields[target_idx].clone();
+
+                                    let mut map = std::collections::HashMap::new();
+                                    for f in &form.fields {
+                                        if !f.is_submit {
+                                            map.insert(f.id.clone(), f.val.clone());
+                                        }
+                                    }
+                                    map.insert("submit".to_string(), target_field.id.clone());
+                                    let json = serde_json::to_string(&map).unwrap();
+
+                                    form.active = false;
+                                    form.fields.clear();
+                                    should_submit_json = Some(json.into_bytes());
+                                    true
+                                } else {
+                                    false
+                                }
                             }
-                            true
                         } else {
                             false
                         }
                     };
-                    if !form_active_and_field_update {
+
+                    if let Some(payload) = should_submit_json {
+                        let msg = MeshBbsMessage::new(0x02, 0x02, 0x00, payload);
+                        let mtu = transport_clone.get_mtu();
+                        if let Ok(fragments) = msg.to_fragments(mtu) {
+                            for frag in fragments {
+                                let packet = RadioPacket {
+                                    is_broadcast: false,
+                                    src_node: client_key_clone,
+                                    dst_node: [0; 32],
+                                    payload: frag,
+                                    signal_rssi: -50,
+                                    signal_snr: 10,
+                                };
+                                let _ = transport_clone.send_packet(packet).await;
+                            }
+                        }
+                    } else if !handled {
                         // Default non-form character input
                         let msg = MeshBbsMessage::new(0x02, 0x02, 0x00, vec![c as u8]);
                         let mtu = transport_clone.get_mtu();
@@ -1067,11 +1131,16 @@ fn render_form_fields_offset(form: &FormState, col_offset: u16, row_offset: u16)
                 (form.submit_fg, form.submit_bg)
             };
             apply_color_attribute((bg << 4) | fg);
+            let label = if !field.val.is_empty() {
+                &field.val
+            } else {
+                &field.id
+            };
             print!(
                 "\x1b[{};{}H[ {} ]\x1b[0m",
                 row_offset + field.row as u16 + 1,
                 col_offset + field.col as u16 + 1,
-                field.id
+                label
             );
         } else {
             let (fg, bg) = if is_active {
@@ -1157,6 +1226,12 @@ fn interpret_bytecode(
     row_offset: u16,
     req_asset_tx: &tokio::sync::mpsc::UnboundedSender<u16>,
 ) {
+    let (max_w, _max_h) = match layout {
+        LayoutMode::Full => (80, 25),
+        LayoutMode::Compact => (40, 25),
+    };
+    let mut cur_col: u16 = 0;
+    let mut cur_row: u16 = 0;
     let mut i = 0;
     while i < payload.len() {
         let op = payload[i];
@@ -1176,11 +1251,15 @@ fn interpret_bytecode(
                 form_state.active = false;
                 form_state.fields.clear();
                 form_state.active_idx = 0;
+                cur_col = 0;
+                cur_row = 0;
 
                 i += 1;
             }
             0x02 => {
                 // OP_CRLF inside viewport
+                cur_col = 0;
+                cur_row += 1;
                 if col_offset > 0 {
                     print!("\r\n\x1b[{}C", col_offset);
                 } else {
@@ -1189,6 +1268,8 @@ fn interpret_bytecode(
                 i += 1;
             }
             b'\n' => {
+                cur_col = 0;
+                cur_row += 1;
                 if col_offset > 0 {
                     print!("\r\n\x1b[{}C", col_offset);
                 } else {
@@ -1214,6 +1295,8 @@ fn interpret_bytecode(
                 if i + 2 < payload.len() {
                     let col = payload[i + 1];
                     let row = payload[i + 2];
+                    cur_col = col as u16;
+                    cur_row = row as u16;
                     print!(
                         "\x1b[{};{}H",
                         row_offset + row as u16 + 1,
@@ -1232,6 +1315,144 @@ fn interpret_bytecode(
                         let _ = req_asset_tx.send(id);
                     }
                     i += 3;
+                } else {
+                    i += 1;
+                }
+            }
+            0xC7 => {
+                // OP_RENDER_TEMPLATE (asset_id u16, param_count u8, [param_len u8, param_bytes]*)
+                if i + 3 < payload.len() {
+                    let id = u16::from_be_bytes([payload[i + 1], payload[i + 2]]);
+                    let param_count = payload[i + 3] as usize;
+                    let mut cur = i + 4;
+                    let mut params = Vec::new();
+                    for _ in 0..param_count {
+                        if cur < payload.len() {
+                            let p_len = payload[cur] as usize;
+                            cur += 1;
+                            if cur + p_len <= payload.len() {
+                                let s = String::from_utf8_lossy(&payload[cur..cur + p_len]).into_owned();
+                                params.push(s);
+                                cur += p_len;
+                            }
+                        }
+                    }
+                    i = cur;
+
+                    if let Some(template_str) = get_client_asset_content(server_node_id, id) {
+                        let expanded = bifrost_bbs::substitute_template(&template_str, &params);
+                        print!("\x1b[{};{}H", row_offset + 1, col_offset + 1);
+                        let newline_replacement = if col_offset > 0 {
+                            format!("\r\n\x1b[{}C", col_offset)
+                        } else {
+                            "\r\n".to_string()
+                        };
+                        let aligned_content = expanded
+                            .replace("\r\n", "\n")
+                            .replace("\n", &newline_replacement);
+                        print!("{}", aligned_content);
+                    } else {
+                        let _ = req_asset_tx.send(id);
+                    }
+                } else {
+                    i += 1;
+                }
+            }
+            0xC8 => {
+                // OP_RENDER_MENU (asset_id u16, toggle_mask u32)
+                if i + 6 < payload.len() {
+                    let id = u16::from_be_bytes([payload[i + 1], payload[i + 2]]);
+                    let mask = u32::from_be_bytes([payload[i + 3], payload[i + 4], payload[i + 5], payload[i + 6]]);
+                    i += 7;
+
+                    if let Some(menu_csv) = get_client_asset_content(server_node_id, id) {
+                        let menu_def = bifrost_bbs::parse_menu_csv(&menu_csv);
+                        form_state.active = true;
+                        form_state.form_id = menu_def.form_id;
+                        if let Some(fg) = menu_def.field_fg { form_state.field_fg = fg; }
+                        if let Some(bg) = menu_def.field_bg { form_state.field_bg = bg; }
+                        let align_mode = menu_def.align.as_deref().unwrap_or("top_left");
+                        let is_bottom = align_mode.starts_with("bottom");
+                        let is_center = align_mode.ends_with("center") || align_mode == "center";
+                        let is_right = align_mode.ends_with("right") || align_mode == "right";
+
+                        let (max_col, term_h_u8) = match layout {
+                            LayoutMode::Full => (78u8, 25u8),
+                            LayoutMode::Compact => (38u8, 25u8),
+                        };
+
+                        // Pre-filter enabled buttons and compute row totals for alignment
+                        let mut enabled_buttons = Vec::new();
+                        let mut row_widths: std::collections::HashMap<u8, u8> = std::collections::HashMap::new();
+
+                        for (idx, btn) in menu_def.buttons.iter().enumerate() {
+                            if idx < 32 && (mask & (1 << idx)) != 0 {
+                                let btn_width = (btn.label.len() as u8) + 4;
+                                let base_row = if is_bottom {
+                                    if btn.row > 0 && btn.row < 10 {
+                                        term_h_u8.saturating_sub(btn.row + 1)
+                                    } else {
+                                        term_h_u8.saturating_sub(3)
+                                    }
+                                } else if btn.row == 0 {
+                                    12
+                                } else {
+                                    btn.row
+                                };
+                                enabled_buttons.push((btn, btn_width, base_row));
+
+                                let entry = row_widths.entry(base_row).or_insert(0);
+                                if *entry > 0 { *entry += 1; }
+                                *entry += btn_width;
+                            }
+                        }
+
+                        let mut row_cols: std::collections::HashMap<u8, u8> = std::collections::HashMap::new();
+
+                        for (btn, btn_width, base_row) in enabled_buttons {
+                            let mut cur_row = base_row;
+                            let default_start_col = if is_center {
+                                let tot = *row_widths.get(&base_row).unwrap_or(&btn_width);
+                                if max_col > tot { ((max_col + 2 - tot) / 2).max(2) } else { 2 }
+                            } else if is_right {
+                                let tot = *row_widths.get(&base_row).unwrap_or(&btn_width);
+                                if max_col > tot { (max_col + 2 - tot).max(2) } else { 2 }
+                            } else {
+                                2
+                            };
+
+                            let mut cur_col = *row_cols.get(&cur_row).unwrap_or(&default_start_col);
+
+                            if cur_col + btn_width > max_col && cur_col > default_start_col {
+                                cur_row += 2;
+                                cur_col = *row_cols.get(&cur_row).unwrap_or(&default_start_col);
+                            }
+
+                            let field_col = cur_col;
+                            let field_row = cur_row;
+                            row_cols.insert(cur_row, cur_col + btn_width + 1); // 1 space spacing between buttons
+
+                            form_state.fields.push(FormField {
+                                id: btn.id.clone(),
+                                col: field_col,
+                                row: field_row,
+                                width: btn_width,
+                                height: 1,
+                                val: btn.label.clone(),
+                                is_submit: true,
+                                key: btn.key,
+                            });
+                            apply_color_attribute((form_state.submit_bg << 4) | form_state.submit_fg);
+                            print!(
+                                "\x1b[{};{}H[ {} ]\x1b[0m",
+                                row_offset + field_row as u16 + 1,
+                                col_offset + field_col as u16 + 1,
+                                btn.label
+                            );
+                        }
+                    } else {
+                        let _ = req_asset_tx.send(id);
+                    }
                 } else {
                     i += 1;
                 }
@@ -1284,6 +1505,7 @@ fn interpret_bytecode(
                                 height: 1,
                                 val: val.clone(),
                                 is_submit: false,
+                                key: None,
                             });
 
                             // Render field with form colors
@@ -1324,6 +1546,7 @@ fn interpret_bytecode(
                             height: 1,
                             val: String::new(),
                             is_submit: true,
+                            key: None,
                         });
 
                         // Render button with form colors
@@ -1374,6 +1597,7 @@ fn interpret_bytecode(
                                 height,
                                 val: val.clone(),
                                 is_submit: false,
+                                key: None,
                             });
 
                             // Render field with form colors
@@ -1414,8 +1638,58 @@ fn interpret_bytecode(
                     i += 1;
                 }
             }
+            0xFD => {
+                if i + 1 < payload.len() {
+                    let token_id = payload[i + 1] as usize;
+                    let client_dict = load_client_dictionary(server_node_id);
+                    if let Some(tok_bytes) = client_dict.tokens().get(token_id) {
+                        for &b in tok_bytes {
+                            if b == b'\r' {
+                                cur_col = 0;
+                            } else if b == b'\n' {
+                                cur_col = 0;
+                                cur_row += 1;
+                                if col_offset > 0 {
+                                    print!("\r\n\x1b[{}C", col_offset);
+                                } else {
+                                    print!("\r\n");
+                                }
+                            } else {
+                                if cur_col >= max_w {
+                                    cur_col = 0;
+                                    cur_row += 1;
+                                    print!("\x1b[{};{}H", row_offset + cur_row + 1, col_offset + cur_col + 1);
+                                }
+                                print!("{}", b as char);
+                                cur_col += 1;
+                            }
+                        }
+                    }
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
             c => {
-                print!("{}", c as char);
+                if c == b'\r' {
+                    cur_col = 0;
+                } else if c == b'\n' {
+                    cur_col = 0;
+                    cur_row += 1;
+                    if col_offset > 0 {
+                        print!("\r\n\x1b[{}C", col_offset);
+                    } else {
+                        print!("\r\n");
+                    }
+                } else {
+                    if cur_col >= max_w {
+                        cur_col = 0;
+                        cur_row += 1;
+                        print!("\x1b[{};{}H", row_offset + cur_row + 1, col_offset + cur_col + 1);
+                    }
+                    print!("{}", c as char);
+                    cur_col += 1;
+                }
                 i += 1;
             }
         }
@@ -1499,10 +1773,20 @@ fn get_node_cache_dir(node_id: &[u8; 32]) -> PathBuf {
 fn save_asset_to_cache(node_id: &[u8; 32], asset_id: u16, data: &[u8]) {
     let node_dir = get_node_cache_dir(node_id);
     let _ = std::fs::create_dir_all(&node_dir);
+    let ext = if asset_id == 0x00DF {
+        "bin"
+    } else if data.starts_with(b"# form_id=") || (data.len() > 10 && data[..data.len().min(100)].windows(13).any(|w| w == b"# tag,id,label")) {
+        "csv"
+    } else if data.windows(2).any(|w| w == b"{{") {
+        "tmpl"
+    } else {
+        "ans"
+    };
+
     let cache_file = if asset_id == 0x00DF {
         node_dir.join("dict.bin")
     } else {
-        node_dir.join(format!("{:04x}.ans", asset_id))
+        node_dir.join(format!("{:04x}.{}", asset_id, ext))
     };
     let _ = std::fs::write(&cache_file, data);
 }
@@ -1530,25 +1814,48 @@ fn load_client_dictionary(node_id: &[u8; 32]) -> bifrost_compression::Compressio
     bifrost_compression::CompressionDictionary::standard_static()
 }
 
+fn get_client_asset_content(node_id: &[u8; 32], asset_id: u16) -> Option<String> {
+    let enabled_apps = vec![
+        "main_menu".to_string(),
+        "messages".to_string(),
+        "profile".to_string(),
+        "minidungeon".to_string(),
+        "admin".to_string(),
+        "marketplace".to_string(),
+        "weather".to_string(),
+        "voidtrader".to_string(),
+    ];
+    let manifest_map = bifrost_bbs::load_app_manifests(&enabled_apps);
+    if let Some((_, rel_path)) = manifest_map.get(&asset_id) {
+        let full_path = find_workspace_path(rel_path);
+        if let Ok(c) = std::fs::read_to_string(&full_path) {
+            return Some(c);
+        }
+    }
+
+    let node_dir = get_node_cache_dir(node_id);
+    let exts = ["csv", "tmpl", "ans", "txt"];
+    for ext in &exts {
+        let cache_file = node_dir.join(format!("{:04x}.{}", asset_id, ext));
+        if let Ok(c) = std::fs::read_to_string(&cache_file) {
+            return Some(c);
+        }
+        let root_file = find_workspace_path(".client_cache").join(format!("{:04x}.{}", asset_id, ext));
+        if let Ok(c) = std::fs::read_to_string(&root_file) {
+            return Some(c);
+        }
+    }
+
+    None
+}
+
 fn render_cached_asset(
     node_id: &[u8; 32],
     asset_id: u16,
     col_offset: u16,
     row_offset: u16,
 ) -> bool {
-    let node_dir = get_node_cache_dir(node_id);
-    let cache_file = node_dir.join(format!("{:04x}.ans", asset_id));
-
-    // Check client node cache first
-    let content = if let Ok(c) = std::fs::read_to_string(&cache_file) {
-        Some(c)
-    } else {
-        // Fallback check root client cache
-        let root_file = find_workspace_path(".client_cache").join(format!("{:04x}.ans", asset_id));
-        std::fs::read_to_string(&root_file).ok()
-    };
-
-    if let Some(content) = content {
+    if let Some(content) = get_client_asset_content(node_id, asset_id) {
         print!("\x1b[{};{}H", row_offset + 1, col_offset + 1);
         let newline_replacement = if col_offset > 0 {
             format!("\r\n\x1b[{}C", col_offset)
@@ -1612,6 +1919,116 @@ fn interpret_bytecode_headless(
                     i += 1;
                 }
             }
+            0xC7 => {
+                // OP_RENDER_TEMPLATE
+                if i + 3 < payload.len() {
+                    let id = u16::from_be_bytes([payload[i + 1], payload[i + 2]]);
+                    let param_count = payload[i + 3] as usize;
+                    let mut cur = i + 4;
+                    for _ in 0..param_count {
+                        if cur < payload.len() {
+                            let p_len = payload[cur] as usize;
+                            cur += 1 + p_len;
+                        }
+                    }
+                    i = cur;
+                    let node_dir = get_node_cache_dir(server_node_id);
+                    let cache_file = node_dir.join(format!("{:04x}.tmpl", id));
+                    if !cache_file.exists() {
+                        let _ = req_asset_tx.send(id);
+                    }
+                } else {
+                    i += 1;
+                }
+            }
+            0xC8 => {
+                // OP_RENDER_MENU
+                if i + 6 < payload.len() {
+                    let id = u16::from_be_bytes([payload[i + 1], payload[i + 2]]);
+                    let mask = u32::from_be_bytes([payload[i + 3], payload[i + 4], payload[i + 5], payload[i + 6]]);
+                    i += 7;
+
+                    if let Some(menu_csv) = get_client_asset_content(server_node_id, id) {
+                        let menu_def = bifrost_bbs::parse_menu_csv(&menu_csv);
+                        form_state.active = true;
+                        form_state.form_id = menu_def.form_id;
+                        let align_mode = menu_def.align.as_deref().unwrap_or("top_left");
+                        let is_bottom = align_mode.starts_with("bottom");
+                        let is_center = align_mode.ends_with("center") || align_mode == "center";
+                        let is_right = align_mode.ends_with("right") || align_mode == "right";
+
+                        let max_col = 78u8;
+                        let term_h_u8 = 25u8;
+
+                        // Pre-filter enabled buttons and compute row totals for alignment
+                        let mut enabled_buttons = Vec::new();
+                        let mut row_widths: std::collections::HashMap<u8, u8> = std::collections::HashMap::new();
+
+                        for (idx, btn) in menu_def.buttons.iter().enumerate() {
+                            if idx < 32 && (mask & (1 << idx)) != 0 {
+                                let btn_width = (btn.label.len() as u8) + 4;
+                                let base_row = if is_bottom {
+                                    if btn.row > 0 && btn.row < 10 {
+                                        term_h_u8.saturating_sub(btn.row + 1)
+                                    } else {
+                                        term_h_u8.saturating_sub(3)
+                                    }
+                                } else if btn.row == 0 {
+                                    12
+                                } else {
+                                    btn.row
+                                };
+                                enabled_buttons.push((btn, btn_width, base_row));
+
+                                let entry = row_widths.entry(base_row).or_insert(0);
+                                if *entry > 0 { *entry += 1; }
+                                *entry += btn_width;
+                            }
+                        }
+
+                        let mut row_cols: std::collections::HashMap<u8, u8> = std::collections::HashMap::new();
+
+                        for (btn, btn_width, base_row) in enabled_buttons {
+                            let mut cur_row = base_row;
+                            let default_start_col = if is_center {
+                                let tot = *row_widths.get(&base_row).unwrap_or(&btn_width);
+                                if max_col > tot { ((max_col + 2 - tot) / 2).max(2) } else { 2 }
+                            } else if is_right {
+                                let tot = *row_widths.get(&base_row).unwrap_or(&btn_width);
+                                if max_col > tot { (max_col + 2 - tot).max(2) } else { 2 }
+                            } else {
+                                2
+                            };
+
+                            let mut cur_col = *row_cols.get(&cur_row).unwrap_or(&default_start_col);
+
+                            if cur_col + btn_width > max_col && cur_col > default_start_col {
+                                cur_row += 2;
+                                cur_col = *row_cols.get(&cur_row).unwrap_or(&default_start_col);
+                            }
+
+                            let field_col = cur_col;
+                            let field_row = cur_row;
+                            row_cols.insert(cur_row, cur_col + btn_width + 1);
+
+                            form_state.fields.push(FormField {
+                                id: btn.id.clone(),
+                                col: field_col,
+                                row: field_row,
+                                width: btn_width,
+                                height: 1,
+                                val: btn.label.clone(),
+                                is_submit: true,
+                                key: btn.key,
+                            });
+                        }
+                    } else {
+                        let _ = req_asset_tx.send(id);
+                    }
+                } else {
+                    i += 1;
+                }
+            }
             0xD0 => {
                 // OP_FORM_START
                 if i + 5 < payload.len() {
@@ -1659,6 +2076,7 @@ fn interpret_bytecode_headless(
                                 height: 1,
                                 val,
                                 is_submit: false,
+                                key: None,
                             });
                             i = val_len_idx + 1 + val_len;
                         } else {
@@ -1687,6 +2105,7 @@ fn interpret_bytecode_headless(
                             height: 1,
                             val: String::new(),
                             is_submit: true,
+                            key: None,
                         });
                         i = i + 4 + id_len;
                     } else {
@@ -1699,6 +2118,45 @@ fn interpret_bytecode_headless(
             0xD3 => {
                 // OP_FORM_END
                 i += 1;
+            }
+            0xD4 => {
+                // OP_FORM_FIELD_MULTILINE
+                if i + 6 < payload.len() {
+                    let col = payload[i + 1];
+                    let row = payload[i + 2];
+                    let width = payload[i + 3];
+                    let height = payload[i + 4];
+                    let id_len = payload[i + 5] as usize;
+                    if i + 6 + id_len < payload.len() {
+                        let id = String::from_utf8_lossy(&payload[i + 6..i + 6 + id_len]).into_owned();
+                        let val_len_idx = i + 6 + id_len;
+                        let val_len = payload[val_len_idx] as usize;
+                        if val_len_idx + 1 + val_len <= payload.len() {
+                            let val = String::from_utf8_lossy(
+                                &payload[val_len_idx + 1..val_len_idx + 1 + val_len],
+                            )
+                            .into_owned();
+
+                            form_state.fields.push(FormField {
+                                id,
+                                col,
+                                row,
+                                width,
+                                height,
+                                val,
+                                is_submit: false,
+                                key: None,
+                            });
+                            i = val_len_idx + 1 + val_len;
+                        } else {
+                            i += 1;
+                        }
+                    } else {
+                        i += 1;
+                    }
+                } else {
+                    i += 1;
+                }
             }
             _ => {
                 i += 1;
@@ -1771,6 +2229,7 @@ mod tests {
                     height: 1,
                     val: "TestOperator".to_string(),
                     is_submit: false,
+                    key: None,
                 },
                 FormField {
                     id: "read_boards".to_string(),
@@ -1780,6 +2239,7 @@ mod tests {
                     height: 1,
                     val: String::new(),
                     is_submit: true,
+                    key: None,
                 },
                 FormField {
                     id: "door_game".to_string(),
@@ -1789,6 +2249,7 @@ mod tests {
                     height: 1,
                     val: String::new(),
                     is_submit: true,
+                    key: None,
                 },
                 FormField {
                     id: "logout".to_string(),
@@ -1798,6 +2259,7 @@ mod tests {
                     height: 1,
                     val: String::new(),
                     is_submit: true,
+                    key: None,
                 },
             ],
             active_idx: 0,
@@ -1829,6 +2291,7 @@ mod tests {
                 height: 1,
                 val: "Operator".to_string(),
                 is_submit: false,
+                key: None,
             }],
             active_idx: 0,
             field_fg: 7,
@@ -1908,6 +2371,7 @@ mod tests {
                     height: 1,
                     val: String::new(),
                     is_submit: true,
+                    key: None,
                 },
                 FormField {
                     id: "cat_2".to_string(),
@@ -1917,6 +2381,7 @@ mod tests {
                     height: 1,
                     val: String::new(),
                     is_submit: true,
+                    key: None,
                 },
                 FormField {
                     id: "cat_3".to_string(),
@@ -1926,6 +2391,7 @@ mod tests {
                     height: 1,
                     val: String::new(),
                     is_submit: true,
+                    key: None,
                 },
                 FormField {
                     id: "main_menu".to_string(),
@@ -1935,6 +2401,7 @@ mod tests {
                     height: 1,
                     val: String::new(),
                     is_submit: true,
+                    key: None,
                 },
             ],
             active_idx: 0,
@@ -1956,6 +2423,7 @@ mod tests {
                     height: 1,
                     val: String::new(),
                     is_submit: true,
+                    key: None,
                 },
             ],
             active_idx: 0,
@@ -1988,5 +2456,79 @@ mod tests {
             "Crawler should explore different categories instead of repeating {}",
             cat_first
         );
+    }
+
+    #[test]
+    fn test_render_menu_bytecode_parsing() {
+        let server_node = [0x11u8; 32];
+        let mut form = FormState::default();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let menu_asset = get_client_asset_content(&server_node, 0x0103);
+        assert!(menu_asset.is_some(), "main_nav.csv asset 0x0103 should resolve");
+
+        let mut bytecode = Vec::new();
+        bytecode.push(0x01); // ClearScreen
+        bytecode.extend_from_slice(&[0xD0, 10, 15, 4, 14, 1]); // FormStart form_id=10
+        bytecode.extend_from_slice(&[0xC8, 0x01, 0x03, 0x00, 0x00, 0x00, 0xFF]); // RenderMenu 0x0103, mask=0xFF
+        bytecode.push(0xD3); // FormEnd
+
+        interpret_bytecode(&server_node, &bytecode, &mut form, LayoutMode::Full, 0, 0, &tx);
+
+        assert!(form.active, "Form should be active");
+        assert_eq!(form.form_id, 10, "Form ID should be 10");
+        assert_eq!(form.fields.len(), 8, "All 8 buttons in main_nav should be populated");
+        assert_eq!(form.fields[0].id, "read_boards");
+        assert_eq!(form.fields[0].val, "MessageBoards");
+        assert_eq!(form.fields[0].key, Some('M'));
+        assert!(form.fields[0].is_submit);
+    }
+
+    #[test]
+    fn test_render_menu_bottom_aligned_stays_in_virtual_terminal() {
+        let server_node = [0x11u8; 32];
+        let mut form = FormState::default();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let enabled_apps = vec![
+            "main_menu".to_string(),
+            "messages".to_string(),
+            "profile".to_string(),
+            "minidungeon".to_string(),
+            "admin".to_string(),
+            "marketplace".to_string(),
+            "weather".to_string(),
+            "voidtrader".to_string(),
+        ];
+        let manifest_map = bifrost_bbs::load_app_manifests(&enabled_apps);
+        let (&entry_menu_id, _) = manifest_map
+            .iter()
+            .find(|(_, (name, _))| name == "voidtrader/entry_menu")
+            .expect("voidtrader/entry_menu must be in manifest");
+
+        let mut bytecode = Vec::new();
+        bytecode.push(0x01);
+        bytecode.extend_from_slice(&[0xD0, 10, 15, 4, 14, 1]);
+        bytecode.extend_from_slice(&[
+            0xC8,
+            (entry_menu_id >> 8) as u8,
+            (entry_menu_id & 0xFF) as u8,
+            0x00,
+            0x00,
+            0x00,
+            0x1F,
+        ]); // 5 buttons mask=0x1F
+        bytecode.push(0xD3);
+
+        interpret_bytecode(&server_node, &bytecode, &mut form, LayoutMode::Full, 0, 0, &tx);
+
+        assert!(form.active);
+        assert_eq!(form.fields.len(), 5);
+        for f in &form.fields {
+            // Every field must be strictly within the 1..25 virtual terminal canvas
+            assert!(f.row <= 24, "Field row {} should be <= 24 inside virtual terminal", f.row);
+            assert!(f.row >= 20, "Bottom aligned field row {} should be >= 20", f.row);
+            assert!(f.col + f.width <= 80, "Field col + width {} should not overflow 80 cols", f.col + f.width);
+        }
     }
 }

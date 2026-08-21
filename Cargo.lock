@@ -162,6 +162,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bifrost-ansi",
+ "bifrost-bbs",
  "bifrost-compression",
  "bifrost-transport",
  "crossterm",

@@ -14,3 +14,7 @@ path = "assets/main_menu_banner.ans"
 [[assets]]
 name = "main_menu_border"
 path = "assets/main_menu_border.ans"
+
+[[assets]]
+name = "main_nav"
+path = "assets/main_nav.csv"

@@ -13,9 +13,8 @@ function admin.on_start(session)
     term.print("=== ADMIN PANEL ===\n\n")
     term.set_color(7, 0)
 
-    term.print("Registered Nodes list:\n")
     local user_keys = db.keys("users")
-    local y_offset = 5
+    local rows = {}
     
     for i, user_node_id in ipairs(user_keys) do
         local user_data = db.get("users", user_node_id) or { nickname = "Unknown" }
@@ -25,16 +24,32 @@ function admin.on_start(session)
             if p == "admin" then has_admin = true end
         end
         local admin_str = has_admin and "[ADMIN]" or "[USER]"
-        term.print(string.format("  %d. %s (%s) %s\n", i, user_data.nickname, user_node_id:sub(1, 8), admin_str))
-        y_offset = y_offset + 1
+        table.insert(rows, {
+            tostring(i),
+            user_data.nickname or "Unknown",
+            user_node_id:sub(1, 8),
+            admin_str
+        })
     end
 
-    term.print("\n Enter target user node hex prefix:\n")
+    term.render_table(2, 5, {
+        headers = { "#", "Nickname", "Node ID", "Role" },
+        widths = { 4, 16, 12, 10 },
+        rows = rows,
+        header_fg = 14,
+        row_fg = 15,
+        divider = true
+    })
+
+    local y_offset = 7 + #rows
+    term.move_to(2, y_offset)
+    term.set_color(15, 0)
+    term.print("Target user node hex prefix: ")
+
     term.define_form(40)
-    term.add_input_field("target_id", 2, y_offset + 2, 8, "")
-    
-    term.add_submit_button("toggle_admin", 12, y_offset + 2)
-    term.add_submit_button("back", 28, y_offset + 2)
+    term.add_input_field("target_id", 32, y_offset, 8, "")
+    term.add_submit_button("toggle_admin", 2, y_offset + 2)
+    term.add_submit_button("back", 20, y_offset + 2)
     term.flush_form()
 
     session.await_input(40, function(submission)
@@ -49,7 +64,6 @@ function admin.on_start(session)
         elseif action == "toggle_admin" then
             local prefix = submission.target_id or ""
             if prefix ~= "" then
-                -- Match prefix against user keys
                 local matched_id = nil
                 for _, user_node_id in ipairs(user_keys) do
                     if user_node_id:sub(1, #prefix) == prefix then

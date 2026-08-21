@@ -143,6 +143,7 @@ fn default_enabled_apps() -> Vec<String> {
         "admin".to_string(),
         "marketplace".to_string(),
         "weather".to_string(),
+        "voidtrader".to_string(),
     ]
 }
 
@@ -509,6 +510,54 @@ pub fn load_app_manifests(enabled_apps: &[String]) -> HashMap<u16, (String, Stri
     }
 
     map
+}
+
+pub use bifrost_ansi::{parse_menu_csv, substitute_template, MenuAssetDef, MenuButtonDef};
+
+/// Resolves an asset ID and string content from the manifest.
+pub fn resolve_asset_id_and_content(
+    manifest_map: &HashMap<u16, (String, String)>,
+    current_app: &str,
+    asset_name: &str,
+) -> (u16, Option<String>) {
+    let normalized_target = asset_name.replace("::", "/").replace(':', "/");
+    let relative_target = format!("{}/{}", current_app, normalized_target);
+
+    // 1. Exact match with current app namespace (e.g. "voidtrader/combat_menu")
+    let matched = manifest_map
+        .iter()
+        .find(|(_, (n, _))| {
+            let n_norm = n.replace("::", "/").replace(':', "/");
+            n_norm == relative_target
+        })
+        // 2. Exact match with provided full name (e.g. "minidungeon/combat_menu")
+        .or_else(|| {
+            manifest_map.iter().find(|(_, (n, _))| {
+                let n_norm = n.replace("::", "/").replace(':', "/");
+                n_norm == normalized_target
+            })
+        })
+        // 3. Suffix match (e.g. ".../combat_menu")
+        .or_else(|| {
+            manifest_map.iter().find(|(_, (n, _))| {
+                let n_norm = n.replace("::", "/").replace(':', "/");
+                n_norm.ends_with(&format!("/{}", normalized_target))
+            })
+        })
+        // 4. Substring match fallback
+        .or_else(|| {
+            manifest_map.iter().find(|(_, (n, _))| {
+                n.to_ascii_uppercase().contains(&asset_name.to_ascii_uppercase())
+            })
+        });
+
+    if let Some((&id, (_, rel_path))) = matched {
+        let full_path = find_workspace_path(rel_path);
+        let content = std::fs::read_to_string(&full_path).ok();
+        (id, content)
+    } else {
+        (0x0101, None)
+    }
 }
 
 /// Loads the active compression dictionary (custom trained from config/bbs_dict.bin or static default).
@@ -1195,32 +1244,226 @@ fn run_session_task(
             buf.push(0xC5); // OP_RENDER_ASSET
 
             let current_app = active_app_for_asset.lock().unwrap().clone();
-            let normalized_target = asset_name.replace("::", "/").replace(':', "/");
-            let relative_target = format!("{}/{}", current_app, normalized_target);
+            let (id, _) = resolve_asset_id_and_content(&asset_manifest_for_render, &current_app, &asset_name);
+            buf.extend_from_slice(&id.to_be_bytes());
+            Ok(())
+        })?,
+    )?;
 
-            let id_opt = asset_manifest_for_render
-                .iter()
-                .find(|(_, (n, _))| {
-                    let n_norm = n.replace("::", "/").replace(':', "/");
-                    n_norm == normalized_target
-                        || n_norm == relative_target
-                        || n_norm.ends_with(&format!("/{}", normalized_target))
-                        || n_norm.to_ascii_uppercase().contains(&asset_name.to_ascii_uppercase())
-                })
-                .map(|(&id, _)| id);
+    let out_buf_for_tmpl = output_buf.clone();
+    let manifest_for_tmpl = asset_manifest.clone();
+    let app_for_tmpl = active_app.clone();
+    term.set(
+        "render_template",
+        lua.create_function(move |_, (asset_name, params): (String, mlua::Value)| {
+            let current_app = app_for_tmpl.lock().unwrap().clone();
+            let (id, _content) = resolve_asset_id_and_content(&manifest_for_tmpl, &current_app, &asset_name);
 
-            let id = match id_opt {
-                Some(matched_id) => matched_id,
-                None => {
-                    log::warn!(
-                        "Asset '{}' not found in loaded asset manifests (current app: '{}')",
-                        asset_name,
-                        current_app
-                    );
-                    0x0101
+            let mut param_strings = Vec::new();
+            match params {
+                mlua::Value::Table(tbl) => {
+                    let len = tbl.len().unwrap_or(0);
+                    if len > 0 {
+                        for i in 1..=len {
+                            if let Ok(v) = tbl.get::<i64, mlua::Value>(i) {
+                                param_strings.push(match v {
+                                    mlua::Value::String(s) => s.to_str()?.to_string(),
+                                    mlua::Value::Integer(n) => n.to_string(),
+                                    mlua::Value::Number(n) => n.to_string(),
+                                    mlua::Value::Boolean(b) => b.to_string(),
+                                    _ => String::new(),
+                                });
+                            }
+                        }
+                    } else {
+                        for pair in tbl.pairs::<mlua::Value, mlua::Value>() {
+                            if let Ok((_k, v)) = pair {
+                                param_strings.push(match v {
+                                    mlua::Value::String(s) => s.to_str()?.to_string(),
+                                    mlua::Value::Integer(n) => n.to_string(),
+                                    mlua::Value::Number(n) => n.to_string(),
+                                    mlua::Value::Boolean(b) => b.to_string(),
+                                    _ => String::new(),
+                                });
+                            }
+                        }
+                    }
+                }
+                mlua::Value::String(s) => {
+                    param_strings.push(s.to_str()?.to_string());
+                }
+                mlua::Value::Integer(n) => {
+                    param_strings.push(n.to_string());
+                }
+                _ => {}
+            }
+
+            let mut buf = out_buf_for_tmpl.lock().unwrap();
+            buf.push(0xC7); // OP_RENDER_TEMPLATE
+            buf.extend_from_slice(&id.to_be_bytes());
+            buf.push(param_strings.len() as u8);
+            for p in &param_strings {
+                let p_bytes = p.as_bytes();
+                buf.push(p_bytes.len() as u8);
+                buf.extend_from_slice(p_bytes);
+            }
+            Ok(())
+        })?,
+    )?;
+
+    let out_buf_for_menu = output_buf.clone();
+    let manifest_for_menu = asset_manifest.clone();
+    let app_for_menu = active_app.clone();
+    let form_colors_menu = form_colors.clone();
+    term.set(
+        "render_menu",
+        lua.create_function(move |_, (asset_name, toggle_arg): (String, Option<mlua::Value>)| {
+            let current_app = app_for_menu.lock().unwrap().clone();
+            let (id, content_opt) = resolve_asset_id_and_content(&manifest_for_menu, &current_app, &asset_name);
+
+            let menu_def = if let Some(content) = content_opt {
+                parse_menu_csv(&content)
+            } else {
+                MenuAssetDef {
+                    form_id: 1,
+                    field_fg: None,
+                    field_bg: None,
+                    submit_fg: None,
+                    submit_bg: None,
+                    align: None,
+                    buttons: Vec::new(),
                 }
             };
+
+            let mut toggle_mask: u32 = 0;
+            match toggle_arg {
+                Some(mlua::Value::Integer(n)) => {
+                    toggle_mask = n as u32;
+                }
+                Some(mlua::Value::Table(tbl)) => {
+                    for (idx, btn) in menu_def.buttons.iter().enumerate() {
+                        if idx < 32 {
+                            let is_enabled = if let Ok(val) = tbl.get::<&str, mlua::Value>(&btn.tag) {
+                                match val {
+                                    mlua::Value::Boolean(b) => b,
+                                    mlua::Value::Nil => true,
+                                    _ => true,
+                                }
+                            } else if let Ok(val) = tbl.get::<&str, mlua::Value>(&btn.id) {
+                                match val {
+                                    mlua::Value::Boolean(b) => b,
+                                    mlua::Value::Nil => true,
+                                    _ => true,
+                                }
+                            } else {
+                                true
+                            };
+                            if is_enabled {
+                                toggle_mask |= 1 << idx;
+                            }
+                        }
+                    }
+                }
+                _ => {
+                    for idx in 0..menu_def.buttons.len() {
+                        if idx < 32 {
+                            toggle_mask |= 1 << idx;
+                        }
+                    }
+                }
+            }
+
+            let mut buf = out_buf_for_menu.lock().unwrap();
+            let f_fg = menu_def.field_fg.unwrap_or(form_colors_menu.field_fg);
+            let f_bg = menu_def.field_bg.unwrap_or(form_colors_menu.field_bg);
+            let s_fg = menu_def.submit_fg.unwrap_or(form_colors_menu.submit_fg);
+            let s_bg = menu_def.submit_bg.unwrap_or(form_colors_menu.submit_bg);
+
+            buf.push(0xD0); // OP_FORM_START
+            buf.push(menu_def.form_id);
+            buf.push(f_fg);
+            buf.push(f_bg);
+            buf.push(s_fg);
+            buf.push(s_bg);
+
+            buf.push(0xC8); // OP_RENDER_MENU
             buf.extend_from_slice(&id.to_be_bytes());
+            buf.extend_from_slice(&toggle_mask.to_be_bytes());
+            Ok(())
+        })?,
+    )?;
+
+    let out_buf_for_table = output_buf.clone();
+    term.set(
+        "render_table",
+        lua.create_function(move |_, (start_col, start_row, config): (u8, u8, mlua::Table)| {
+            let mut buf = out_buf_for_table.lock().unwrap();
+            let headers: Vec<String> = config.get("headers").unwrap_or_default();
+            let widths: Vec<usize> = config.get("widths").unwrap_or_default();
+            let rows: Vec<Vec<String>> = config.get("rows").unwrap_or_default();
+            let h_fg: u8 = config.get("header_fg").unwrap_or(14);
+            let h_bg: u8 = config.get("header_bg").unwrap_or(0);
+            let r_fg: u8 = config.get("row_fg").unwrap_or(15);
+            let r_bg: u8 = config.get("row_bg").unwrap_or(0);
+            let divider: bool = config.get("divider").unwrap_or(true);
+
+            let mut cur_row = start_row;
+            if !headers.is_empty() {
+                buf.push(0xC3); // OP_CURSOR_ABS
+                buf.push(start_col);
+                buf.push(cur_row);
+                buf.push(0xC0); // OP_SET_COLOR
+                buf.push((h_bg << 4) | (h_fg & 0x0F));
+
+                let mut header_line = String::new();
+                for (idx, h) in headers.iter().enumerate() {
+                    let w = widths.get(idx).copied().unwrap_or(h.len() + 2);
+                    header_line.push_str(&format!("{:<width$}", h, width = w));
+                    if idx + 1 < headers.len() {
+                        header_line.push_str("  ");
+                    }
+                }
+                buf.extend_from_slice(header_line.as_bytes());
+                cur_row += 1;
+
+                if divider {
+                    buf.push(0xC3);
+                    buf.push(start_col);
+                    buf.push(cur_row);
+                    buf.push(0xC0);
+                    buf.push((h_bg << 4) | (h_fg & 0x0F));
+                    let mut div_line = String::new();
+                    for (idx, h) in headers.iter().enumerate() {
+                        let w = widths.get(idx).copied().unwrap_or(h.len() + 2);
+                        div_line.push_str(&"-".repeat(w));
+                        if idx + 1 < headers.len() {
+                            div_line.push_str("  ");
+                        }
+                    }
+                    buf.extend_from_slice(div_line.as_bytes());
+                    cur_row += 1;
+                }
+            }
+
+            for row in rows {
+                buf.push(0xC3);
+                buf.push(start_col);
+                buf.push(cur_row);
+                buf.push(0xC0);
+                buf.push((r_bg << 4) | (r_fg & 0x0F));
+
+                let mut row_line = String::new();
+                for (idx, cell) in row.iter().enumerate() {
+                    let w = widths.get(idx).copied().unwrap_or(cell.len() + 2);
+                    row_line.push_str(&format!("{:<width$}", cell, width = w));
+                    if idx + 1 < row.len() {
+                        row_line.push_str("  ");
+                    }
+                }
+                buf.extend_from_slice(row_line.as_bytes());
+                cur_row += 1;
+            }
+
             Ok(())
         })?,
     )?;
@@ -1840,7 +2083,31 @@ fn run_session_task(
         }
         Ok(())
     })?;
-    session.set("load_app", load_app)?;
+    session.set("load_app", load_app.clone())?;
+    session.set("exec_app", load_app)?;
+
+    session.set(
+        "time",
+        lua.create_function(|_, (): ()| {
+            let secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            Ok(secs)
+        })?,
+    )?;
+
+    session.set(
+        "date_str",
+        lua.create_function(|_, (): ()| {
+            let secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let days = secs / 86400;
+            Ok(format!("day-{}", days))
+        })?,
+    )?;
 
     globals.set("session", session)?;
 
@@ -2269,7 +2536,98 @@ max_asset_broadcast_duty_cycle = 0.1
             board_msg.expect("Failed to reassemble discussion boards screen response");
         assert_eq!(board_response.opcode, 0x03);
 
-        let _ = server_handle.await;
+        let _ = server_handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_main_menu_form_rendering_on_client() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let config = default_config();
+        let server_transport = Arc::new(MockSocketTransport::new_server(
+            "127.0.0.1:9096".to_string(),
+            0.0,
+            0,
+            200,
+        ));
+
+        let server_handle =
+            tokio::spawn(async move { start_server(config, server_transport, Some(1)).await });
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        let client_transport =
+            MockSocketTransport::new_client("127.0.0.1:9096".to_string(), 0.0, 0, 200);
+
+        let client_key = [6u8; 32];
+        let handshake_msg = MeshBbsMessage::new(0x03, 0x01, 0x00, Vec::new());
+        let handshake_payloads = handshake_msg.to_fragments(200).unwrap();
+
+        let packet = RadioPacket {
+            is_broadcast: false,
+            src_node: client_key,
+            dst_node: [0; 32],
+            payload: handshake_payloads[0].clone(),
+            signal_rssi: -50,
+            signal_snr: 10,
+        };
+        client_transport.send_packet(packet).await.unwrap();
+
+        // 1. Receive registration form
+        let mut client_reassembler = MessageReassembler::new();
+        let mut reg_msg = None;
+        let start_time = tokio::time::Instant::now();
+        while start_time.elapsed() < tokio::time::Duration::from_millis(1500) {
+            if let Ok(Ok(packet)) = tokio::time::timeout(
+                tokio::time::Duration::from_millis(100),
+                client_transport.receive_packet(),
+            ).await {
+                if let Some(msg) = client_reassembler.process_packet([0; 32], &packet.payload).unwrap() {
+                    reg_msg = Some(msg);
+                    break;
+                }
+            }
+        }
+        let _ = reg_msg.expect("Registration form expected");
+
+        // 2. Submit nickname
+        let form_submit_json = r#"{"nickname":"TestClient","submit":"register"}"#;
+        let submit_msg = MeshBbsMessage::new(0x02, 0x02, 0x00, form_submit_json.as_bytes().to_vec());
+        let submit_payloads = submit_msg.to_fragments(200).unwrap();
+        let packet = RadioPacket {
+            is_broadcast: false,
+            src_node: client_key,
+            dst_node: [0; 32],
+            payload: submit_payloads[0].clone(),
+            signal_rssi: -50,
+            signal_snr: 10,
+        };
+        client_transport.send_packet(packet).await.unwrap();
+
+        // 3. Receive main menu frame
+        let mut main_menu_msg = None;
+        let start_time = tokio::time::Instant::now();
+        while start_time.elapsed() < tokio::time::Duration::from_millis(1500) {
+            if let Ok(Ok(packet)) = tokio::time::timeout(
+                tokio::time::Duration::from_millis(100),
+                client_transport.receive_packet(),
+            ).await {
+                if let Some(msg) = client_reassembler.process_packet([0; 32], &packet.payload).unwrap() {
+                    main_menu_msg = Some(msg);
+                    break;
+                }
+            }
+        }
+        let msg = main_menu_msg.expect("Main menu frame expected");
+        println!("Main menu msg flags: {:02x}, len: {}", msg.flags, msg.payload.len());
+
+        let dict = bifrost_compression::CompressionDictionary::standard_static();
+        let decomp = if (msg.flags & 0x06) != 0 {
+            bifrost_ansi::decompress_bytecode_adaptive(msg.flags, &msg.payload, Some(&dict)).unwrap()
+        } else {
+            msg.payload
+        };
+        println!("Decompressed main menu payload (len {}): {:?}", decomp.len(), decomp);
+
+        let _ = server_handle.abort();
     }
 
     #[test]
@@ -2835,6 +3193,21 @@ max_asset_broadcast_duty_cycle = 0.15
         assert!(dungeon_entry.is_some(), "minidungeon/dungeon_banner must be registered");
         let (&dungeon_id, _) = dungeon_entry.unwrap();
         assert_ne!(banner_id, dungeon_id, "Asset IDs must be unique");
+
+        // Test scoped resolution precedence when multiple apps share identical asset names (e.g. combat_menu)
+        let full_manifest = load_app_manifests(&["minidungeon".to_string(), "voidtrader".to_string()]);
+        let (vt_combat_id, _) = resolve_asset_id_and_content(&full_manifest, "voidtrader", "combat_menu");
+        let (md_combat_id, _) = resolve_asset_id_and_content(&full_manifest, "minidungeon", "combat_menu");
+
+        assert_ne!(vt_combat_id, md_combat_id, "Different apps must resolve their own scoped asset IDs");
+        assert_eq!(
+            full_manifest.get(&vt_combat_id).unwrap().0,
+            "voidtrader/combat_menu"
+        );
+        assert_eq!(
+            full_manifest.get(&md_combat_id).unwrap().0,
+            "minidungeon/combat_menu"
+        );
     }
 
     #[tokio::test]
@@ -3516,6 +3889,160 @@ max_asset_broadcast_duty_cycle = 0.15
     }
 
     #[test]
+    fn test_voidtrader_app_syntax() {
+        let path = find_workspace_path("apps/voidtrader/main.lua");
+        let content = std::fs::read_to_string(path).unwrap();
+        let lua = mlua::Lua::new();
+        let chunk = lua.load(&content);
+        assert!(chunk.into_function().is_ok(), "voidtrader/main.lua should compile as valid Lua");
+    }
+
+    #[tokio::test]
+    async fn test_voidtrader_session_navigation() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let config = default_config();
+        let server_transport = Arc::new(MockSocketTransport::new_server("127.0.0.1:9102".to_string(), 0.0, 0, 200));
+
+        let server_handle = tokio::spawn(async move {
+            start_server(config, server_transport, Some(4)).await
+        });
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        let client_transport = MockSocketTransport::new_client("127.0.0.1:9102".to_string(), 0.0, 0, 200);
+        let client_key = [14u8; 32];
+        let mut client_cache = bifrost_transport::SessionPayloadCache::new(100);
+        let static_dict = bifrost_compression::CompressionDictionary::standard_static();
+
+        // Handshake
+        let handshake_msg = MeshBbsMessage::new(0x03, 0x01, 0x00, Vec::new());
+        let handshake_payloads = handshake_msg.to_fragments(200).unwrap();
+
+        let packet = RadioPacket {
+            is_broadcast: false,
+            src_node: client_key,
+            dst_node: [0; 32],
+            payload: handshake_payloads[0].clone(),
+            signal_rssi: -50,
+            signal_snr: 10,
+        };
+        client_transport.send_packet(packet).await.unwrap();
+
+        let mut client_reassembler = MessageReassembler::new();
+
+        // 1. Receive register screen
+        let start_time = tokio::time::Instant::now();
+        while start_time.elapsed() < tokio::time::Duration::from_millis(1500) {
+            match tokio::time::timeout(tokio::time::Duration::from_millis(100), client_transport.receive_packet()).await {
+                Ok(Ok(packet)) => {
+                    if let Some(msg) = client_reassembler.process_packet([0; 32], &packet.payload).unwrap() {
+                        let _ = decode_test_msg(&mut client_cache, &msg, &static_dict);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // 2. Register nickname "TraderBob"
+        let register_json = r#"{"nickname":"TraderBob","submit":"register"}"#;
+        let register_msg = MeshBbsMessage::new(0x02, 0x02, 0x00, register_json.as_bytes().to_vec());
+        let register_payloads = register_msg.to_fragments(200).unwrap();
+        let packet = RadioPacket {
+            is_broadcast: false,
+            src_node: client_key,
+            dst_node: [0; 32],
+            payload: register_payloads[0].clone(),
+            signal_rssi: -50,
+            signal_snr: 10,
+        };
+        client_transport.send_packet(packet).await.unwrap();
+
+        // Receive Main Menu screen
+        let start_time = tokio::time::Instant::now();
+        while start_time.elapsed() < tokio::time::Duration::from_millis(1500) {
+            match tokio::time::timeout(tokio::time::Duration::from_millis(100), client_transport.receive_packet()).await {
+                Ok(Ok(packet)) => {
+                    if let Some(msg) = client_reassembler.process_packet([0; 32], &packet.payload).unwrap() {
+                        let _ = decode_test_msg(&mut client_cache, &msg, &static_dict);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // 3. Submit "voidtrader" action from main menu (Form ID 10)
+        let voidtrader_select_json = r#"{"submit":"voidtrader"}"#;
+        let voidtrader_msg = MeshBbsMessage::new(0x02, 0x02, 0x00, voidtrader_select_json.as_bytes().to_vec());
+        let voidtrader_payloads = voidtrader_msg.to_fragments(200).unwrap();
+        let packet = RadioPacket {
+            is_broadcast: false,
+            src_node: client_key,
+            dst_node: [0; 32],
+            payload: voidtrader_payloads[0].clone(),
+            signal_rssi: -50,
+            signal_snr: 10,
+        };
+        client_transport.send_packet(packet).await.unwrap();
+
+        // 4. Receive Void Trader Sector screen
+        let mut vt_screen = None;
+        let start_time = tokio::time::Instant::now();
+        while start_time.elapsed() < tokio::time::Duration::from_millis(1500) {
+            match tokio::time::timeout(tokio::time::Duration::from_millis(100), client_transport.receive_packet()).await {
+                Ok(Ok(packet)) => {
+                    if let Some(msg) = client_reassembler.process_packet([0; 32], &packet.payload).unwrap() {
+                        vt_screen = Some(msg);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let resp = vt_screen.expect("Should receive Void Trader entry screen");
+        let uncompressed_payload = decode_test_msg(&mut client_cache, &resp, &static_dict);
+        let screen_text = String::from_utf8_lossy(&uncompressed_payload);
+        assert!(screen_text.contains("INTERSTELLAR PILOT DISPATCH") || screen_text.contains("Void Trader"), "Should contain Void Trader entry view, got: {}", screen_text);
+
+        // 5. Submit "resume" action from entry menu
+        let resume_json = r#"{"submit":"resume"}"#;
+        let resume_msg = MeshBbsMessage::new(0x02, 0x02, 0x00, resume_json.as_bytes().to_vec());
+        let resume_payloads = resume_msg.to_fragments(200).unwrap();
+        let packet = RadioPacket {
+            is_broadcast: false,
+            src_node: client_key,
+            dst_node: [0; 32],
+            payload: resume_payloads[0].clone(),
+            signal_rssi: -50,
+            signal_snr: 10,
+        };
+        client_transport.send_packet(packet).await.unwrap();
+
+        // 6. Receive Sector view screen
+        let mut sector_screen = None;
+        let start_time = tokio::time::Instant::now();
+        while start_time.elapsed() < tokio::time::Duration::from_millis(1500) {
+            match tokio::time::timeout(tokio::time::Duration::from_millis(100), client_transport.receive_packet()).await {
+                Ok(Ok(packet)) => {
+                    if let Some(msg) = client_reassembler.process_packet([0; 32], &packet.payload).unwrap() {
+                        sector_screen = Some(msg);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let resp_sector = sector_screen.expect("Should receive Sector screen");
+        let sector_payload = decode_test_msg(&mut client_cache, &resp_sector, &static_dict);
+        let sector_text = String::from_utf8_lossy(&sector_payload);
+        assert!(sector_text.contains("Alpha Stardock") || sector_text.contains("Available Warps"), "Should contain sector view, got: {}", sector_text);
+
+        let _ = server_handle.await;
+    }
+
+    #[test]
     fn test_parse_meshcore_advert_full_packet_framing() {
         let node_key = [0x42u8; 32];
         let mut packet_bytes = Vec::new();
@@ -3627,11 +4154,14 @@ max_asset_broadcast_duty_cycle = 0.15
             "minidungeon".to_string(),
             "admin".to_string(),
             "marketplace".to_string(),
+            "weather".to_string(),
+            "voidtrader".to_string(),
         ];
         let manifest_map = load_app_manifests(&enabled);
-        assert!(manifest_map.contains_key(&0x0101)); // dungeon banner
+        assert!(manifest_map.contains_key(&0x0101)); // main menu banner
         assert!(manifest_map.contains_key(&0x0102)); // main menu border
-        assert!(manifest_map.contains_key(&0x0103)); // main menu banner
+        assert!(manifest_map.contains_key(&0x0103)); // dungeon banner
+        assert!(manifest_map.contains_key(&0x0104)); // voidtrader banner
 
         // Verify each main.lua exists
         for app_id in &enabled {

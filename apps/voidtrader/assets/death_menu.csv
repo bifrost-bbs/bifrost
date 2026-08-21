@@ -1,0 +1,4 @@
+# form_id=10
+# tag,id,label,col,row,key
+rescue,rescue,WaitForRescue,2,14,W
+main_menu,main_menu,ReturnToMenu,22,14,M

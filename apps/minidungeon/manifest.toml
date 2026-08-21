@@ -10,3 +10,15 @@ entry_point = "main.lua"
 [[assets]]
 name = "dungeon_banner"
 path = "assets/dungeon_banner.ans"
+
+[[assets]]
+name = "dungeon_hud"
+path = "assets/dungeon_hud.tmpl"
+
+[[assets]]
+name = "dungeon_menu"
+path = "assets/dungeon_menu.csv"
+
+[[assets]]
+name = "combat_menu"
+path = "assets/combat_menu.csv"

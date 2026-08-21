@@ -1,0 +1,8 @@
+# form_id=10
+# tag,id,label,col,row,key
+shipyard,shipyard,Shipyard,2,9,S
+outfitter,outfitter,Outfitter,2,9,O
+bank,bank,BankVault,2,9,B
+insurance,insurance,Insurance,2,9,I
+bar,bar,TavernBar,2,9,T
+return,return,ReturnToShip,2,9,R
