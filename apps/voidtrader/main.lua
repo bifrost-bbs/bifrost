@@ -12,16 +12,17 @@ local START_X = 15
 local START_Y = 8
 local START_Z = 3
 
-local MAX_TURNS = 120
+local MAX_TURNS = 100
 local WARP_FUEL_COST = 3
 local ORE_TO_FUEL_RATIO = 10
 
 -- Ship Classes: name, holds_base, holds_max, max_fighters, max_shields, fuel_max, price
 local SHIP_CLASSES = {
-    { name = "Scout Sloop", holds_base = 20, holds_max = 35, max_fighters = 25, max_shields = 25, fuel_max = 30, price = 0 },
-    { name = "Merchant Hauler", holds_base = 50, holds_max = 80, max_fighters = 60, max_shields = 60, fuel_max = 60, price = 4500 },
-    { name = "Armored Freighter", holds_base = 100, holds_max = 150, max_fighters = 120, max_shields = 120, fuel_max = 120, price = 14000 },
-    { name = "Dreadnought Cruiser", holds_base = 200, holds_max = 300, max_fighters = 250, max_shields = 250, fuel_max = 250, price = 42000 }
+    [0] = { name = "Escape Pod", holds_base = 0, holds_max = 0, max_fighters = 0, max_shields = 0, fuel_max = 0, price = 0 },
+    [1] = { name = "Scout Sloop", holds_base = 20, holds_max = 35, max_fighters = 25, max_shields = 25, fuel_max = 30, price = 300 },
+    [2] = { name = "Merchant Hauler", holds_base = 50, holds_max = 80, max_fighters = 60, max_shields = 60, fuel_max = 60, price = 4500 },
+    [3] = { name = "Armored Freighter", holds_base = 100, holds_max = 150, max_fighters = 120, max_shields = 120, fuel_max = 120, price = 14000 },
+    [4] = { name = "Dreadnought Cruiser", holds_base = 200, holds_max = 300, max_fighters = 250, max_shields = 250, fuel_max = 250, price = 42000 }
 }
 
 -- Navigation Computers: name, max_jumps, max_favorites, price
@@ -35,17 +36,60 @@ local NAV_COMPUTERS = {
 -- Port Classes: [Ore, Org, Eqp] where 1 = Port BUYS (Player Sells), 0 = Port SELLS (Player Buys)
 -- Class 0 is Stardock (Special Central Hub)
 local PORT_CLASSES = {
-    [1] = {1, 0, 0, name = "BBS (Ore Buy / Org Sell / Eqp Sell)"},
-    [2] = {0, 1, 0, name = "BSB (Ore Sell / Org Buy / Eqp Sell)"},
-    [3] = {0, 0, 1, name = "SBB (Ore Sell / Org Sell / Eqp Buy)"},
-    [4] = {0, 1, 1, name = "SBB (Ore Sell / Org Buy / Eqp Buy)"},
-    [5] = {1, 0, 1, name = "BSB (Ore Buy / Org Sell / Eqp Buy)"},
-    [6] = {1, 1, 0, name = "BBS (Ore Buy / Org Buy / Eqp Sell)"},
-    [7] = {1, 1, 1, name = "BBB (Import Station - Buys All)"},
-    [8] = {0, 0, 0, name = "SSS (Industrial Hub - Sells All)"}
+    [1] = {1, 0, 0, code = "BSS", name = "BSS (Ore Buy / Org Sell / Eqp Sell)"},
+    [2] = {0, 1, 0, code = "SBS", name = "SBS (Ore Sell / Org Buy / Eqp Sell)"},
+    [3] = {0, 0, 1, code = "SSB", name = "SSB (Ore Sell / Org Sell / Eqp Buy)"},
+    [4] = {0, 1, 1, code = "SBB", name = "SBB (Ore Sell / Org Buy / Eqp Buy)"},
+    [5] = {1, 0, 1, code = "BSB", name = "BSB (Ore Buy / Org Sell / Eqp Buy)"},
+    [6] = {1, 1, 0, code = "BBS", name = "BBS (Ore Buy / Org Buy / Eqp Sell)"},
+    [7] = {1, 1, 1, code = "BBB", name = "BBB (Import Station - Buys All)"},
+    [8] = {0, 0, 0, code = "SSS", name = "SSS (Industrial Hub - Sells All)"}
 }
 
 local BASE_PRICES = { ore = 15, org = 35, eqp = 80 }
+
+local CANTINA_VERBS = {
+    "Drifting", "Spinning", "Blazing", "Frozen", "Warping",
+    "Orbiting", "Quantum", "Roaming", "Sleeping", "Fading",
+    "Shining", "Shattered", "Gilded", "Smoking", "Howling",
+    "Stray", "Silent", "Lost", "Twisted", "Wandering"
+}
+
+local CANTINA_NOUNS = {
+    "Pulsar", "Comet", "Nebula", "Quasar", "Supernova",
+    "Asteroid", "Cosmonaut", "Vagabond", "Corsair", "Star",
+    "Voidfarer", "Moon", "Eclipse", "Horizon", "Singularity",
+    "Meteor", "Beacon", "Black Hole", "Constellation", "Spaceway"
+}
+
+local function get_cantina_name(sector_id, port)
+    if sector_id == START_SECTOR_ID then
+        return "The Singing Pulsar"
+    end
+    if port and port.cantina_name then
+        return port.cantina_name
+    end
+    local v_idx = ((sector_id * 17 + 5) % #CANTINA_VERBS) + 1
+    local n_idx = ((sector_id * 31 + 11) % #CANTINA_NOUNS) + 1
+    return string.format("The %s %s", CANTINA_VERBS[v_idx], CANTINA_NOUNS[n_idx])
+end
+
+local function get_port_services(sector_id, port)
+    if sector_id == START_SECTOR_ID then
+        return "H", true, true, true
+    end
+    if port and port.service_tier then
+        return port.service_tier, (port.has_bank or false), (port.has_outfitter or false), (port.has_shipyard or false)
+    end
+    local roll = (sector_id * 53 + 7) % 100
+    if roll < 5 then
+        return "H", true, true, true
+    elseif roll < 15 then
+        return "B", true, true, false
+    else
+        return "-", false, false, false
+    end
+end
 
 -- ---------------------------------------------------------------------------
 -- 3D GRID COORDINATES & TOPOLOGY
@@ -90,15 +134,59 @@ local function init_universe()
     for i = 1, NUM_SECTORS do
         local port = nil
         if i == START_SECTOR_ID then
-            port = { class = 0, name = "Alpha Stardock Prime", ore = 9999, org = 9999, eqp = 9999 }
+            port = {
+                class = 0,
+                name = "Alpha Stardock Prime",
+                ore = 9999,
+                org = 9999,
+                eqp = 9999,
+                drink_price = 50,
+                has_cantina = true,
+                cantina_name = "The Singing Pulsar",
+                service_tier = "H",
+                has_bank = true,
+                has_outfitter = true,
+                has_shipyard = true
+            }
         elseif math.random(1, 100) <= 60 then
             local p_class = math.random(1, 8)
+            local has_c = (math.random(1, 100) <= 5)
+            local c_name = nil
+            if has_c then
+                local v_idx = math.random(1, #CANTINA_VERBS)
+                local n_idx = math.random(1, #CANTINA_NOUNS)
+                c_name = string.format("The %s %s", CANTINA_VERBS[v_idx], CANTINA_NOUNS[n_idx])
+            end
+
+            local s_roll = math.random(1, 100)
+            local s_tier = "-"
+            local h_bank = false
+            local h_outfit = false
+            local h_ship = false
+            if s_roll <= 5 then
+                s_tier = "H"
+                h_bank = true
+                h_outfit = true
+                h_ship = true
+            elseif s_roll <= 15 then
+                s_tier = "B"
+                h_bank = true
+                h_outfit = true
+            end
+
             port = {
                 class = p_class,
                 name = "Port " .. string.char(64 + p_class) .. "-" .. i,
                 ore = math.random(600, 3000),
                 org = math.random(400, 2500),
-                eqp = math.random(200, 1500)
+                eqp = math.random(200, 1500),
+                drink_price = math.random(25, 200),
+                has_cantina = has_c,
+                cantina_name = c_name,
+                service_tier = s_tier,
+                has_bank = h_bank,
+                has_outfitter = h_outfit,
+                has_shipyard = h_ship
             }
         end
 
@@ -205,6 +293,7 @@ local function init_player(session)
         sector = START_SECTOR_ID,
         credits = 1200,
         bank = 0,
+        insurance_level = 0,
         turns = MAX_TURNS,
         ship_class = 1,
         nav_level = 1,
@@ -237,22 +326,30 @@ end
 
 local function get_player(session)
     local p = db.get("vt_players", session.node_id())
+    local today = (session.date_str and session.date_str()) or "day-0"
     if not p or type(p) ~= "table" then
         p = init_player(session)
+        p.last_turn_date = today
         db.set("vt_players", session.node_id(), p)
     end
 
     local user = db.get("users", session.node_id()) or {}
     if user.nickname then p.nickname = user.nickname end
 
-    if not p.turns or p.turns <= 0 then
+    if p.last_turn_date ~= today then
         p.turns = MAX_TURNS
+        p.last_turn_date = today
+        db.set("vt_players", session.node_id(), p)
+    elseif not p.turns then
+        p.turns = MAX_TURNS
+        p.last_turn_date = today
         db.set("vt_players", session.node_id(), p)
     end
 
     local ship_info = SHIP_CLASSES[p.ship_class or 1] or SHIP_CLASSES[1]
     if p.fuel == nil then p.fuel = ship_info.fuel_max end
     if p.nav_level == nil then p.nav_level = 1 end
+    if p.insurance_level == nil then p.insurance_level = 0 end
     if p.favorites == nil then p.favorites = {} end
     if p.plotted_course == nil then p.plotted_course = {} end
     if p.explored == nil then p.explored = { [START_SECTOR_ID] = true } end
@@ -353,7 +450,104 @@ end
 
 function app.on_start(session)
     local player = get_player(session)
-    app.view_sector(session, player, "Welcome to the Void Frontier, " .. player.nickname .. "!")
+    local ship_info = SHIP_CLASSES[player.ship_class or 1] or SHIP_CLASSES[1]
+
+    term.clear()
+    term.render_asset("voidtrader_banner")
+
+    term.move_to(2, 6)
+    term.set_color(14, 0)
+    term.print("=== INTERSTELLAR PILOT DISPATCH & TERMINAL ===")
+
+    term.move_to(2, 7)
+    term.set_color(15, 0)
+    local net_worth = calc_net_worth(player)
+    term.print(string.format("Pilot: %-12s  Ship: %-14s  Worth: %d cr  Turns: %d/%d", player.nickname, ship_info.name, net_worth, player.turns or 100, MAX_TURNS))
+
+    term.move_to(2, 9)
+    term.set_color(11, 0)
+    term.print("Welcome to the outer rim, Commander. The Void Trader expanse spans 2,250")
+    term.move_to(2, 10)
+    term.print("charted sectors with volatile trading hubs, cosmic hazards, and ruthless")
+    term.move_to(2, 11)
+    term.print("pirate corsairs. Establish trade routes, upgrade your hull and combat")
+    term.move_to(2, 12)
+    term.print("drones, insure your assets, and compete for galactic fortune and glory!")
+
+    term.render_menu("entry_menu", {
+        resume = true,
+        new_game = true,
+        leaderboard = true,
+        help = true,
+        exit = true
+    })
+    term.flush_form()
+
+    session.await_input(10, function(sub)
+        if type(sub) == "string" then app.on_start(session) return end
+        local act = sub.submit
+
+        if act == "resume" then
+            app.view_sector(session, player, "Command bridge online. All systems nominal.")
+        elseif act == "new_game" then
+            save_player(session, player)
+            local new_p = init_player(session)
+            new_p.last_turn_date = (session.date_str and session.date_str()) or "day-0"
+            db.set("vt_players", session.node_id(), new_p)
+            app.view_sector(session, new_p, "New voyage initiated at Stardock Alpha Prime.")
+        elseif act == "leaderboard" then
+            app.view_leaderboard(session, player, true)
+        elseif act == "help" then
+            app.view_help(session, 1)
+        elseif act == "exit" then
+            save_player(session, player)
+            session.exec_app("main_menu")
+        else
+            app.on_start(session)
+        end
+    end)
+end
+
+function app.view_help(session, page_num)
+    page_num = math.max(1, math.min(6, page_num or 1))
+    local help_assets = {
+        "help_basics",
+        "help_trading",
+        "help_navigation",
+        "help_combat",
+        "help_insurance",
+        "help_cantinas"
+    }
+
+    term.clear()
+    term.move_to(2, 1)
+    term.set_color(14, 0)
+    term.print(string.format("=== GALACTIC ARCHIVES: PILOT GUIDE (PAGE %d OF 6) ===", page_num))
+
+    term.move_to(2, 3)
+    term.render_asset(help_assets[page_num])
+
+    term.render_menu("help_menu", {
+        next = (page_num < 6),
+        prev = (page_num > 1),
+        ["return"] = true
+    })
+    term.flush_form()
+
+    session.await_input(15, function(sub)
+        if type(sub) == "string" then app.view_help(session, page_num) return end
+        local act = sub.submit
+
+        if act == "next" and page_num < 6 then
+            app.view_help(session, page_num + 1)
+        elseif act == "prev" and page_num > 1 then
+            app.view_help(session, page_num - 1)
+        elseif act == "return" then
+            app.on_start(session)
+        else
+            app.view_help(session, page_num)
+        end
+    end)
 end
 
 function app.view_sector(session, player, msg)
@@ -372,8 +566,7 @@ function app.view_sector(session, player, msg)
     local cur_x, cur_y, cur_z = to_coords(player.sector)
 
     term.clear()
-    term.render_asset("voidtrader_banner")
-    term.move_to(2, 6)
+    term.move_to(2, 1)
 
     -- Render HUD using cached Template Asset (only ~20 bytes over the air!)
     term.render_template("sector_hud", {
@@ -394,7 +587,7 @@ function app.view_sector(session, player, msg)
     })
 
     -- Directional Warp Links String
-    term.move_to(2, 8)
+    term.move_to(2, 3)
     term.set_color(15, 0)
     local warp_str = ""
     local dir_map = {}
@@ -406,38 +599,42 @@ function app.view_sector(session, player, msg)
     if warp_str == "" then warp_str = "(Dead End - No Vector)" end
     term.print("Available Warps: " .. warp_str)
 
-    term.move_to(2, 9)
-    local fav_marker = is_fav and " [* FAVORITE PORT]" or ""
+    term.move_to(2, 4)
+    local fav_marker = is_fav and " [* FAV]" or ""
     if player.sector == START_SECTOR_ID then
         term.set_color(10, 0)
-        term.print("Facilities: [ Alpha Stardock Prime ] (Shipyard, Bank, Outfitter)" .. fav_marker)
+        term.print("Facilities: [ Stardock Prime ] (Shipyard, Bank, Outfitter, The Singing Pulsar)" .. fav_marker)
     elseif sec.port then
         term.set_color(10, 0)
-        local p_info = PORT_CLASSES[sec.port.class] or { name = "Trading Station" }
-        term.print(string.format("Port: Class %d - %s%s", sec.port.class, p_info.name, fav_marker))
+        local p_info = PORT_CLASSES[sec.port.class] or { code = "???", name = "Trading Station" }
+        local s_tier, has_b, has_o, has_s = get_port_services(player.sector, sec.port)
+        local p_code = string.format("%s%s", p_info.code or "???", s_tier)
+        local has_cantina = sec.port.has_cantina or ((player.sector * 37 + 13) % 100 < 5)
+        local cantina_tag = has_cantina and string.format(" | Cantina: %s", get_cantina_name(player.sector, sec.port)) or ""
+        term.print(string.format("Port: Class %d [%s] (%s)%s%s", sec.port.class, p_code, sec.port.name or ("Port " .. player.sector), cantina_tag, fav_marker))
     else
         term.set_color(8, 0)
         term.print("Port: None in this sector (Deep Space)")
     end
 
     if sec.hazard == "BLACK_HOLE" then
-        term.move_to(2, 10)
+        term.move_to(2, 5)
         term.set_color(12, 0)
         term.print("HAZARD: BLACK HOLE SINGULARITY (Extreme Gravity Well!)")
     elseif sec.hazard == "WORMHOLE" then
-        term.move_to(2, 10)
+        term.move_to(2, 5)
         term.set_color(13, 0)
         term.print("ANOMALY: UNSTABLE WORMHOLE RIFT (Trans-Galactic Conduit)")
     elseif sec.hazard == "ASTEROID_FIELD" then
-        term.move_to(2, 10)
+        term.move_to(2, 5)
         term.set_color(14, 0)
         term.print("ANOMALY: DENSE ASTEROID BELT (Fuel Ore Deposits Available)")
     elseif sec.hazard == "COSMIC_STORM" then
-        term.move_to(2, 10)
+        term.move_to(2, 5)
         term.set_color(11, 0)
         term.print("HAZARD: IONIZED COSMIC STORM (Sensor Static & Shield Drain)")
     elseif sec.hazard == "DERELICT_GRAVEYARD" then
-        term.move_to(2, 10)
+        term.move_to(2, 5)
         term.set_color(15, 0)
         term.print("ANOMALY: DERELICT SHIP GRAVEYARD (Salvage Potential)")
     end
@@ -445,7 +642,7 @@ function app.view_sector(session, player, msg)
     local next_course_hop = nil
     if player.plotted_course and #player.plotted_course > 0 then
         next_course_hop = player.plotted_course[1]
-        term.move_to(2, 11)
+        term.move_to(2, 6)
         term.set_color(13, 0)
         local course_str = ""
         for idx, hop in ipairs(player.plotted_course) do
@@ -459,12 +656,16 @@ function app.view_sector(session, player, msg)
     end
 
     if is_stranded then
-        term.move_to(2, 11)
+        term.move_to(2, 6)
         term.set_color(12, 0)
-        term.print("STRANDED: Out of fuel & fuel ore! Send distress signal.")
+        if sec.port then
+            term.print("NOTICE: Out of warp fuel! Dock at the starport to refuel your tanks.")
+        else
+            term.print("STRANDED: Out of fuel in deep space! Send distress beacon.")
+        end
     end
 
-    term.move_to(2, 12)
+    term.move_to(2, 7)
     term.set_color(15, 0)
     term.print(msg or "")
 
@@ -492,7 +693,7 @@ function app.view_sector(session, player, msg)
         status = true,
         ranks = true,
         exit = true,
-        distress = is_stranded
+        distress = (is_stranded and sec.port == nil)
     })
     term.flush_form()
 
@@ -544,10 +745,10 @@ function app.view_sector(session, player, msg)
         elseif act == "status" then
             app.view_status(session, player)
         elseif act == "ranks" then
-            app.view_leaderboard(session, player)
+            app.view_leaderboard(session, player, false)
         elseif act == "exit" then
             save_player(session, player)
-            session.load_app("main_menu")
+            session.exec_app("main_menu")
         else
             app.view_sector(session, player, "")
         end
@@ -767,7 +968,7 @@ function app.black_hole_slingshot(session, player)
     end
 
     if player.shields <= 0 and player.fighters <= 0 then
-        app.player_death(session, player, "Vessel pulled past event horizon and crushed by singularity.")
+        app.player_destroyed(session, player, "Vessel pulled past event horizon and crushed by singularity.")
         return
     end
 
@@ -830,15 +1031,14 @@ function app.plot_menu(session, player)
     local cur_x, cur_y, cur_z = to_coords(player.sector)
 
     term.clear()
-    term.render_asset("voidtrader_banner")
-    term.move_to(2, 5)
+    term.move_to(2, 1)
     term.set_color(11, 0)
     term.print(string.format("=== HYPERSPACE COURSE PLOTTER (%s) ===", nav_info.name))
-    term.move_to(2, 6)
+    term.move_to(2, 2)
     term.set_color(14, 0)
     term.print(string.format("Position: Sec %d [%02d,%02d,%d] | Max Jumps Plottable: %d", player.sector, cur_x, cur_y, cur_z, nav_info.max_jumps))
 
-    term.move_to(2, 8)
+    term.move_to(2, 3)
     term.set_color(15, 0)
     term.print("Favorite Starports:")
     if player.favorites and #player.favorites > 0 then
@@ -847,26 +1047,26 @@ function app.plot_menu(session, player)
                 local sec = sectors[fav_sec]
                 local fx, fy, fz = to_coords(fav_sec)
                 local port_name = (sec and sec.port and sec.port.name) or "Deep Space"
-                term.move_to(4, 8 + idx)
+                term.move_to(4, 3 + idx)
                 term.set_color(10, 0)
                 term.print(string.format("[%d] Sector %-4d [%02d,%02d,%d] - %s", idx, fav_sec, fx, fy, fz, port_name))
             end
         end
     else
-        term.move_to(4, 9)
+        term.move_to(4, 4)
         term.set_color(8, 0)
         term.print("No favorite ports saved. (Press [fav] at any starport)")
     end
 
     term.define_form(25)
-    term.move_to(2, 13)
+    term.move_to(2, 8)
     term.set_color(15, 0)
     term.print("Enter Target Sector (1 - " .. NUM_SECTORS .. "): ")
-    term.add_input_field("target", 34, 13, 5, "")
+    term.add_input_field("target", 34, 8, 5, "")
 
-    term.add_submit_button("plot_course", 2, 15)
-    term.add_submit_button("clear_course", 16, 15)
-    term.add_submit_button("back", 32, 15)
+    term.add_submit_button("plot_course", 2, 10)
+    term.add_submit_button("clear_course", 16, 10)
+    term.add_submit_button("back", 32, 10)
     term.flush_form()
 
     session.await_input(25, function(sub)
@@ -1003,6 +1203,11 @@ end
 function app.perform_warp_to(session, player, dest)
     local sectors = get_sectors()
 
+    if (player.ship_class or 1) == 0 then
+        app.view_sector(session, player, "Escape Pod has no warp engines! Dock at Stardock to acquire a ship.")
+        return
+    end
+
     if player.turns <= 0 then
         app.view_sector(session, player, "Hyperspace engine offline: Out of turns!")
         return
@@ -1018,9 +1223,18 @@ function app.perform_warp_to(session, player, dest)
         end
     end
 
+    local prev_sector = player.sector
     player.sector = dest
     player.turns = player.turns - 1
     player.fuel = player.fuel - WARP_FUEL_COST
+
+    if player.merc_contract and player.merc_contract > 0 then
+        player.merc_contract = player.merc_contract - 1
+        if player.merc_contract <= 0 then
+            player.merc_contract = nil
+        end
+    end
+
     save_player(session, player)
 
     local dest_sec = sectors[dest]
@@ -1037,7 +1251,7 @@ function app.perform_warp_to(session, player, dest)
     elseif dest ~= START_SECTOR_ID and roll <= 26 then
         app.derelict_salvage(session, player)
     else
-        local _, code, _ = get_direction_name(dest, player.sector)
+        local _, code, _ = get_direction_name(prev_sector, dest)
         app.view_sector(session, player, string.format("Warped into Sector %d [%s vector].", dest, code))
     end
 end
@@ -1046,23 +1260,38 @@ end
 -- COMBAT & SPACE ENCOUNTERS
 -- ---------------------------------------------------------------------------
 
-function app.pirate_encounter(session, player, enemy_fighters)
+function app.pirate_encounter(session, player, enemy_fighters, combat_msg)
+    local ship_info = SHIP_CLASSES[player.ship_class or 1] or SHIP_CLASSES[1]
+
     term.clear()
-    term.render_asset("voidtrader_banner")
-    term.move_to(2, 6)
+    term.move_to(2, 1)
     term.set_color(12, 0)
     term.print("RED ALERT: Void Marauder Corsair dropping out of warp!")
 
-    term.move_to(2, 8)
+    term.move_to(2, 3)
     term.set_color(7, 0)
     term.print(string.format("Enemy Combat Drones: %-3d", enemy_fighters))
-    term.move_to(2, 9)
-    term.print(string.format("Your Fleet: %d Fighters | %d Deflector Shields", player.fighters, player.shields))
+    term.move_to(2, 4)
+    term.print(string.format("Your Fleet: %d Fighters | %d / %d Deflector Shields | %d Fuel", player.fighters, player.shields, ship_info.max_shields, player.fuel))
 
-    term.define_form(30)
-    term.add_submit_button("attack", 2, 12)
-    term.add_submit_button("shields_up", 14, 12)
-    term.add_submit_button("hyper_flee", 28, 12)
+    term.move_to(2, 5)
+    if player.merc_contract and player.merc_contract > 0 then
+        term.set_color(10, 0)
+        term.print(string.format("Mercenary Escort: Vanguard Wing Online (+10 Firepower | %d Jumps Left)", player.merc_contract))
+    else
+        term.set_color(8, 0)
+        term.print("Mercenary Escort: None (Solo Flight)")
+    end
+
+    term.move_to(2, 6)
+    term.set_color(14, 0)
+    term.print(combat_msg or "Enemy weapons systems locked onto your ship hull!")
+
+    term.render_menu("combat_menu", {
+        attack = (player.fighters > 0 or (player.merc_contract and player.merc_contract > 0)),
+        shields_up = true,
+        flee = true
+    })
     term.flush_form()
 
     session.await_input(30, function(sub)
@@ -1070,8 +1299,15 @@ function app.pirate_encounter(session, player, enemy_fighters)
         local act = sub.submit
 
         if act == "attack" then
-            local p_dmg = math.random(2, math.max(3, math.floor(player.fighters * 0.8)))
+            local merc_bonus = (player.merc_contract and player.merc_contract > 0) and math.random(5, 12) or 0
+            local p_dmg = math.random(2, math.max(3, math.floor(player.fighters * 0.8))) + merc_bonus
             local e_dmg = math.random(2, math.max(3, math.floor(enemy_fighters * 0.7)))
+
+            if merc_bonus > 0 and e_dmg > 0 then
+                -- Mercenary absorbs up to 4 enemy damage
+                local merc_absorb = math.min(4, e_dmg)
+                e_dmg = e_dmg - merc_absorb
+            end
 
             if player.shields > 0 then
                 local abs = math.min(player.shields, e_dmg)
@@ -1088,24 +1324,35 @@ function app.pirate_encounter(session, player, enemy_fighters)
                 save_player(session, player)
                 app.view_sector(session, player, "Victory! Corsair destroyed. Salvaged bounty: " .. bounty .. " cr.")
             elseif player.fighters <= 0 and player.shields <= 0 then
-                app.player_death(session, player, "Your vessel was torn apart by Void Marauders.")
+                app.player_destroyed(session, player, "Your vessel was torn apart by Void Marauders.")
             else
-                app.pirate_encounter(session, player, enemy_fighters)
+                local msg = string.format("Fighters engaged! Inflicted %d damage, took %d enemy damage.", p_dmg, e_dmg)
+                app.pirate_encounter(session, player, enemy_fighters, msg)
             end
         elseif act == "shields_up" then
-            local e_dmg = math.random(1, math.max(2, math.floor(enemy_fighters * 0.4)))
-            if player.shields > 0 then
-                player.shields = math.max(0, player.shields - e_dmg)
-            else
-                player.fighters = math.max(0, player.fighters - e_dmg)
+            -- Tactical shield overcharge & deflection
+            local shield_boost = 0
+            if player.fuel >= 1 then
+                player.fuel = player.fuel - 1
+                shield_boost = 3
+                player.shields = math.min(ship_info.max_shields, player.shields + shield_boost)
             end
 
-            if player.fighters <= 0 then
-                app.player_death(session, player, "Shields collapsed and vessel destroyed.")
+            -- Enemy damage heavily deflected by 75%
+            local raw_e_dmg = math.random(1, math.max(2, math.floor(enemy_fighters * 0.35)))
+            local e_dmg = math.max(1, math.floor(raw_e_dmg * 0.25))
+
+            local abs = math.min(player.shields, e_dmg)
+            player.shields = player.shields - abs
+            e_dmg = e_dmg - abs
+
+            if player.shields <= 0 and player.fighters <= 0 then
+                app.player_destroyed(session, player, "Deflector shields overloaded and vessel destroyed.")
             else
-                app.pirate_encounter(session, player, enemy_fighters)
+                local msg = string.format("[SHIELDS UP] Overcharged shields (+%d)! Deflected 75%% incoming fire (-%d absorbed).", shield_boost, abs)
+                app.pirate_encounter(session, player, enemy_fighters, msg)
             end
-        elseif act == "hyper_flee" then
+        elseif act == "flee" then
             if math.random(1, 100) <= 60 and player.fuel >= WARP_FUEL_COST then
                 player.turns = math.max(0, player.turns - 1)
                 player.fuel = math.max(0, player.fuel - WARP_FUEL_COST)
@@ -1119,10 +1366,11 @@ function app.pirate_encounter(session, player, enemy_fighters)
                     player.fighters = math.max(0, player.fighters - dmg)
                 end
 
-                if player.fighters <= 0 then
-                    app.player_death(session, player, "Destroyed while attempting hyperdrive escape.")
+                if player.fighters <= 0 and player.shields <= 0 then
+                    app.player_destroyed(session, player, "Destroyed while attempting hyperdrive escape.")
                 else
-                    app.pirate_encounter(session, player, enemy_fighters)
+                    local msg = "Hyperdrive jump failed! Hull sustained laser fire while charging coils."
+                    app.pirate_encounter(session, player, enemy_fighters, msg)
                 end
             end
         end
@@ -1142,42 +1390,115 @@ function app.derelict_salvage(session, player)
     app.view_sector(session, player, string.format("Discovered a drifting derelict freighter! Salvaged %d cr and %d Fuel Ore.", credits_found, ore_taken))
 end
 
-function app.player_death(session, player, cause)
+function app.player_destroyed(session, player, cause)
+    local ins_lvl = player.insurance_level or 0
+    local ship_info = SHIP_CLASSES[player.ship_class or 1] or SHIP_CLASSES[1]
+
     term.clear()
-    term.render_asset("voidtrader_banner")
-    term.move_to(2, 6)
+    term.move_to(2, 1)
     term.set_color(12, 0)
-    term.print("==========================================================")
-    term.move_to(2, 7)
-    term.print("                   VESSEL DESTROYED                       ")
-    term.move_to(2, 8)
-    term.print("==========================================================")
-    term.move_to(2, 10)
+    term.print("==============================================================")
+    term.move_to(2, 2)
+    term.print("                 VESSEL CRITICAL CASUALTY                     ")
+    term.move_to(2, 3)
+    term.print("==============================================================")
+
+    term.move_to(2, 4)
     term.set_color(15, 0)
-    term.print(cause)
-    term.move_to(2, 12)
+    term.print("Cause of Destruction: " .. cause)
+
+    term.move_to(2, 6)
     term.set_color(14, 0)
-    term.print("Escape pod retrieved by Alpha Stardock rescue team.")
-    term.move_to(2, 13)
-    term.print("Your bank account credits remained secure.")
+    if ins_lvl == 0 then
+        term.print("INSURANCE COVERAGE: NONE (UNINSURED)")
+        term.move_to(2, 7)
+        term.set_color(12, 0)
+        term.print(string.format("Bank Vault (%d cr) preserved. Cash, ship & cargo vaporized in deep space.", player.bank or 0))
+    elseif ins_lvl == 1 then
+        term.print("INSURANCE COVERAGE: BRONZE POLICY")
+        term.move_to(2, 7)
+        term.set_color(10, 0)
+        term.print(string.format("Bank Vault (%d cr) + 100 cr stipend & emergency Scout Sloop allocated.", player.bank or 0))
+    elseif ins_lvl == 2 then
+        term.print("INSURANCE COVERAGE: SILVER POLICY")
+        term.move_to(2, 7)
+        term.set_color(10, 0)
+        local cash_retained = math.floor(player.credits * 0.5)
+        term.print(string.format("Bank Vault (%d cr) + 50%% pocket cash (%d cr) preserved. %s hull allocated!", player.bank or 0, cash_retained, ship_info.name))
+    elseif ins_lvl == 3 then
+        term.print("INSURANCE COVERAGE: GOLD COMPREHENSIVE POLICY")
+        term.move_to(2, 7)
+        term.set_color(10, 0)
+        term.print(string.format("Bank Vault (%d cr) + 100%% cash (%d cr) + %s hull, all cargo and upgrades fully restored!", player.bank or 0, player.credits, ship_info.name))
+    end
 
-    local saved_bank = player.bank or 0
-    local p = init_player(session)
-    p.bank = saved_bank
-    save_player(session, p)
-
-    term.define_form(40)
-    term.add_submit_button("respawn", 2, 15)
+    term.render_menu("death_menu", {
+        rescue = true,
+        main_menu = true
+    })
     term.flush_form()
 
-    session.await_input(40, function() app.view_sector(session, p, "Respawned at Alpha Stardock Prime.") end)
+    session.await_input(40, function(sub)
+        if type(sub) == "string" then app.player_destroyed(session, player, cause) return end
+        local act = sub.submit
+
+        if act == "rescue" then
+            local p = init_player(session)
+            if ins_lvl == 0 then
+                p.bank = player.bank or 0
+                p.credits = 0
+                p.ship_class = 0
+                p.holds = 0
+                p.fuel = 0
+                p.fighters = 0
+                p.shields = 0
+                p.ore = 0
+                p.org = 0
+                p.eqp = 0
+                p.insurance_level = 0
+            elseif ins_lvl == 1 then
+                p.bank = player.bank or 0
+                p.credits = 100
+                p.ship_class = 1
+                p.insurance_level = 0
+            elseif ins_lvl == 2 then
+                p.bank = player.bank or 0
+                p.credits = math.floor(player.credits * 0.5) + 100
+                p.ship_class = player.ship_class or 1
+                p.nav_level = player.nav_level or 1
+                local s_info = SHIP_CLASSES[p.ship_class] or SHIP_CLASSES[1]
+                p.holds = s_info.holds_base
+                p.fuel = s_info.fuel_max
+                p.fighters = 15
+                p.shields = 15
+                p.insurance_level = 0
+            elseif ins_lvl == 3 then
+                p = player
+                p.sector = START_SECTOR_ID
+                p.turns = MAX_TURNS
+                local s_info = SHIP_CLASSES[p.ship_class or 1] or SHIP_CLASSES[1]
+                p.fuel = s_info.fuel_max
+                p.insurance_level = 0 -- Gold policy claimed
+            end
+            p.sector = START_SECTOR_ID
+            p.turns = MAX_TURNS
+            save_player(session, p)
+            if ins_lvl == 0 then
+                app.view_sector(session, p, "Rescue tug towed your Escape Pod to Alpha Stardock. Visit Shipyard/Bank!")
+            else
+                app.view_sector(session, p, "Insurance underwriters towed replacement ship to Alpha Stardock Prime.")
+            end
+        else
+            app.on_start(session)
+        end
+    end)
 end
 
 -- ---------------------------------------------------------------------------
 -- COMMODITY TRADING AT STARPORTS (USING TABLE API & MENU ASSET)
 -- ---------------------------------------------------------------------------
 
-function app.port_menu(session, player)
+function app.port_menu(session, player, msg)
     local sectors = get_sectors()
     local sec = sectors[player.sector]
     if not sec or not sec.port then
@@ -1190,10 +1511,11 @@ function app.port_menu(session, player)
     local ship_info = SHIP_CLASSES[player.ship_class or 1] or SHIP_CLASSES[1]
 
     term.clear()
-    term.render_asset("voidtrader_banner")
-    term.move_to(2, 5)
+    term.move_to(2, 1)
     term.set_color(10, 0)
-    term.print(string.format("=== %s (Class %d) ===", port.name or "Commerce Post", port.class))
+    local s_tier, has_bank, has_outfitter, has_shipyard = get_port_services(player.sector, port)
+    local p_code = string.format("%s%s", p_rules.code or "???", s_tier)
+    term.print(string.format("=== %s (Class %d [%s]) ===", port.name or "Commerce Post", port.class, p_code))
 
     local function build_row(key, name, port_amt, pl_amt, rule, base_p)
         local is_station_buying = (rule == 1)
@@ -1217,7 +1539,7 @@ function app.port_menu(session, player)
     local row3, pr_eqp = build_row("eqp", "Equipment", port.eqp, player.eqp, p_rules[3], BASE_PRICES.eqp)
 
     -- Render Table with clean structured formatting
-    term.render_table(2, 7, {
+    term.render_table(2, 3, {
         headers = { "Commodity", "Port Stock", "Hold (Avg)", "Action / Price", "Margin / Diff" },
         widths = { 11, 11, 14, 15, 16 },
         rows = { row1, row2, row3 },
@@ -1226,17 +1548,28 @@ function app.port_menu(session, player)
         divider = true
     })
 
-    term.move_to(2, 13)
+    term.move_to(2, 7)
     term.set_color(15, 0)
     local holds_used = player.ore + player.org + player.eqp
     term.print(string.format("Cash: %-8d cr   Holds: %d / %d   Fuel: %d / %d (Refuel: 1 cr/unit)", player.credits, (player.holds - holds_used), player.holds, player.fuel, ship_info.fuel_max))
 
+    if msg and msg ~= "" then
+        term.move_to(2, 8)
+        term.set_color(12, 0)
+        term.print(">>> " .. msg)
+    end
+
+    local has_cantina = port.has_cantina or ((player.sector * 37 + 13) % 100 < 5)
     term.render_menu("port_menu", {
-        trade_ore = true,
-        trade_org = true,
-        trade_eqp = true,
-        refuel_tank = (player.fuel < ship_info.fuel_max),
-        depart = true
+        ore = true,
+        org = true,
+        eqp = true,
+        refuel = (player.fuel < ship_info.fuel_max),
+        outfitter = has_outfitter,
+        bank = has_bank,
+        shipyard = has_shipyard,
+        cantina = has_cantina,
+        ["return"] = true
     })
     term.flush_form()
 
@@ -1244,12 +1577,32 @@ function app.port_menu(session, player)
         if type(sub) == "string" then app.port_menu(session, player) return end
         local act = sub.submit
 
-        if act == "depart" then
+        if act == "return" or act == "depart" then
             app.view_sector(session, player, "Departed starport.")
             return
         end
 
-        if act == "refuel_tank" then
+        if act == "tavern" or act == "bar" then
+            app.tavern_menu(session, player)
+            return
+        end
+
+        if act == "outfitter" then
+            app.outfitter_menu(session, player)
+            return
+        end
+
+        if act == "bank" then
+            app.bank_menu(session, player)
+            return
+        end
+
+        if act == "shipyard" then
+            app.shipyard_menu(session, player)
+            return
+        end
+
+        if act == "refuel" or act == "refuel_tank" then
             local missing = ship_info.fuel_max - player.fuel
             local max_afford = player.credits
             local to_add = math.min(missing, max_afford)
@@ -1290,19 +1643,18 @@ function app.trade_quantity_prompt(session, player, item_key, item_name, rule, p
     end
 
     term.clear()
-    term.render_asset("voidtrader_banner")
-    term.move_to(2, 5)
+    term.move_to(2, 1)
     term.set_color(10, 0)
     term.print("=== COMMODITY TRANSACTION: " .. string.upper(item_name) .. " ===")
 
-    term.move_to(2, 7)
+    term.move_to(2, 3)
     term.set_color(15, 0)
     if is_station_buying then
         term.print(string.format("Mode: Station is BUYING from you (You SELL) @ %d cr/unit", price))
-        term.move_to(2, 8)
+        term.move_to(2, 4)
         term.print(string.format("In Cargo: %d units (Avg Paid: %d cr/unit) | Max Tradable: %d units", pl_amt, avg_paid, max_qty))
 
-        term.move_to(2, 9)
+        term.move_to(2, 5)
         local diff = price - avg_paid
         local pct = avg_paid > 0 and math.floor((diff / avg_paid) * 100) or 0
         if diff >= 0 then
@@ -1314,9 +1666,9 @@ function app.trade_quantity_prompt(session, player, item_key, item_name, rule, p
         end
     else
         term.print(string.format("Mode: Station is SELLING to you (You BUY) @ %d cr/unit", price))
-        term.move_to(2, 8)
+        term.move_to(2, 4)
         term.print(string.format("Port Stock: %d | Empty Holds: %d | Max Afford: %d", port_amt, free_holds, math.floor(player.credits / price)))
-        term.move_to(2, 9)
+        term.move_to(2, 5)
         if pl_amt > 0 then
             term.print(string.format("Current Cargo: %d units (Avg Paid: %d cr/unit) | Max Tradable: %d", pl_amt, avg_paid, max_qty))
         else
@@ -1324,19 +1676,19 @@ function app.trade_quantity_prompt(session, player, item_key, item_name, rule, p
         end
     end
 
-    term.move_to(2, 11)
+    term.move_to(2, 7)
     term.set_color(14, 0)
     term.print(string.format("Cash on Hand: %d cr   |   Holds: %d / %d", player.credits, (player.holds - free_holds), player.holds))
 
     term.define_form(55)
-    term.move_to(2, 13)
+    term.move_to(2, 9)
     term.set_color(15, 0)
     term.print("Trade Quantity: ")
-    term.add_input_field("qty", 18, 13, 6, tostring(max_qty))
+    term.add_input_field("qty", 18, 9, 6, tostring(max_qty))
 
-    term.add_submit_button("trade", 2, 15)
-    term.add_submit_button("trade_all", 14, 15)
-    term.add_submit_button("cancel", 28, 15)
+    term.add_submit_button("trade", 2, 11)
+    term.add_submit_button("trade_all", 14, 11)
+    term.add_submit_button("cancel", 28, 11)
     term.flush_form()
 
     session.await_input(55, function(sub)
@@ -1409,22 +1761,41 @@ end
 -- CENTRAL STARDOCK (SHIPYARD, BANK, OUTFITTER)
 -- ---------------------------------------------------------------------------
 
-function app.stardock_menu(session, player)
-    term.clear()
-    term.render_asset("voidtrader_banner")
-    term.move_to(2, 5)
-    term.set_color(10, 0)
-    term.print("==============================================================")
-    term.move_to(2, 6)
-    term.print("               ALPHA STARDOCK PRIME - CENTRAL HUB              ")
-    term.move_to(2, 7)
-    term.print("==============================================================")
+-- ---------------------------------------------------------------------------
+-- CENTRAL STARDOCK (SHIPYARD, BANK, OUTFITTER, INSURANCE)
+-- ---------------------------------------------------------------------------
 
-    term.move_to(2, 9)
+function app.stardock_menu(session, player, banner_msg)
+    term.clear()
+    term.move_to(2, 1)
+    term.set_color(10, 0)
+    term.print("=== ALPHA STARDOCK PRIME - CENTRAL FEDERATION HUB ===")
+
+    term.move_to(2, 3)
     term.set_color(14, 0)
     term.print(string.format("Commander %s   |   Credits: %d cr   |   Bank Vault: %d cr", player.nickname, player.credits, player.bank or 0))
 
-    term.render_menu("stardock_menu")
+    term.move_to(2, 4)
+    if banner_msg and banner_msg ~= "" then
+        term.set_color(12, 0)
+        term.print(">>> " .. banner_msg)
+    elseif (player.insurance_level or 0) == 0 then
+        term.set_color(12, 0)
+        term.print("STATUS: UNINSURED! Visit Insurance Underwriters [I] to protect your voyage.")
+    else
+        term.set_color(10, 0)
+        local cov_names = { [1] = "Bronze Policy Active", [2] = "Silver Policy Active", [3] = "Gold Policy Active" }
+        term.print(string.format("STATUS: %s (Single-use policy: re-purchase on loss)", cov_names[player.insurance_level] or "Insured"))
+    end
+
+    term.render_menu("stardock_menu", {
+        shipyard = true,
+        outfitter = true,
+        bank = true,
+        insurance = true,
+        bar = true,
+        ["return"] = true
+    })
     term.flush_form()
 
     session.await_input(70, function(sub)
@@ -1436,8 +1807,12 @@ function app.stardock_menu(session, player)
             app.outfitter_menu(session, player)
         elseif act == "bank" then
             app.bank_menu(session, player)
-        elseif act == "launch" then
-            app.view_sector(session, player, "Launched into Sector " .. START_SECTOR_ID .. ".")
+        elseif act == "insurance" then
+            app.insurance_office(session, player)
+        elseif act == "bar" then
+            app.tavern_menu(session, player)
+        elseif act == "return" then
+            app.view_sector(session, player, "Returned to ship bridge in Sector " .. START_SECTOR_ID .. ".")
         else
             app.stardock_menu(session, player)
         end
@@ -1446,8 +1821,7 @@ end
 
 function app.shipyard_menu(session, player)
     term.clear()
-    term.render_asset("voidtrader_banner")
-    term.move_to(2, 5)
+    term.move_to(2, 1)
     term.set_color(11, 0)
     term.print("=== STARDOCK SHIPYARD ===")
 
@@ -1465,7 +1839,7 @@ function app.shipyard_menu(session, player)
         })
     end
 
-    term.render_table(2, 7, {
+    term.render_table(2, 3, {
         headers = { "Ship Class", "Max Holds", "Drones", "Shields", "Fuel Tank", "Price" },
         widths = { 18, 9, 6, 7, 9, 10 },
         rows = rows,
@@ -1474,22 +1848,37 @@ function app.shipyard_menu(session, player)
         divider = true
     })
 
-    term.render_menu("shipyard_menu")
+    local is_pod = (player.ship_class or 1) == 0
+    term.render_menu("shipyard_menu", {
+        sloop = is_pod,
+        hauler = (player.credits >= SHIP_CLASSES[2].price and (player.ship_class or 1) < 2),
+        freighter = (player.credits >= SHIP_CLASSES[3].price and (player.ship_class or 1) < 3),
+        cruiser = (player.credits >= SHIP_CLASSES[4].price and (player.ship_class or 1) < 4),
+        ["return"] = true
+    })
     term.flush_form()
 
     session.await_input(75, function(sub)
         if type(sub) == "string" then app.shipyard_menu(session, player) return end
-        local act = sub.submit
-        if act == "back" then app.stardock_menu(session, player) return end
+        local function return_dock()
+            if player.sector == START_SECTOR_ID then
+                app.stardock_menu(session, player)
+            else
+                app.port_menu(session, player)
+            end
+        end
+
+        if act == "return" then return_dock() return end
 
         local target_class = 1
-        if act == "buy_hauler" then target_class = 2
+        if act == "buy_sloop" then target_class = 1
+        elseif act == "buy_hauler" then target_class = 2
         elseif act == "buy_freighter" then target_class = 3
-        elseif act == "buy_dreadnought" then target_class = 4 end
+        elseif act == "buy_cruiser" then target_class = 4 end
 
         local target_ship = SHIP_CLASSES[target_class]
-        if (player.ship_class or 1) >= target_class then
-            app.stardock_menu(session, player)
+        if (player.ship_class or 1) >= target_class and (player.ship_class or 1) > 0 then
+            return_dock()
             return
         end
 
@@ -1498,10 +1887,22 @@ function app.shipyard_menu(session, player)
             player.ship_class = target_class
             player.holds = target_ship.holds_base
             player.fuel = target_ship.fuel_max
+            player.fighters = 10
+            player.shields = 10
             save_player(session, player)
-            app.stardock_menu(session, player)
+            return_dock()
+        elseif (player.ship_class or 1) == 0 and (player.bank or 0) == 0 and player.credits < target_ship.price then
+            -- Bankruptcy relief for escape pod pilots with 0 in bank and 0 in pocket
+            player.credits = 100
+            player.ship_class = 1
+            player.holds = target_ship.holds_base
+            player.fuel = target_ship.fuel_max
+            player.fighters = 10
+            player.shields = 10
+            save_player(session, player)
+            return_dock()
         else
-            app.stardock_menu(session, player)
+            return_dock()
         end
     end)
 end
@@ -1512,18 +1913,17 @@ function app.outfitter_menu(session, player)
     local next_nav = NAV_COMPUTERS[(player.nav_level or 1) + 1]
 
     term.clear()
-    term.render_asset("voidtrader_banner")
-    term.move_to(2, 5)
+    term.move_to(2, 1)
     term.set_color(11, 0)
     term.print("=== NAVAL OUTFITTER, ARMORY & NAV-DOCK ===")
-    term.move_to(2, 7)
+    term.move_to(2, 3)
     term.set_color(15, 0)
     term.print(string.format("Cargo Holds: %d / %d max (Upgrade: 450 cr / +5 holds)", player.holds, ship_info.holds_max))
-    term.move_to(2, 8)
+    term.move_to(2, 4)
     term.print(string.format("Combat Drones: %d / %d max (50 cr each) | Shields: %d / %d (75 cr each)", player.fighters, ship_info.max_fighters, player.shields, ship_info.max_shields))
-    term.move_to(2, 9)
+    term.move_to(2, 5)
     term.print(string.format("Fuel Tank: %d / %d max (Refuel: 1 cr/unit)", player.fuel, ship_info.fuel_max))
-    term.move_to(2, 10)
+    term.move_to(2, 6)
     term.set_color(14, 0)
     if next_nav then
         term.print(string.format("Nav Computer: %s -> %s (%d cr | %d Jumps, %d Favs)", nav_info.name, next_nav.name, next_nav.price, next_nav.max_jumps, next_nav.max_favorites))
@@ -1532,27 +1932,34 @@ function app.outfitter_menu(session, player)
     end
 
     term.render_menu("outfitter_menu", {
-        buy_5holds = (player.holds + 5 <= ship_info.holds_max),
-        buy_10fighters = (player.fighters < ship_info.max_fighters),
-        buy_10shields = (player.shields < ship_info.max_shields),
-        top_fuel = (player.fuel < ship_info.fuel_max),
-        upgrade_nav = (next_nav ~= nil),
-        back = true
+        holds = (player.holds + 5 <= ship_info.holds_max),
+        nav = (next_nav ~= nil),
+        fighters = (player.fighters < ship_info.max_fighters),
+        shields = (player.shields < ship_info.max_shields),
+        fuel = (player.fuel < ship_info.fuel_max),
+        ["return"] = true
     })
     term.flush_form()
 
     session.await_input(80, function(sub)
         if type(sub) == "string" then app.outfitter_menu(session, player) return end
         local act = sub.submit
-        if act == "back" then app.stardock_menu(session, player) return end
+        if act == "return" then
+            if player.sector == START_SECTOR_ID then
+                app.stardock_menu(session, player)
+            else
+                app.port_menu(session, player)
+            end
+            return
+        end
 
-        if act == "buy_5holds" then
+        if act == "buy_holds" then
             if player.holds + 5 <= ship_info.holds_max and player.credits >= 450 then
                 player.credits = player.credits - 450
                 player.holds = player.holds + 5
                 save_player(session, player)
             end
-        elseif act == "buy_10fighters" then
+        elseif act == "buy_fighters" then
             local to_buy = math.min(10, ship_info.max_fighters - player.fighters)
             local cost = to_buy * 50
             if to_buy > 0 and player.credits >= cost then
@@ -1560,7 +1967,7 @@ function app.outfitter_menu(session, player)
                 player.fighters = player.fighters + to_buy
                 save_player(session, player)
             end
-        elseif act == "buy_10shields" then
+        elseif act == "buy_shields" then
             local to_buy = math.min(10, ship_info.max_shields - player.shields)
             local cost = to_buy * 75
             if to_buy > 0 and player.credits >= cost then
@@ -1568,7 +1975,7 @@ function app.outfitter_menu(session, player)
                 player.shields = player.shields + to_buy
                 save_player(session, player)
             end
-        elseif act == "top_fuel" then
+        elseif act == "buy_fuel" then
             local missing = ship_info.fuel_max - player.fuel
             local max_afford = player.credits
             local to_add = math.min(missing, max_afford)
@@ -1590,42 +1997,563 @@ end
 
 function app.bank_menu(session, player)
     term.clear()
-    term.render_asset("voidtrader_banner")
-    term.move_to(2, 5)
+    term.move_to(2, 1)
     term.set_color(10, 0)
-    term.print("=== GALACTIC COMMERCE BANK ===")
-    term.move_to(2, 7)
+    term.print("=== GALACTIC COMMERCE BANK & VAULTS ===")
+    term.move_to(2, 3)
     term.set_color(15, 0)
     term.print(string.format("Cash on Hand: %d cr    |    Vault Balance: %d cr", player.credits, player.bank or 0))
 
-    term.render_menu("bank_menu")
+    term.render_menu("bank_menu", {
+        deposit = (player.credits > 0),
+        withdraw = ((player.bank or 0) > 0),
+        insurance = true,
+        ["return"] = true
+    })
     term.flush_form()
 
     session.await_input(85, function(sub)
         if type(sub) == "string" then app.bank_menu(session, player) return end
         local act = sub.submit
-        if act == "back" then app.stardock_menu(session, player) return end
+        if act == "return" then
+            if player.sector == START_SECTOR_ID then
+                app.stardock_menu(session, player)
+            else
+                app.port_menu(session, player)
+            end
+            return
+        end
 
-        if act == "deposit_all" then
+        if act == "deposit" then
             player.bank = (player.bank or 0) + player.credits
             player.credits = 0
             save_player(session, player)
-        elseif act == "deposit_half" then
-            local half = math.floor(player.credits / 2)
-            player.bank = (player.bank or 0) + half
-            player.credits = player.credits - half
-            save_player(session, player)
-        elseif act == "withdraw_1000" then
-            local take = math.min(1000, player.bank or 0)
-            player.bank = (player.bank or 0) - take
-            player.credits = player.credits + take
-            save_player(session, player)
-        elseif act == "withdraw_all" then
+            app.bank_menu(session, player)
+        elseif act == "withdraw" then
             player.credits = player.credits + (player.bank or 0)
             player.bank = 0
             save_player(session, player)
+            app.bank_menu(session, player)
+        elseif act == "insurance" then
+            app.insurance_office(session, player)
+        else
+            app.bank_menu(session, player)
         end
-        app.bank_menu(session, player)
+    end)
+end
+
+function app.insurance_office(session, player)
+    term.clear()
+    term.move_to(2, 1)
+    term.set_color(11, 0)
+    term.print("=== LLOYDS OF ALPHA: INTERSTELLAR UNDERWRITERS & RESCUE ===")
+
+    local current_tier_names = {
+        [0] = "None (Uninsured - All assets lost on destruction)",
+        [1] = "Bronze Policy (100% Bank Vault Protected)",
+        [2] = "Silver Policy (Bank Vault + 50% Cash + Ship Hull Model)",
+        [3] = "Gold Policy (Bank Vault + 100% Cash + Ship Hull + All Cargo/Upgrades)"
+    }
+    local curr_lvl = player.insurance_level or 0
+
+    term.move_to(2, 3)
+    term.set_color(15, 0)
+    term.print(string.format("Current Active Coverage: %s", current_tier_names[curr_lvl]))
+    term.move_to(2, 4)
+    term.print(string.format("Wallet: %d cr   |   Bank Vault: %d cr", player.credits, player.bank or 0))
+
+    local rows = {
+        { "Bronze", "500 cr", "100% Bank Vault Balance", "Base Scout Sloop + 100 cr" },
+        { "Silver", "3,000 cr", "Bank Vault + 50% Pocket Cash", "Current Ship Class Hull + 100 cr" },
+        { "Gold", "10,000 cr", "Bank Vault + 100% Cash + Cargo", "Current Ship Class + Upgrades + Holds" }
+    }
+
+    term.render_table(2, 5, {
+        headers = { "Policy Tier", "Premium", "Financial Protection", "Vessel Recovery Guarantee" },
+        widths = { 11, 10, 29, 32 },
+        rows = rows,
+        header_fg = 14,
+        row_fg = 15,
+        divider = true
+    })
+
+    term.render_menu("insurance_menu", {
+        bronze = (curr_lvl < 1 and player.credits >= 500),
+        silver = (curr_lvl < 2 and player.credits >= 3000),
+        gold = (curr_lvl < 3 and player.credits >= 10000),
+        cancel = true
+    })
+    term.flush_form()
+
+    session.await_input(65, function(sub)
+        if type(sub) == "string" then app.insurance_office(session, player) return end
+        local act = sub.submit
+
+        if act == "buy_bronze" and player.credits >= 500 then
+            player.credits = player.credits - 500
+            player.insurance_level = 1
+            save_player(session, player)
+            app.insurance_office(session, player)
+        elseif act == "buy_silver" and player.credits >= 3000 then
+            player.credits = player.credits - 3000
+            player.insurance_level = 2
+            save_player(session, player)
+            app.insurance_office(session, player)
+        elseif act == "buy_gold" and player.credits >= 10000 then
+            player.credits = player.credits - 10000
+            player.insurance_level = 3
+            save_player(session, player)
+            app.insurance_office(session, player)
+        else
+            app.stardock_menu(session, player)
+        end
+    end)
+end
+
+-- ---------------------------------------------------------------------------
+-- STARDOCK CANTINA & TAVERN (THE SINGING PULSAR)
+-- ---------------------------------------------------------------------------
+
+local function find_profitable_trade_route()
+    local sectors = get_sectors()
+    local commodities = {
+        { key = "ore", name = "Fuel Ore", rule_idx = 1, base = BASE_PRICES.ore },
+        { key = "org", name = "Organics", rule_idx = 2, base = BASE_PRICES.org },
+        { key = "eqp", name = "Equipment", rule_idx = 3, base = BASE_PRICES.eqp },
+    }
+    local comm = commodities[math.random(1, #commodities)]
+
+    local sellers = {}
+    local buyers = {}
+    for id = 1, NUM_SECTORS do
+        local sec = sectors[id]
+        if sec and sec.port then
+            local rules = PORT_CLASSES[sec.port.class] or {0, 0, 0}
+            if rules[comm.rule_idx] == 0 then
+                table.insert(sellers, id)
+            elseif rules[comm.rule_idx] == 1 then
+                table.insert(buyers, id)
+            end
+        end
+    end
+
+    if #sellers > 0 and #buyers > 0 then
+        local s_id = sellers[math.random(1, #sellers)]
+        local b_id = buyers[math.random(1, #buyers)]
+        local buy_price = math.floor(comm.base * 0.9)
+        local sell_price = math.floor(comm.base * 1.15)
+        local profit = sell_price - buy_price
+        local pct = math.floor((profit / buy_price) * 100)
+        return {
+            commodity = comm.name,
+            from_sector = s_id,
+            to_sector = b_id,
+            buy_price = buy_price,
+            sell_price = sell_price,
+            profit = profit,
+            pct = pct
+        }
+    end
+    return nil
+end
+
+local function reveal_sector_radius(player, cx, cy, cz, radius)
+    player.explored = player.explored or {}
+    local count = 0
+    for x = math.max(1, cx - radius), math.min(GRID_X, cx + radius) do
+        for y = math.max(1, cy - radius), math.min(GRID_Y, cy + radius) do
+            for z = math.max(1, cz - radius), math.min(GRID_Z, cz + radius) do
+                local sid = to_sector_id(x, y, z)
+                if sid and not player.explored[sid] then
+                    player.explored[sid] = true
+                    count = count + 1
+                end
+            end
+        end
+    end
+    return count
+end
+
+function app.tavern_menu(session, player, status_msg)
+    local ship_info = SHIP_CLASSES[player.ship_class or 1] or SHIP_CLASSES[1]
+    player.cantina_buzz = player.cantina_buzz or 0
+
+    local sectors = get_sectors()
+    local sec = sectors[player.sector]
+    local port = sec and sec.port
+    local drink_price = (player.sector == START_SECTOR_ID) and 50 or ((port and port.drink_price) or (25 + ((player.sector * 73 + 19) % 176)))
+    local c_name = get_cantina_name(player.sector, port)
+    local cantina_title = (player.sector == START_SECTOR_ID)
+        and string.format("%s: STARDOCK TAVERN & PILOT CANTINA", string.upper(c_name))
+        or string.format("%s: %s CANTINA", string.upper(c_name), string.upper((port and port.name) or ("PORT " .. player.sector)))
+
+    term.clear()
+    term.move_to(2, 1)
+    term.set_color(13, 0)
+    term.print("=== " .. cantina_title .. " ===")
+
+    term.move_to(2, 3)
+    term.set_color(14, 0)
+    local merc_str = (player.merc_contract and player.merc_contract > 0)
+        and string.format("Escort: Vanguard (%d Jumps)", player.merc_contract)
+        or "Escort: None"
+    term.print(string.format("Commander %s   |   Cash: %d cr   |   %s", player.nickname, player.credits, merc_str))
+
+    term.move_to(2, 4)
+    term.set_color(11, 0)
+    term.print(status_msg or "Smoky neon light illuminates rugged freighter captains, smugglers, and mercenaries.")
+
+    term.move_to(2, 6)
+    term.set_color(15, 0)
+    term.print("Cantina Amenities:")
+    term.move_to(4, 7)
+    term.print(string.format("* [D] Buy Drink (%d cr)   - Drink (+1 Buzz, Max 5: Buzz Lvl: %.1f)", drink_price, player.cantina_buzz))
+    term.move_to(4, 8)
+    term.print("* [H] Hear Rumors (Free)  - Rolls 0..(Buzz*10)+10 (-0.5 Buzz): Unlocks intel")
+    term.move_to(4, 9)
+    term.print("* [C] Buy Starcharts      - Purchase random surveyed nav charts")
+    term.move_to(4, 10)
+    term.print("* [P] Play Star Dice      - Wager credits in high-stakes cantina craps")
+    term.move_to(4, 11)
+    term.print("* [M] Hire Mercenary (400 cr) - 15-jump combat escort (+10 Firepower)")
+
+    term.render_menu("tavern_menu", {
+        round = (player.credits >= drink_price),
+        rumors = true,
+        charts = true,
+        gamble = (player.credits >= 50),
+        mercenary = (player.credits >= 400 and not (player.merc_contract and player.merc_contract > 0)),
+        ["return"] = true
+    })
+    term.flush_form()
+
+    session.await_input(60, function(sub)
+        if type(sub) == "string" then app.tavern_menu(session, player) return end
+        local act = sub.submit
+        if act == "return" then
+            if player.sector == START_SECTOR_ID then
+                app.stardock_menu(session, player)
+            else
+                app.port_menu(session, player)
+            end
+            return
+        end
+
+        if act == "buy_round" then
+            if player.credits >= drink_price then
+                player.credits = player.credits - drink_price
+                player.cantina_buzz = (player.cantina_buzz or 0) + 1
+                save_player(session, player)
+
+                if player.cantina_buzz > 5 then
+                    player.cantina_buzz = 0
+                    local roll_penalty = math.random(1, 2)
+                    local msg = ""
+                    if roll_penalty == 1 then
+                        local stolen = math.min(player.credits, math.max(50, math.floor(player.credits * math.random(20, 45) / 100)))
+                        player.credits = player.credits - stolen
+                        save_player(session, player)
+                        msg = string.format("PASSED OUT: You drank too much and collapsed! Pickpockets stole %d cr. Evicted to docking bay.", stolen)
+                    else
+                        local fine = math.min(player.credits, 200)
+                        player.credits = player.credits - fine
+                        save_player(session, player)
+                        msg = string.format("PASSED OUT: Station security locked you in the drunk tank! Fined %d cr and booted to station dock.", fine)
+                    end
+                    if player.sector == START_SECTOR_ID then
+                        app.stardock_menu(session, player, msg)
+                    else
+                        app.port_menu(session, player, msg)
+                    end
+                    return
+                end
+
+                local toasts = {
+                    string.format("BARTENDER: 'A round of house spirits! (Buzz Level: %.1f)'", player.cantina_buzz),
+                    string.format("BARTENDER: 'Top-shelf ale poured! Spacers are chatty. (Buzz: %.1f)'", player.cantina_buzz),
+                    string.format("BARTENDER: 'A generous toast, Commander! Pilots are whispering nearby. (Buzz: %.1f)'", player.cantina_buzz)
+                }
+                app.tavern_menu(session, player, toasts[math.random(1, #toasts)])
+            else
+                app.tavern_menu(session, player, string.format("BARTENDER: 'You don't have %d credits to buy a round, friend.'", drink_price))
+            end
+        elseif act == "listen_rumors" then
+            local current_buzz = player.cantina_buzz or 0
+            player.cantina_buzz = math.max(0, current_buzz - 0.5)
+            save_player(session, player)
+
+            local max_roll = math.floor(current_buzz * 10) + 10
+            local roll = math.random(0, max_roll)
+
+            if roll >= 50 then
+                -- 50/50 chance of Free Merc or Free Starchart
+                if math.random(1, 2) == 1 and not (player.merc_contract and player.merc_contract > 0) then
+                    player.merc_contract = 15
+                    save_player(session, player)
+                    app.tavern_menu(session, player, "JACKPOT (Roll " .. roll .. "): A grizzled mercenary veteran offers to fly escort for 15 jumps free!")
+                else
+                    local rx = math.random(1, GRID_X)
+                    local ry = math.random(1, GRID_Y)
+                    local rz = math.random(1, GRID_Z)
+                    local new_cnt = reveal_sector_radius(player, rx, ry, rz, math.random(1, 2))
+                    save_player(session, player)
+                    app.tavern_menu(session, player, string.format("CARTOGRAPHY DROP (Roll %d): Drunken scout dropped a datapad! Revealed %d sectors near [%02d,%02d,%d].", roll, new_cnt, rx, ry, rz))
+                end
+            elseif roll >= 18 then
+                -- Dynamic Real Trade Route Opportunity
+                local route = find_profitable_trade_route()
+                if route then
+                    local route_msg = string.format("HOT TRADE ROUTE (Roll %d): Buy %s at Sec %d (%d cr) -> Sell at Sec %d (%d cr) [+%d%% margin!]", roll, route.commodity, route.from_sector, route.buy_price, route.to_sector, route.sell_price, route.pct)
+                    app.tavern_menu(session, player, route_msg)
+                else
+                    app.tavern_menu(session, player, "Trader whispers: 'Watch the market boards—Class 1 ports sell cheap Fuel Ore!'")
+                end
+            elseif roll >= 9 then
+                -- Cosmic Anomaly: Wormhole, Asteroid, or Derelict Salvage Field!
+                local sectors = get_sectors()
+                local wormholes = {}
+                local asteroids = {}
+                local salvages = {}
+                for i = 1, NUM_SECTORS do
+                    local h = sectors[i].hazard
+                    if h == "WORMHOLE" then table.insert(wormholes, i)
+                    elseif h == "ASTEROID" or h == "ASTEROID_FIELD" then table.insert(asteroids, i)
+                    elseif h == "DERELICT" or h == "DERELICT_GRAVEYARD" then table.insert(salvages, i) end
+                end
+
+                local pick_type = math.random(1, 3)
+                if pick_type == 1 and #wormholes > 0 then
+                    local w_sec = wormholes[math.random(1, #wormholes)]
+                    player.explored = player.explored or {}
+                    player.explored[w_sec] = true
+                    save_player(session, player)
+                    app.tavern_menu(session, player, string.format("ANOMALY INTEL (Roll %d): Sub-space scanners tracked a Wormhole Rift in Sector %d!", roll, w_sec))
+                elseif pick_type == 2 and #asteroids > 0 then
+                    local a_sec = asteroids[math.random(1, #asteroids)]
+                    player.explored = player.explored or {}
+                    player.explored[a_sec] = true
+                    save_player(session, player)
+                    app.tavern_menu(session, player, string.format("MINING TIP (Roll %d): Scout confirms a rich Asteroid Belt in Sector %d with free fuel ore!", roll, a_sec))
+                elseif #salvages > 0 then
+                    local s_sec = salvages[math.random(1, #salvages)]
+                    player.explored = player.explored or {}
+                    player.explored[s_sec] = true
+                    save_player(session, player)
+                    app.tavern_menu(session, player, string.format("SALVAGE RADAR (Roll %d): Derelict fleet graveyard located in Sector %d! High-value salvage potential.", roll, s_sec))
+                else
+                    app.tavern_menu(session, player, "Bounty hunter: 'Beware of deep void sectors; pirate corsairs lurk outside federation space.'")
+                end
+            else
+                -- Lore & Pirate Warnings
+                local rumors = {
+                    "Overheard: 'Federation patrol wiped out a pirate clan near the Orion reach.'",
+                    "Overheard: 'Class 0 ports are rare anomalies hidden in deep void sectors.'",
+                    "Spacer whispers: 'Always keep at least 15 shield units before jumping into storms.'",
+                    "Drunk pilot boasts: 'Upgraded my Nav Computer to Mark IV—jumps 50 sectors in one hop!'",
+                    "Bar patron: 'Void Trader expanse holds 2,250 charted sectors. Nobody has seen them all.'"
+                }
+                app.tavern_menu(session, player, rumors[math.random(1, #rumors)])
+            end
+        elseif act == "buy_charts" then
+            app.nav_charts_menu(session, player)
+        elseif act == "hire_merc" then
+            if player.credits >= 400 then
+                player.credits = player.credits - 400
+                player.merc_contract = 15
+                save_player(session, player)
+                app.tavern_menu(session, player, "CONTRACT SIGNED: Vanguard Mercenary Wing hired for 15 jumps (+10 Firepower).")
+            else
+                app.tavern_menu(session, player, "MERCENARY: 'My contract rate is 400 credits upfront, Commander.'")
+            end
+        elseif act == "gamble_dice" then
+            app.dice_game(session, player, "Roll 2d6 against the Cantina dealer! Higher roll wins 2x your bet.")
+        else
+            app.tavern_menu(session, player)
+        end
+    end)
+end
+
+function app.nav_charts_menu(session, player, chart_msg)
+    player.explored = player.explored or {}
+    local cur_x, cur_y, cur_z = to_coords(player.sector)
+
+    if not session.cantina_charts then
+        local num_charts = math.random(1, 3)
+        local generated = {}
+        for i = 1, num_charts do
+            local rx = math.random(1, GRID_X)
+            local ry = math.random(1, GRID_Y)
+            local rz = math.random(1, GRID_Z)
+            local r = math.random(1, 3)
+
+            local x_min = math.max(1, rx - r)
+            local x_max = math.min(GRID_X, rx + r)
+            local y_min = math.max(1, ry - r)
+            local y_max = math.min(GRID_Y, ry + r)
+            local z_min = math.max(1, rz - r)
+            local z_max = math.min(GRID_Z, rz + r)
+            local system_count = (x_max - x_min + 1) * (y_max - y_min + 1) * (z_max - z_min + 1)
+
+            local dist = math.sqrt((rx - cur_x)^2 + (ry - cur_y)^2 + (rz - cur_z)^2)
+            local raw_cost = math.floor((system_count * 80) * (1 + 0.10 * dist))
+
+            local has_deal = (math.random(1, 10) == 1)
+            local discount_pct = has_deal and math.random(50, 70) or 0
+            local final_cost = has_deal and math.floor(raw_cost * (1 - (discount_pct / 100))) or raw_cost
+
+            local titles = {
+                [1] = "Sector Cluster Recon",
+                [2] = "Quadrant Survey Map",
+                [3] = "Deep Void Galactic Atlas"
+            }
+
+            table.insert(generated, {
+                title = titles[r] or "Survey Chart",
+                radius = r,
+                x = rx,
+                y = ry,
+                z = rz,
+                systems = system_count,
+                dist = dist,
+                cost = final_cost,
+                discount_pct = discount_pct
+            })
+        end
+        session.cantina_charts = generated
+    end
+
+    local charts = session.cantina_charts
+
+    term.clear()
+    term.move_to(2, 1)
+    term.set_color(13, 0)
+    term.print("=== CANTINA CARTOGRAPHY EXCHANGE: SURVEYED STAR CHARTS ===")
+
+    term.move_to(2, 3)
+    term.set_color(14, 0)
+    term.print(string.format("Commander %s   |   Cash: %d cr", player.nickname, player.credits))
+
+    term.move_to(2, 4)
+    term.set_color(11, 0)
+    term.print(chart_msg or "Available navigational surveys in this cantina:")
+
+    local rows = {}
+    for idx, c in ipairs(charts) do
+        local disc_tag = (c.discount_pct > 0) and string.format(" [DEAL -%d%%!]", c.discount_pct) or ""
+        local size_tag = string.format("Rad %d (%d systems)", c.radius, c.systems)
+        local loc_tag = string.format("[%02d,%02d,%d]", c.x, c.y, c.z)
+        table.insert(rows, {
+            string.format("[%d] %s", idx, c.title),
+            size_tag,
+            loc_tag,
+            string.format("%d cr%s", c.cost, disc_tag)
+        })
+    end
+
+    term.render_table(2, 6, {
+        headers = { "Survey Title", "Coverage Area", "Sector Focus", "Price" },
+        widths = { 26, 20, 14, 18 },
+        rows = rows,
+        header_fg = 14,
+        row_fg = 15,
+        divider = true
+    })
+
+    local c1 = charts[1]
+    local c2 = charts[2]
+    local c3 = charts[3]
+
+    term.render_menu("chart_menu", {
+        chart1 = (c1 ~= nil and player.credits >= c1.cost),
+        chart2 = (c2 ~= nil and player.credits >= c2.cost),
+        chart3 = (c3 ~= nil and player.credits >= c3.cost),
+        ["return"] = true
+    })
+    term.flush_form()
+
+    session.await_input(50, function(sub)
+        if type(sub) == "string" then app.nav_charts_menu(session, player) return end
+        local act = sub.submit
+        if act == "return" then
+            app.tavern_menu(session, player)
+            return
+        end
+
+        local chosen_idx = 0
+        if act == "buy_chart1" then chosen_idx = 1
+        elseif act == "buy_chart2" then chosen_idx = 2
+        elseif act == "buy_chart3" then chosen_idx = 3 end
+
+        if chosen_idx >= 1 and chosen_idx <= #charts then
+            local c = charts[chosen_idx]
+            if player.credits >= c.cost then
+                player.credits = player.credits - c.cost
+                local new_sectors = reveal_sector_radius(player, c.x, c.y, c.z, c.radius)
+                save_player(session, player)
+                session.cantina_charts = nil
+                app.nav_charts_menu(session, player, string.format("CHART PURCHASED: Ingested telemetry! Revealed %d new sectors on your starchart.", new_sectors))
+            else
+                app.nav_charts_menu(session, player, "Insufficient credits for that navigational chart!")
+            end
+        else
+            app.nav_charts_menu(session, player)
+        end
+    end)
+end
+
+function app.dice_game(session, player, dice_msg)
+    term.clear()
+    term.move_to(2, 1)
+    term.set_color(13, 0)
+    term.print("=== CANTINA STAR DICE (2D6 HIGH ROLLER) ===")
+
+    term.move_to(2, 3)
+    term.set_color(14, 0)
+    term.print(string.format("Commander %s   |   Cash: %d cr", player.nickname, player.credits))
+
+    term.move_to(2, 5)
+    term.set_color(11, 0)
+    term.print(dice_msg or "Select your bet size to roll:")
+
+    term.render_menu("dice_menu", {
+        bet_low = (player.credits >= 50),
+        bet_mid = (player.credits >= 200),
+        bet_high = (player.credits >= 500),
+        ["return"] = true
+    })
+    term.flush_form()
+
+    session.await_input(45, function(sub)
+        if type(sub) == "string" then app.dice_game(session, player) return end
+        local act = sub.submit
+        if act == "return" then
+            app.tavern_menu(session, player, "Stepped away from the dice tables.")
+            return
+        end
+
+        local bet = 0
+        if act == "bet_50" and player.credits >= 50 then bet = 50
+        elseif act == "bet_200" and player.credits >= 200 then bet = 200
+        elseif act == "bet_500" and player.credits >= 500 then bet = 500
+        end
+
+        if bet > 0 then
+            local p_roll = math.random(1, 6) + math.random(1, 6)
+            local d_roll = math.random(1, 6) + math.random(1, 6)
+            if p_roll > d_roll then
+                player.credits = player.credits + bet
+                save_player(session, player)
+                app.dice_game(session, player, string.format("WIN! You rolled %d vs Dealer's %d. Won +%d cr!", p_roll, d_roll, bet))
+            elseif p_roll < d_roll then
+                player.credits = player.credits - bet
+                save_player(session, player)
+                app.dice_game(session, player, string.format("LOSS! You rolled %d vs Dealer's %d. Lost -%d cr.", p_roll, d_roll, bet))
+            else
+                app.dice_game(session, player, string.format("PUSH! Both rolled %d. Bet returned.", p_roll))
+            end
+        else
+            app.dice_game(session, player, "Insufficient credits for that bet size!")
+        end
     end)
 end
 
@@ -1639,16 +2567,15 @@ function app.scan_sector(session, player)
     local cur_x, cur_y, cur_z = to_coords(player.sector)
 
     term.clear()
-    term.render_asset("voidtrader_banner")
-    term.move_to(2, 5)
+    term.move_to(2, 1)
     term.set_color(11, 0)
     term.print(string.format("=== LONG RANGE SCAN (Sector %d [%02d,%02d,%d]) ===", player.sector, cur_x, cur_y, cur_z))
 
     if sec.hazard == "COSMIC_STORM" then
-        term.move_to(2, 7)
+        term.move_to(2, 3)
         term.set_color(12, 0)
         term.print(">>> SENSOR ARRAY SCRAMBLED BY IONIZED STORM INTERFERENCE <<<")
-        term.move_to(2, 9)
+        term.move_to(2, 4)
         term.set_color(8, 0)
         term.print("Sensor telemetry offline. Clear nebula to restore LRS feed.")
     else
@@ -1661,10 +2588,15 @@ function app.scan_sector(session, player)
             local dir_name, dir_code = get_direction_name(player.sector, dest)
             local port_str = "Deep Space"
             if dest == START_SECTOR_ID then
-                port_str = "Stardock Prime"
+                port_str = "Stardock [Cantina]"
             elseif d_sec and d_sec.port then
                 local fav_tag = is_favorite_sector(player, dest) and " [*]" or ""
-                port_str = string.format("Class %d (%s)%s", d_sec.port.class, d_sec.port.name or "Port", fav_tag)
+                local has_c = d_sec.port.has_cantina or ((dest * 37 + 13) % 100 < 5)
+                local c_tag = has_c and " [Cantina]" or ""
+                local p_info = PORT_CLASSES[d_sec.port.class] or { code = "???" }
+                local s_tier = get_port_services(dest, d_sec.port)
+                local p_code = string.format("%s%s", p_info.code or "???", s_tier)
+                port_str = string.format("Class %d [%s]%s%s", d_sec.port.class, p_code, c_tag, fav_tag)
             end
             local hazard_str = (d_sec and d_sec.hazard) or "Clear"
 
@@ -1677,7 +2609,7 @@ function app.scan_sector(session, player)
             })
         end
 
-        term.render_table(2, 7, {
+        term.render_table(2, 3, {
             headers = { "Vector", "Sector", "Coords", "Port Status", "Hazards" },
             widths = { 9, 8, 12, 20, 16 },
             rows = rows,
@@ -1688,7 +2620,7 @@ function app.scan_sector(session, player)
     end
 
     term.define_form(90)
-    term.add_submit_button("back", 2, 16)
+    term.add_submit_button("back", 2, 10)
     term.flush_form()
 
     session.await_input(90, function() app.view_sector(session, player, "") end)
@@ -1700,22 +2632,21 @@ function app.view_status(session, player)
     local cur_x, cur_y, cur_z = to_coords(player.sector)
 
     term.clear()
-    term.render_asset("voidtrader_banner")
-    term.move_to(2, 5)
+    term.move_to(2, 1)
     term.set_color(14, 0)
     term.print("=== COMMANDER DOSSIER & MANIFEST ===")
 
-    term.move_to(2, 7)
+    term.move_to(2, 3)
     term.set_color(15, 0)
     term.print(string.format("Commander: %-15s   Ship Class: %s", player.nickname, ship_info.name))
-    term.move_to(2, 8)
+    term.move_to(2, 4)
     term.print(string.format("Location:  Sector %d [%02d,%02d,%d]   Turns: %d/%d   Fuel: %d/%d", player.sector, cur_x, cur_y, cur_z, player.turns, MAX_TURNS, player.fuel, ship_info.fuel_max))
-    term.move_to(2, 9)
+    term.move_to(2, 5)
     term.print(string.format("Cash:      %-10d cr   Bank Vault: %d cr      Nav: %s", player.credits, player.bank or 0, nav_info.name))
-    term.move_to(2, 10)
+    term.move_to(2, 6)
     term.print(string.format("Net Worth: %-10d cr   Pirates Vanquished: %d", calc_net_worth(player), player.kills or 0))
 
-    term.move_to(2, 12)
+    term.move_to(2, 7)
     term.set_color(11, 0)
     term.print(string.format("Cargo Hold Manifest: %d / %d bays utilized", (player.ore + player.org + player.eqp), player.holds))
 
@@ -1723,25 +2654,24 @@ function app.view_status(session, player)
     local avg_org = get_cargo_avg_cost(player, "org")
     local avg_eqp = get_cargo_avg_cost(player, "eqp")
 
-    term.move_to(2, 13)
+    term.move_to(2, 8)
     term.print(string.format("  * Fuel Ore:  %-5d units (Avg Paid: %-3d cr/unit | Basis: %d cr)", player.ore, avg_ore, player.ore_cost or 0))
-    term.move_to(2, 14)
+    term.move_to(2, 9)
     term.print(string.format("  * Organics:  %-5d units (Avg Paid: %-3d cr/unit | Basis: %d cr)", player.org, avg_org, player.org_cost or 0))
-    term.move_to(2, 15)
+    term.move_to(2, 10)
     term.print(string.format("  * Equipment: %-5d units (Avg Paid: %-3d cr/unit | Basis: %d cr)", player.eqp, avg_eqp, player.eqp_cost or 0))
 
     term.define_form(95)
-    term.add_submit_button("back", 2, 17)
+    term.add_submit_button("back", 2, 12)
     term.flush_form()
 
     session.await_input(95, function() app.view_sector(session, player, "") end)
 end
 
-function app.view_leaderboard(session, player)
+function app.view_leaderboard(session, player, from_entry)
     local board = db.get("vt_leaderboard", "scores") or {}
     term.clear()
-    term.render_asset("voidtrader_banner")
-    term.move_to(2, 5)
+    term.move_to(2, 1)
     term.set_color(14, 0)
     term.print("=== GALACTIC HALL OF FAME ===")
 
@@ -1762,7 +2692,7 @@ function app.view_leaderboard(session, player)
         end
     end
 
-    term.render_table(2, 7, {
+    term.render_table(2, 3, {
         headers = { "Rank", "Commander", "Vessel Class", "Sector", "Kills", "Net Worth" },
         widths = { 6, 18, 18, 8, 7, 12 },
         rows = rows,
@@ -1772,10 +2702,16 @@ function app.view_leaderboard(session, player)
     })
 
     term.define_form(99)
-    term.add_submit_button("back", 2, 19)
+    term.add_submit_button("back", 2, 12)
     term.flush_form()
 
-    session.await_input(99, function() app.view_sector(session, player, "") end)
+    session.await_input(99, function()
+        if from_entry then
+            app.on_start(session)
+        else
+            app.view_sector(session, player, "")
+        end
+    end)
 end
 
 return app

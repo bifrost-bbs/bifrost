@@ -162,6 +162,7 @@ pub struct MenuAssetDef {
     pub field_bg: Option<u8>,
     pub submit_fg: Option<u8>,
     pub submit_bg: Option<u8>,
+    pub align: Option<String>,
     pub buttons: Vec<MenuButtonDef>,
 }
 
@@ -172,6 +173,7 @@ pub fn parse_menu_csv(content: &str) -> MenuAssetDef {
     let mut field_bg = None;
     let mut submit_fg = None;
     let mut submit_bg = None;
+    let mut align = None;
     let mut buttons = Vec::new();
 
     for line in content.lines() {
@@ -210,6 +212,9 @@ pub fn parse_menu_csv(content: &str) -> MenuAssetDef {
                             submit_bg = Some(val);
                         }
                     }
+                    "align" => {
+                        align = Some(v.to_ascii_lowercase());
+                    }
                     _ => {}
                 }
             }
@@ -245,6 +250,7 @@ pub fn parse_menu_csv(content: &str) -> MenuAssetDef {
         field_bg,
         submit_fg,
         submit_bg,
+        align,
         buttons,
     }
 }
@@ -293,11 +299,12 @@ mod tests {
 
     #[test]
     fn test_parse_menu_csv() {
-        let csv_data = "# form_id=15\n# field_fg=14\n# submit_bg=1\nnorth,wn,North,2,14,N\nsouth,ws,South,10,14,S\n";
+        let csv_data = "# form_id=15\n# field_fg=14\n# submit_bg=1\n# align=bottom_center\nnorth,wn,North,2,14,N\nsouth,ws,South,10,14,S\n";
         let def = parse_menu_csv(csv_data);
         assert_eq!(def.form_id, 15);
         assert_eq!(def.field_fg, Some(14));
         assert_eq!(def.submit_bg, Some(1));
+        assert_eq!(def.align.as_deref(), Some("bottom_center"));
         assert_eq!(def.buttons.len(), 2);
         assert_eq!(def.buttons[0].tag, "north");
         assert_eq!(def.buttons[0].id, "wn");

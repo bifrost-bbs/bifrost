@@ -1,6 +1,7 @@
-# form_id=75
+# form_id=10
 # tag,id,label,col,row,key
-buy_hauler,buy_hauler,BuyHauler,2,15,H
-buy_freighter,buy_freighter,BuyFreighter,18,15,F
-buy_dreadnought,buy_dreadnought,BuyDreadnought,36,15,D
-back,back,Back,56,15,B
+sloop,buy_sloop,ScoutSloop,2,9,S
+hauler,buy_hauler,MerchantHauler,2,9,M
+freighter,buy_freighter,ArmoredFreighter,2,9,F
+cruiser,buy_cruiser,DreadnoughtCruiser,2,9,D
+return,return,Return,2,9,R

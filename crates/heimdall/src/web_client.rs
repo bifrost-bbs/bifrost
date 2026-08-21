@@ -99,6 +99,7 @@ pub struct VirtualTerminalCanvas {
     pub current_bg: u8,
     pub active_form: Option<FormStateClient>,
     pub log_buffer: Option<Arc<LogBuffer>>,
+    pub dict: bifrost_compression::CompressionDictionary,
 }
 
 impl VirtualTerminalCanvas {
@@ -114,6 +115,7 @@ impl VirtualTerminalCanvas {
             current_bg: 0, // Black
             active_form: None,
             log_buffer,
+            dict: load_active_client_dictionary(),
         }
     }
 
@@ -544,19 +546,75 @@ impl VirtualTerminalCanvas {
                             let s_bg = menu_def.submit_bg.unwrap_or(7);
 
                             let mut fields = Vec::new();
+                            let align_mode = menu_def.align.as_deref().unwrap_or("top_left");
+                            let is_bottom = align_mode.starts_with("bottom");
+                            let is_center = align_mode.ends_with("center") || align_mode == "center";
+                            let is_right = align_mode.ends_with("right") || align_mode == "right";
+
+                            let max_col = if self.width > 10 { self.width as u8 - 2 } else { 78 };
+                            let term_h = self.height as u8;
+
+                            // Pre-filter enabled buttons and compute row totals for alignment
+                            let mut enabled_buttons = Vec::new();
+                            let mut row_widths: std::collections::HashMap<u8, u8> = std::collections::HashMap::new();
+
                             for (b_idx, btn) in menu_def.buttons.iter().enumerate() {
                                 if b_idx < 32 && (mask & (1 << b_idx)) != 0 {
-                                    fields.push(FormFieldClient {
-                                        id: btn.id.clone(),
-                                        col: btn.col,
-                                        row: btn.row,
-                                        width: (btn.label.len() as u8) + 4,
-                                        height: 1,
-                                        val: btn.label.clone(),
-                                        is_submit: true,
-                                        key: btn.key,
-                                    });
+                                    let btn_width = (btn.label.len() as u8) + 4;
+                                    let base_row = if is_bottom {
+                                        if btn.row > 0 && btn.row < 10 {
+                                            term_h.saturating_sub(btn.row + 1)
+                                        } else {
+                                            term_h.saturating_sub(3)
+                                        }
+                                    } else if btn.row == 0 {
+                                        12
+                                    } else {
+                                        btn.row
+                                    };
+                                    enabled_buttons.push((btn, btn_width, base_row));
+
+                                    let entry = row_widths.entry(base_row).or_insert(0);
+                                    if *entry > 0 { *entry += 1; }
+                                    *entry += btn_width;
                                 }
+                            }
+
+                            let mut row_cols: std::collections::HashMap<u8, u8> = std::collections::HashMap::new();
+
+                            for (btn, btn_width, base_row) in enabled_buttons {
+                                let mut cur_row = base_row;
+                                let default_start_col = if is_center {
+                                    let tot = *row_widths.get(&base_row).unwrap_or(&btn_width);
+                                    if max_col > tot { ((max_col + 2 - tot) / 2).max(2) } else { 2 }
+                                } else if is_right {
+                                    let tot = *row_widths.get(&base_row).unwrap_or(&btn_width);
+                                    if max_col > tot { (max_col + 2 - tot).max(2) } else { 2 }
+                                } else {
+                                    2
+                                };
+
+                                let mut cur_col = *row_cols.get(&cur_row).unwrap_or(&default_start_col);
+
+                                if cur_col + btn_width > max_col && cur_col > default_start_col {
+                                    cur_row += 2;
+                                    cur_col = *row_cols.get(&cur_row).unwrap_or(&default_start_col);
+                                }
+
+                                let field_col = cur_col;
+                                let field_row = cur_row;
+                                row_cols.insert(cur_row, cur_col + btn_width + 1); // 1 space spacing between buttons
+
+                                fields.push(FormFieldClient {
+                                    id: btn.id.clone(),
+                                    col: field_col,
+                                    row: field_row,
+                                    width: btn_width,
+                                    height: 1,
+                                    val: btn.label.clone(),
+                                    is_submit: true,
+                                    key: btn.key,
+                                });
                             }
 
                             self.active_form = Some(FormStateClient {
@@ -706,6 +764,29 @@ impl VirtualTerminalCanvas {
                                         is_submit: false,
                                         key: None,
                                     });
+                                }
+                            }
+                        }
+                    }
+                }
+                0xFD => {
+                    // OP_DICT_TOKEN (token_id)
+                    if idx < bytecode.len() {
+                        let token_id = bytecode[idx] as usize;
+                        idx += 1;
+                        if let Some(tok_bytes) = self.dict.tokens().get(token_id).cloned() {
+                            for b in tok_bytes {
+                                if b == b'\r' {
+                                    self.cursor_col = 0;
+                                } else if b == b'\n' {
+                                    self.cursor_col = 0;
+                                    if self.cursor_row + 1 < self.height {
+                                        self.cursor_row += 1;
+                                    }
+                                } else {
+                                    let ch = CP437_MAP[b as usize];
+                                    let attr = (self.current_bg << 4) | (self.current_fg & 0x0F);
+                                    self.put_char(ch, attr);
                                 }
                             }
                         }

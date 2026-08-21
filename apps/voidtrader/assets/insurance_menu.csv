@@ -1,0 +1,6 @@
+# form_id=10
+# tag,id,label,col,row,key
+bronze,buy_bronze,BronzePolicy,2,14,B
+silver,buy_silver,SilverPolicy,20,14,S
+gold,buy_gold,GoldPolicy,38,14,G
+cancel,cancel,Return,54,14,R

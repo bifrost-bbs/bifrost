@@ -1,7 +1,12 @@
-# form_id=50
+# form_id=10
+# align=bottom_center
 # tag,id,label,col,row,key
-trade_ore,trade_ore,TradeOre,2,15,O
-trade_org,trade_org,TradeOrg,16,15,G
-trade_eqp,trade_eqp,TradeEqp,30,15,E
-refuel_tank,refuel_tank,RefuelTank,44,15,R
-depart,depart,Depart,60,15,D
+ore,trade_ore,TradeOre,2,9,O
+org,trade_org,TradeOrganics,2,9,G
+eqp,trade_eqp,TradeEquipment,2,9,E
+refuel,refuel,FuelRefinery,2,9,F
+outfitter,outfitter,Outfitter,2,9,U
+bank,bank,BankVault,2,9,B
+shipyard,shipyard,Shipyard,2,9,S
+cantina,tavern,TavernBar,2,9,T
+return,return,Return,2,9,R

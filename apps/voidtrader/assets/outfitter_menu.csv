@@ -1,8 +1,8 @@
-# form_id=80
+# form_id=10
 # tag,id,label,col,row,key
-buy_5holds,buy_5holds,BuyHolds(+5),2,12,H
-buy_10fighters,buy_10fighters,BuyDrones(+10),18,12,D
-buy_10shields,buy_10shields,BuyShields(+10),36,12,S
-top_fuel,top_fuel,RefuelTank,54,12,R
-upgrade_nav,upgrade_nav,UpgradeNav,2,14,N
-back,back,Back,18,14,B
+holds,buy_holds,CargoHolds,2,9,H
+nav,upgrade_nav,NavComputer,2,9,N
+fighters,buy_fighters,CombatFighters,2,9,F
+shields,buy_shields,DeflectorShields,2,9,S
+fuel,buy_fuel,FuelOre,2,9,O
+return,return,Return,2,9,R

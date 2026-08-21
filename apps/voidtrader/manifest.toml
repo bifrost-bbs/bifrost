@@ -38,3 +38,59 @@ path = "assets/bank_menu.csv"
 [[assets]]
 name = "outfitter_menu"
 path = "assets/outfitter_menu.csv"
+
+[[assets]]
+name = "combat_menu"
+path = "assets/combat_menu.csv"
+
+[[assets]]
+name = "entry_menu"
+path = "assets/entry_menu.csv"
+
+[[assets]]
+name = "help_menu"
+path = "assets/help_menu.csv"
+
+[[assets]]
+name = "death_menu"
+path = "assets/death_menu.csv"
+
+[[assets]]
+name = "insurance_menu"
+path = "assets/insurance_menu.csv"
+
+[[assets]]
+name = "tavern_menu"
+path = "assets/tavern_menu.csv"
+
+[[assets]]
+name = "dice_menu"
+path = "assets/dice_menu.csv"
+
+[[assets]]
+name = "chart_menu"
+path = "assets/chart_menu.csv"
+
+[[assets]]
+name = "help_basics"
+path = "assets/help_basics.ans"
+
+[[assets]]
+name = "help_trading"
+path = "assets/help_trading.ans"
+
+[[assets]]
+name = "help_navigation"
+path = "assets/help_navigation.ans"
+
+[[assets]]
+name = "help_combat"
+path = "assets/help_combat.ans"
+
+[[assets]]
+name = "help_insurance"
+path = "assets/help_insurance.ans"
+
+[[assets]]
+name = "help_cantinas"
+path = "assets/help_cantinas.ans"

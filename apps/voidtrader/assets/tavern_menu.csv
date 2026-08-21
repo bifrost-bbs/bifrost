@@ -1,0 +1,9 @@
+# form_id=10
+# align=bottom_center
+# tag,id,label,col,row,key
+round,buy_round,BuyDrink,2,9,D
+rumors,listen_rumors,HearRumor,2,9,H
+charts,buy_charts,BuyCharts,2,9,C
+gamble,gamble_dice,PlayDice,2,9,P
+mercenary,hire_merc,HireMerc,2,9,M
+return,return,Return,2,9,R

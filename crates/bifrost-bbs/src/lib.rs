@@ -523,13 +523,33 @@ pub fn resolve_asset_id_and_content(
     let normalized_target = asset_name.replace("::", "/").replace(':', "/");
     let relative_target = format!("{}/{}", current_app, normalized_target);
 
-    let matched = manifest_map.iter().find(|(_, (n, _))| {
-        let n_norm = n.replace("::", "/").replace(':', "/");
-        n_norm == normalized_target
-            || n_norm == relative_target
-            || n_norm.ends_with(&format!("/{}", normalized_target))
-            || n_norm.to_ascii_uppercase().contains(&asset_name.to_ascii_uppercase())
-    });
+    // 1. Exact match with current app namespace (e.g. "voidtrader/combat_menu")
+    let matched = manifest_map
+        .iter()
+        .find(|(_, (n, _))| {
+            let n_norm = n.replace("::", "/").replace(':', "/");
+            n_norm == relative_target
+        })
+        // 2. Exact match with provided full name (e.g. "minidungeon/combat_menu")
+        .or_else(|| {
+            manifest_map.iter().find(|(_, (n, _))| {
+                let n_norm = n.replace("::", "/").replace(':', "/");
+                n_norm == normalized_target
+            })
+        })
+        // 3. Suffix match (e.g. ".../combat_menu")
+        .or_else(|| {
+            manifest_map.iter().find(|(_, (n, _))| {
+                let n_norm = n.replace("::", "/").replace(':', "/");
+                n_norm.ends_with(&format!("/{}", normalized_target))
+            })
+        })
+        // 4. Substring match fallback
+        .or_else(|| {
+            manifest_map.iter().find(|(_, (n, _))| {
+                n.to_ascii_uppercase().contains(&asset_name.to_ascii_uppercase())
+            })
+        });
 
     if let Some((&id, (_, rel_path))) = matched {
         let full_path = find_workspace_path(rel_path);
@@ -1224,31 +1244,7 @@ fn run_session_task(
             buf.push(0xC5); // OP_RENDER_ASSET
 
             let current_app = active_app_for_asset.lock().unwrap().clone();
-            let normalized_target = asset_name.replace("::", "/").replace(':', "/");
-            let relative_target = format!("{}/{}", current_app, normalized_target);
-
-            let id_opt = asset_manifest_for_render
-                .iter()
-                .find(|(_, (n, _))| {
-                    let n_norm = n.replace("::", "/").replace(':', "/");
-                    n_norm == normalized_target
-                        || n_norm == relative_target
-                        || n_norm.ends_with(&format!("/{}", normalized_target))
-                        || n_norm.to_ascii_uppercase().contains(&asset_name.to_ascii_uppercase())
-                })
-                .map(|(&id, _)| id);
-
-            let id = match id_opt {
-                Some(matched_id) => matched_id,
-                None => {
-                    log::warn!(
-                        "Asset '{}' not found in loaded asset manifests (current app: '{}')",
-                        asset_name,
-                        current_app
-                    );
-                    0x0101
-                }
-            };
+            let (id, _) = resolve_asset_id_and_content(&asset_manifest_for_render, &current_app, &asset_name);
             buf.extend_from_slice(&id.to_be_bytes());
             Ok(())
         })?,
@@ -1334,6 +1330,7 @@ fn run_session_task(
                     field_bg: None,
                     submit_fg: None,
                     submit_bg: None,
+                    align: None,
                     buttons: Vec::new(),
                 }
             };
@@ -2086,7 +2083,31 @@ fn run_session_task(
         }
         Ok(())
     })?;
-    session.set("load_app", load_app)?;
+    session.set("load_app", load_app.clone())?;
+    session.set("exec_app", load_app)?;
+
+    session.set(
+        "time",
+        lua.create_function(|_, (): ()| {
+            let secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            Ok(secs)
+        })?,
+    )?;
+
+    session.set(
+        "date_str",
+        lua.create_function(|_, (): ()| {
+            let secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let days = secs / 86400;
+            Ok(format!("day-{}", days))
+        })?,
+    )?;
 
     globals.set("session", session)?;
 
@@ -3172,6 +3193,21 @@ max_asset_broadcast_duty_cycle = 0.15
         assert!(dungeon_entry.is_some(), "minidungeon/dungeon_banner must be registered");
         let (&dungeon_id, _) = dungeon_entry.unwrap();
         assert_ne!(banner_id, dungeon_id, "Asset IDs must be unique");
+
+        // Test scoped resolution precedence when multiple apps share identical asset names (e.g. combat_menu)
+        let full_manifest = load_app_manifests(&["minidungeon".to_string(), "voidtrader".to_string()]);
+        let (vt_combat_id, _) = resolve_asset_id_and_content(&full_manifest, "voidtrader", "combat_menu");
+        let (md_combat_id, _) = resolve_asset_id_and_content(&full_manifest, "minidungeon", "combat_menu");
+
+        assert_ne!(vt_combat_id, md_combat_id, "Different apps must resolve their own scoped asset IDs");
+        assert_eq!(
+            full_manifest.get(&vt_combat_id).unwrap().0,
+            "voidtrader/combat_menu"
+        );
+        assert_eq!(
+            full_manifest.get(&md_combat_id).unwrap().0,
+            "minidungeon/combat_menu"
+        );
     }
 
     #[tokio::test]
@@ -3964,10 +4000,44 @@ max_asset_broadcast_duty_cycle = 0.15
             }
         }
 
-        let resp = vt_screen.expect("Should receive Void Trader screen");
+        let resp = vt_screen.expect("Should receive Void Trader entry screen");
         let uncompressed_payload = decode_test_msg(&mut client_cache, &resp, &static_dict);
         let screen_text = String::from_utf8_lossy(&uncompressed_payload);
-        assert!(screen_text.contains("Sector: 1") || screen_text.contains("Alpha Stardock"), "Should contain Void Trader sector view, got: {}", screen_text);
+        assert!(screen_text.contains("INTERSTELLAR PILOT DISPATCH") || screen_text.contains("Void Trader"), "Should contain Void Trader entry view, got: {}", screen_text);
+
+        // 5. Submit "resume" action from entry menu
+        let resume_json = r#"{"submit":"resume"}"#;
+        let resume_msg = MeshBbsMessage::new(0x02, 0x02, 0x00, resume_json.as_bytes().to_vec());
+        let resume_payloads = resume_msg.to_fragments(200).unwrap();
+        let packet = RadioPacket {
+            is_broadcast: false,
+            src_node: client_key,
+            dst_node: [0; 32],
+            payload: resume_payloads[0].clone(),
+            signal_rssi: -50,
+            signal_snr: 10,
+        };
+        client_transport.send_packet(packet).await.unwrap();
+
+        // 6. Receive Sector view screen
+        let mut sector_screen = None;
+        let start_time = tokio::time::Instant::now();
+        while start_time.elapsed() < tokio::time::Duration::from_millis(1500) {
+            match tokio::time::timeout(tokio::time::Duration::from_millis(100), client_transport.receive_packet()).await {
+                Ok(Ok(packet)) => {
+                    if let Some(msg) = client_reassembler.process_packet([0; 32], &packet.payload).unwrap() {
+                        sector_screen = Some(msg);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let resp_sector = sector_screen.expect("Should receive Sector screen");
+        let sector_payload = decode_test_msg(&mut client_cache, &resp_sector, &static_dict);
+        let sector_text = String::from_utf8_lossy(&sector_payload);
+        assert!(sector_text.contains("Alpha Stardock") || sector_text.contains("Available Warps"), "Should contain sector view, got: {}", sector_text);
 
         let _ = server_handle.await;
     }
