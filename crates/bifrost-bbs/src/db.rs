@@ -42,9 +42,11 @@ impl DatabaseStore {
             )",
             [],
         )?;
-        Ok(Self {
+        let store = Self {
             conn: Arc::new(Mutex::new(conn)),
-        })
+        };
+        let _ = store.auto_migrate_monolithic_rows();
+        Ok(store)
     }
 
     pub fn new_in_memory() -> SqlResult<Self> {
@@ -58,9 +60,11 @@ impl DatabaseStore {
             )",
             [],
         )?;
-        Ok(Self {
+        let store = Self {
             conn: Arc::new(Mutex::new(conn)),
-        })
+        };
+        let _ = store.auto_migrate_monolithic_rows();
+        Ok(store)
     }
 
     pub fn get(&self, namespace: &str, key: &str) -> SqlResult<Option<String>> {
@@ -172,6 +176,40 @@ impl DatabaseStore {
         let count: i64 = stmt.query_row([], |row| row.get(0))?;
         Ok(count as usize)
     }
+
+    pub fn auto_migrate_monolithic_rows(&self) -> SqlResult<()> {
+        let namespaces = self.namespaces()?;
+        for ns in namespaces {
+            if let Some(val) = self.get(&ns, "all")? {
+                if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(&val) {
+                    let mut batch = Vec::new();
+                    if let Some(arr) = json_val.as_array() {
+                        if arr.len() > 1 {
+                            for (idx, item) in arr.iter().enumerate() {
+                                if let Ok(s) = serde_json::to_string(item) {
+                                    batch.push(((idx + 1).to_string(), s));
+                                }
+                            }
+                        }
+                    } else if let Some(map) = json_val.as_object() {
+                        if map.len() > 1 {
+                            for (k, item) in map {
+                                if let Ok(s) = serde_json::to_string(item) {
+                                    batch.push((k.clone(), s));
+                                }
+                            }
+                        }
+                    }
+
+                    if !batch.is_empty() {
+                        self.remove(&ns, "all")?;
+                        self.set_batch(&ns, &batch)?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -261,5 +299,25 @@ mod tests {
         assert_eq!(all[0].0, "1");
         assert_eq!(all[1].0, "2");
         assert_eq!(all[2].0, "10");
+    }
+
+    #[test]
+    fn test_database_store_auto_migrate_monolithic_rows() {
+        let db = DatabaseStore::new_in_memory().unwrap();
+        // Insert a legacy monolithic row with key "all"
+        let legacy_json = r#"[{"name":"Sol"},{"name":"Alpha"},{"name":"Vega"}]"#;
+        db.set("vt_sectors", "all", legacy_json).unwrap();
+        assert_eq!(db.count("vt_sectors").unwrap(), 1);
+
+        // Run auto migration
+        db.auto_migrate_monolithic_rows().unwrap();
+
+        // Must now have 3 individual rows and key "all" removed
+        assert_eq!(db.count("vt_sectors").unwrap(), 3);
+        assert_eq!(db.get("vt_sectors", "all").unwrap(), None);
+        let keys = db.keys("vt_sectors").unwrap();
+        assert_eq!(keys, vec!["1", "2", "3"]);
+        let s2 = db.get("vt_sectors", "2").unwrap();
+        assert_eq!(s2, Some(r#"{"name":"Alpha"}"#.to_string()));
     }
 }

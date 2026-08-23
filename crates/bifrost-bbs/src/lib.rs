@@ -1102,7 +1102,7 @@ pub async fn start_server_with_stats(
     Ok(())
 }
 
-pub fn register_lua_db(lua: &mlua::Lua, db_store: DatabaseStore) -> mlua::Result<mlua::Table> {
+pub fn register_lua_db(lua: &mlua::Lua, db_store: DatabaseStore) -> mlua::Result<mlua::Table<'_>> {
     let db = lua.create_table()?;
 
     // db.get(table, [key])
@@ -1137,19 +1137,13 @@ pub fn register_lua_db(lua: &mlua::Lua, db_store: DatabaseStore) -> mlua::Result
                     return Ok(mlua::Value::Nil);
                 }
 
-                // If key is "all", check if a literal "all" record exists first
-                if let Ok(Some(val)) = db_store_get.get(&table, "all") {
-                    if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(&val) {
-                        if !json_val.is_null() {
-                            if let Ok(lua_val) = lua.to_value(&json_val) {
-                                return Ok(mlua::Value::from(lua_val));
-                            }
-                        }
-                    }
+                // If key is "all", migrate legacy record if present
+                if let Ok(Some(_)) = db_store_get.get(&table, "all") {
+                    let _ = db_store_get.auto_migrate_monolithic_rows();
                 }
             }
 
-            // Either key is omitted, or key is "all"/"*" and no literal "all" row exists.
+            // Either key is omitted, or key is "all"/"*".
             // Retrieve all granular rows in this table/namespace.
             if let Ok(entries) = db_store_get.get_all(&table) {
                 if entries.is_empty() {
