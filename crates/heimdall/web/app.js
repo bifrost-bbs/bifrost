@@ -9,6 +9,7 @@ class HeimdallApp {
     this.termWs = null;
     this.logs = [];
     this.logIdSet = new Set();
+    this.autoScrollLogs = true;
     this.currentSelectedApp = null;
     this.currentEditingFile = null;
     this.currentConfig = null;
@@ -50,6 +51,11 @@ class HeimdallApp {
   }
 
   bindEvents() {
+    const on = (id, event, fn) => {
+      const el = document.getElementById(id);
+      if (el) el.addEventListener(event, fn);
+    };
+
     // Nav Tabs
     document.querySelectorAll('.nav-tab').forEach(tabBtn => {
       tabBtn.addEventListener('click', () => {
@@ -58,120 +64,144 @@ class HeimdallApp {
     });
 
     // Theme & Scanlines
-    document.getElementById('theme-selector').addEventListener('change', (e) => {
+    on('theme-selector', 'change', (e) => {
       this.setTheme(e.target.value);
     });
 
-    document.getElementById('toggle-scanlines').addEventListener('click', () => {
+    on('toggle-scanlines', 'click', () => {
       const isOverlay = document.body.classList.toggle('crt-overlay');
       const btn = document.getElementById('toggle-scanlines');
-      btn.textContent = `CRT FX: ${isOverlay ? 'ON' : 'OFF'}`;
-      btn.setAttribute('aria-pressed', isOverlay);
+      if (btn) {
+        btn.textContent = `CRT FX: ${isOverlay ? 'ON' : 'OFF'}`;
+        btn.setAttribute('aria-pressed', isOverlay);
+      }
     });
 
     // Supervisor Quick Actions
-    document.getElementById('btn-start-bbs').addEventListener('click', () => this.callSupervisorAction('start_bbs'));
-    document.getElementById('btn-stop-bbs').addEventListener('click', () => this.callSupervisorAction('stop_bbs'));
-    document.getElementById('btn-restart-bbs').addEventListener('click', () => this.callSupervisorAction('restart_bbs'));
-    document.getElementById('btn-quick-crawler').addEventListener('click', () => this.startCrawler(100, 50));
-    document.getElementById('btn-quick-benchmark').addEventListener('click', () => this.runTuning('analyze', []));
+    on('btn-start-bbs', 'click', () => this.callSupervisorAction('start_bbs'));
+    on('btn-stop-bbs', 'click', () => this.callSupervisorAction('stop_bbs'));
+    on('btn-restart-bbs', 'click', () => this.callSupervisorAction('restart_bbs'));
+    on('btn-quick-crawler', 'click', () => this.startCrawler(100, 50));
+    on('btn-quick-benchmark', 'click', () => this.runTuning('analyze', []));
 
     // Logs Controls
-    document.getElementById('log-level-filter').addEventListener('change', () => this.renderLogs());
-    document.getElementById('log-source-filter').addEventListener('change', () => this.renderLogs());
-    document.getElementById('log-search-input').addEventListener('input', () => this.renderLogs());
-    document.getElementById('btn-refresh-logs').addEventListener('click', () => this.fetchHistoricalLogs());
-    document.getElementById('btn-clear-logs').addEventListener('click', () => {
+    on('log-level-filter', 'change', () => this.renderLogs());
+    on('log-source-filter', 'change', () => this.renderLogs());
+    on('log-search-input', 'input', () => this.renderLogs());
+    on('btn-refresh-logs', 'click', () => this.fetchHistoricalLogs());
+    on('btn-toggle-tail', 'click', () => {
+      this.autoScrollLogs = !this.autoScrollLogs;
+      const btn = document.getElementById('btn-toggle-tail');
+      if (btn) {
+        btn.textContent = `AUTO-SCROLL: ${this.autoScrollLogs ? 'ON' : 'OFF'}`;
+        btn.classList.toggle('active', this.autoScrollLogs);
+        btn.setAttribute('aria-pressed', this.autoScrollLogs);
+      }
+    });
+    on('btn-clear-logs', 'click', () => {
       this.logs = [];
       this.logIdSet.clear();
       this.renderLogs();
     });
 
+    // Apps Refresh
+    on('btn-refresh-apps', 'click', () => this.fetchApps());
+
     // Database Controls
-    document.getElementById('btn-refresh-db').addEventListener('click', () => this.fetchDatabase());
-    document.getElementById('btn-clear-table').addEventListener('click', () => this.clearCurrentTable());
-    document.getElementById('btn-save-key').addEventListener('click', () => this.saveCurrentKey());
+    on('btn-refresh-db', 'click', () => this.fetchDatabase());
+    on('btn-clear-table', 'click', () => this.clearCurrentTable());
+    on('btn-save-key', 'click', () => this.saveCurrentKey());
 
     // DB Backup / Restore / Reset
-    document.getElementById('btn-backup-db').addEventListener('click', () => {
+    on('btn-backup-db', 'click', () => {
       window.location.href = '/api/database/backup';
     });
 
     const restoreInput = document.getElementById('db-restore-file-input');
-    document.getElementById('btn-restore-db').addEventListener('click', () => {
-      restoreInput.click();
+    on('btn-restore-db', 'click', () => {
+      if (restoreInput) restoreInput.click();
     });
-    restoreInput.addEventListener('change', async (e) => {
-      const file = e.target.files[0];
-      if (!file) return;
-      if (!confirm(`Restore database from file "${file.name}"? This will overwrite the active database.`)) {
-        restoreInput.value = '';
-        return;
-      }
-      try {
-        const buffer = await file.arrayBuffer();
-        const res = await fetch('/api/database/restore', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/octet-stream' },
-          body: buffer,
-        });
-        if (res.ok) {
-          alert('Database restored successfully!');
-          this.fetchDatabase();
-          this.fetchOverview();
-        } else {
-          alert('Failed to restore database: ' + await res.text());
+    if (restoreInput) {
+      restoreInput.addEventListener('change', async (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+        if (!confirm(`Restore database from file "${file.name}"? This will overwrite the active database.`)) {
+          restoreInput.value = '';
+          return;
         }
-      } catch (err) {
-        alert('Error restoring database: ' + err);
-      } finally {
-        restoreInput.value = '';
-      }
-    });
+        try {
+          const buffer = await file.arrayBuffer();
+          const res = await fetch('/api/database/restore', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/octet-stream' },
+            body: buffer,
+          });
+          if (res.ok) {
+            alert('Database restored successfully!');
+            this.fetchDatabase();
+            this.fetchOverview();
+          } else {
+            alert('Failed to restore database: ' + await res.text());
+          }
+        } catch (err) {
+          alert('Error restoring database: ' + err);
+        } finally {
+          restoreInput.value = '';
+        }
+      });
+    }
 
     const nukeModal = document.getElementById('modal-reset-db');
     const nukeInput = document.getElementById('input-nuke-confirm');
     const nukeConfirmBtn = document.getElementById('btn-confirm-nuke');
     const nukeCancelBtn = document.getElementById('btn-cancel-nuke');
 
-    document.getElementById('btn-reset-db').addEventListener('click', () => {
+    on('btn-reset-db', 'click', () => {
       if (!confirm('RESET DATABASE (Step 1 of 2): Are you sure you want to reset the database? All tables will be wiped.')) {
         return;
       }
-      nukeInput.value = '';
-      nukeConfirmBtn.disabled = true;
-      nukeModal.style.display = 'flex';
-      nukeInput.focus();
-    });
-
-    nukeInput.addEventListener('input', () => {
-      nukeConfirmBtn.disabled = nukeInput.value.trim().toUpperCase() !== 'NUKE IT';
-    });
-
-    nukeCancelBtn.addEventListener('click', () => {
-      nukeModal.style.display = 'none';
-      nukeInput.value = '';
-    });
-
-    nukeConfirmBtn.addEventListener('click', async () => {
-      try {
-        const res = await fetch('/api/database/reset', { method: 'POST' });
-        if (res.ok) {
-          alert('Database has been completely reset and vacuumed.');
-          nukeModal.style.display = 'none';
-          this.fetchDatabase();
-          this.fetchOverview();
-        } else {
-          alert('Failed to reset database: ' + await res.text());
-        }
-      } catch (err) {
-        alert('Error resetting database: ' + err);
+      if (nukeInput && nukeConfirmBtn && nukeModal) {
+        nukeInput.value = '';
+        nukeConfirmBtn.disabled = true;
+        nukeModal.style.display = 'flex';
+        nukeInput.focus();
       }
     });
 
+    if (nukeInput && nukeConfirmBtn) {
+      nukeInput.addEventListener('input', () => {
+        nukeConfirmBtn.disabled = nukeInput.value.trim().toUpperCase() !== 'NUKE IT';
+      });
+    }
+
+    if (nukeCancelBtn && nukeModal) {
+      nukeCancelBtn.addEventListener('click', () => {
+        nukeModal.style.display = 'none';
+        if (nukeInput) nukeInput.value = '';
+      });
+    }
+
+    if (nukeConfirmBtn) {
+      nukeConfirmBtn.addEventListener('click', async () => {
+        try {
+          const res = await fetch('/api/database/reset', { method: 'POST' });
+          if (res.ok) {
+            alert('Database has been completely reset and vacuumed.');
+            if (nukeModal) nukeModal.style.display = 'none';
+            this.fetchDatabase();
+            this.fetchOverview();
+          } else {
+            alert('Failed to reset database: ' + await res.text());
+          }
+        } catch (err) {
+          alert('Error resetting database: ' + err);
+        }
+      });
+    }
+
     // Web Terminal Controls & Keyboard capture
-    document.getElementById('btn-term-reconnect').addEventListener('click', () => this.connectTerminalWebSocket());
-    document.getElementById('btn-term-reset').addEventListener('click', () => {
+    on('btn-term-reconnect', 'click', () => this.connectTerminalWebSocket());
+    on('btn-term-reset', 'click', () => {
       if (this.termWs && this.termWs.readyState === WebSocket.OPEN) {
         this.termWs.send(JSON.stringify({ type: 'reset' }));
       }
@@ -184,7 +214,6 @@ class HeimdallApp {
       });
     });
 
-    const termScreen = document.getElementById('terminal-screen');
     window.addEventListener('keydown', (e) => {
       if (this.activeTab === 'terminal') {
         if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') {
@@ -201,30 +230,33 @@ class HeimdallApp {
     });
 
     // App Editor
-    document.getElementById('btn-save-app-file').addEventListener('click', () => this.saveCurrentAppFile());
+    on('btn-save-app-file', 'click', () => this.saveCurrentAppFile());
 
     // Config Forms
-    document.getElementById('config-form').addEventListener('submit', (e) => {
+    on('config-form', 'submit', (e) => {
       e.preventDefault();
       this.saveConfigForm();
     });
 
-    document.getElementById('btn-reload-config').addEventListener('click', () => this.fetchConfig());
-    document.getElementById('btn-save-raw-toml').addEventListener('click', () => this.saveRawToml());
+    on('btn-reload-config', 'click', () => this.fetchConfig());
+    on('btn-save-raw-toml', 'click', () => this.saveRawToml());
 
     // Tuning Console Actions
-    document.getElementById('btn-run-analyze').addEventListener('click', () => this.runTuning('analyze', []));
-    document.getElementById('btn-run-sweep').addEventListener('click', () => this.runTuning('sweep', []));
-    document.getElementById('btn-run-train').addEventListener('click', () => {
-      const tokens = document.getElementById('tuning-tokens-input').value || '254';
+    on('btn-run-analyze', 'click', () => this.runTuning('analyze', []));
+    on('btn-run-sweep', 'click', () => this.runTuning('sweep', []));
+    on('btn-run-train', 'click', () => {
+      const tokensEl = document.getElementById('tuning-tokens-input');
+      const tokens = tokensEl ? tokensEl.value : '254';
       this.runTuning('train', ['--tokens', tokens]);
     });
-    document.getElementById('btn-run-crawler-custom').addEventListener('click', () => {
-      const steps = parseInt(document.getElementById('crawler-steps-input').value, 10) || 100;
+    on('btn-run-crawler-custom', 'click', () => {
+      const stepsEl = document.getElementById('crawler-steps-input');
+      const steps = stepsEl ? parseInt(stepsEl.value, 10) || 100 : 100;
       this.startCrawler(steps, 50);
     });
 
-    document.getElementById('btn-refresh-captures').addEventListener('click', () => this.fetchCaptures());
+    on('btn-refresh-captures', 'click', () => this.fetchCaptures());
+  }
   }
 
   switchTab(tabId) {
@@ -285,12 +317,15 @@ class HeimdallApp {
       const dot = document.getElementById('bbs-indicator');
       const text = document.getElementById('bbs-status-text');
 
-      if (bbs && bbs.state === 'running') {
-        dot.className = 'indicator-dot active';
-        text.textContent = `ONLINE (PID: ${bbs.pid || 'N/A'})`;
-      } else {
-        dot.className = 'indicator-dot stopped';
-        text.textContent = bbs ? bbs.state.toUpperCase() : 'OFFLINE';
+      if (dot) {
+        dot.className = (bbs && bbs.state === 'running') ? 'indicator-dot active' : 'indicator-dot stopped';
+      }
+      if (text) {
+        if (bbs && bbs.state === 'running') {
+          text.textContent = `ONLINE (PID: ${bbs.pid || 'N/A'})`;
+        } else {
+          text.textContent = bbs ? bbs.state.toUpperCase() : 'OFFLINE';
+        }
       }
 
       // Also refresh telemetry overview cards
@@ -572,46 +607,40 @@ directory = "${document.getElementById('cfg-capture-dir').value}"
       if (!res.ok) return;
       const s = await res.json();
 
-      document.getElementById('stat-active-sessions').textContent = s.active_sessions || '0';
-      document.getElementById('stat-unique-users').textContent = `24h Users: ${s.unique_users_24h || 0}`;
-      document.getElementById('stat-duty-cycle').textContent = `${(s.duty_cycle_percent || 0).toFixed(2)}%`;
-      document.getElementById('duty-cycle-text').textContent = `${(s.duty_cycle_percent || 0).toFixed(2)}% / 1.0%`;
-      document.getElementById('stat-packets-tx-rx').textContent = `${s.total_packets_sent || 0} / ${s.total_packets_received || 0}`;
-      document.getElementById('stat-ppm').textContent = `PPM: ${(s.send_ppm_1h || 0).toFixed(1)} TX / ${(s.recv_ppm_1h || 0).toFixed(1)} RX`;
-      document.getElementById('stat-compression-savings').textContent = `+${(s.compression_savings_percent || 0).toFixed(1)}%`;
-      document.getElementById('stat-raw-comp-bytes').textContent = `Raw: ${s.total_raw_bytes_sent || 0} B | Comp: ${s.total_compressed_bytes_sent || 0} B`;
+      const setText = (id, val) => {
+        const el = document.getElementById(id);
+        if (el) el.textContent = val;
+      };
+
+      setText('stat-active-sessions', s.active_sessions || '0');
+      setText('stat-unique-users', `24h Users: ${s.unique_users_24h || 0}`);
+      setText('stat-duty-cycle', `${(s.duty_cycle_percent || 0).toFixed(2)}%`);
+      setText('duty-cycle-text', `${(s.duty_cycle_percent || 0).toFixed(2)}% / 1.0%`);
+      setText('stat-packets-tx-rx', `${s.total_packets_sent || 0} / ${s.total_packets_received || 0}`);
+      setText('stat-ppm', `PPM: ${(s.send_ppm_1h || 0).toFixed(1)} TX / ${(s.recv_ppm_1h || 0).toFixed(1)} RX`);
+      setText('stat-compression-savings', `+${(s.compression_savings_percent || 0).toFixed(1)}%`);
+      setText('stat-raw-comp-bytes', `Raw: ${s.total_raw_bytes_sent || 0} B | Comp: ${s.total_compressed_bytes_sent || 0} B`);
 
       // Surface DB numbers to Overview
       if (s.database_summary) {
         const dbSum = s.database_summary;
         const dbTel = s.database || dbSum.telemetry || {};
-        const dbSizeEl = document.getElementById('stat-db-size');
-        if (dbSizeEl) dbSizeEl.textContent = formatBytes(dbSum.size_bytes || 0);
-        const dbSubEl = document.getElementById('stat-db-sub');
-        if (dbSubEl) dbSubEl.textContent = `Records: ${(dbSum.total_records || 0).toLocaleString()} | Growth: ${formatBytes(dbTel.byte_growth_per_day || 0)}/d`;
+        setText('stat-db-size', formatBytes(dbSum.size_bytes || 0));
+        setText('stat-db-sub', `Records: ${(dbSum.total_records || 0).toLocaleString()} | Growth: ${formatBytes(dbTel.byte_growth_per_day || 0)}/d`);
       }
 
       // Populate Database Telemetry & Stats grid
       if (s.database) {
         const dt = s.database;
-        const qphEl = document.getElementById('db-stat-qph');
-        if (qphEl) qphEl.textContent = (dt.queries_per_hour || 0).toFixed(1);
-        const totalQEl = document.getElementById('db-stat-total-queries');
-        if (totalQEl) totalQEl.textContent = `Total: ${(dt.total_queries || 0).toLocaleString()} queries`;
-        const avgTimeEl = document.getElementById('db-stat-avg-time');
-        if (avgTimeEl) avgTimeEl.textContent = `${(dt.avg_query_time_micros || 0).toFixed(1)} µs`;
-        const latRangeEl = document.getElementById('db-stat-latency-range');
-        if (latRangeEl) latRangeEl.textContent = `Min: ${dt.min_query_time_micros || 0} µs | Max: ${dt.max_query_time_micros || 0} µs`;
-        const rwRatioEl = document.getElementById('db-stat-rw-ratio');
-        if (rwRatioEl) rwRatioEl.textContent = `${(dt.read_queries || 0).toLocaleString()} / ${(dt.write_queries || 0).toLocaleString()}`;
-        const dbSizeEl = document.getElementById('db-stat-size');
-        if (dbSizeEl) dbSizeEl.textContent = formatBytes(dt.db_size_bytes || 0);
-        const totalRecEl = document.getElementById('db-stat-total-records');
-        if (totalRecEl) totalRecEl.textContent = `Records: ${(dt.total_records || 0).toLocaleString()}`;
-        const byteGrowthEl = document.getElementById('db-stat-byte-growth');
-        if (byteGrowthEl) byteGrowthEl.textContent = `+${formatBytes(dt.byte_growth_per_day || 0)}/d`;
-        const recGrowthEl = document.getElementById('db-stat-record-growth');
-        if (recGrowthEl) recGrowthEl.textContent = `+${(dt.record_growth_per_day || 0).toFixed(1)} rec/d`;
+        setText('db-stat-qph', (dt.queries_per_hour || 0).toFixed(1));
+        setText('db-stat-total-queries', `Total: ${(dt.total_queries || 0).toLocaleString()} queries`);
+        setText('db-stat-avg-time', `${(dt.avg_query_time_micros || 0).toFixed(1)} µs`);
+        setText('db-stat-latency-range', `Min: ${dt.min_query_time_micros || 0} µs | Max: ${dt.max_query_time_micros || 0} µs`);
+        setText('db-stat-rw-ratio', `${(dt.read_queries || 0).toLocaleString()} / ${(dt.write_queries || 0).toLocaleString()}`);
+        setText('db-stat-size', formatBytes(dt.db_size_bytes || 0));
+        setText('db-stat-total-records', `Records: ${(dt.total_records || 0).toLocaleString()}`);
+        setText('db-stat-byte-growth', `+${formatBytes(dt.byte_growth_per_day || 0)}/d`);
+        setText('db-stat-record-growth', `+${(dt.record_growth_per_day || 0).toFixed(1)} rec/d`);
       }
     } catch (e) {
       console.warn('Telemetry fetch error:', e);
@@ -625,26 +654,31 @@ directory = "${document.getElementById('cfg-capture-dir').value}"
         fetch('/api/telemetry/captures?limit=50')
       ]);
 
+      const setText = (id, val) => {
+        const el = document.getElementById(id);
+        if (el) el.textContent = val;
+      };
+
       if (sumRes.ok) {
         const sum = await sumRes.json();
-        document.getElementById('cap-stat-samples').textContent = sum.total_samples || 0;
-        document.getElementById('cap-stat-tx-rx').textContent = `TX: ${sum.tx_count || 0} | RX: ${sum.rx_count || 0}`;
+        setText('cap-stat-samples', sum.total_samples || 0);
+        setText('cap-stat-tx-rx', `TX: ${sum.tx_count || 0} | RX: ${sum.rx_count || 0}`);
         const avgPacket = (sum.avg_bytes_per_packet || sum.avg_comp_bytes || 0).toFixed(1);
         const avgRaw = (sum.avg_raw_bytes || 0).toFixed(1);
         const avgComp = (sum.avg_comp_bytes || 0).toFixed(1);
-        document.getElementById('cap-stat-avg-packet').textContent = `${avgPacket} B`;
-        document.getElementById('cap-stat-avg-packet-sub').textContent = `Raw: ${avgRaw} B | Comp: ${avgComp} B`;
+        setText('cap-stat-avg-packet', `${avgPacket} B`);
+        setText('cap-stat-avg-packet-sub', `Raw: ${avgRaw} B | Comp: ${avgComp} B`);
         const avgUser = (sum.avg_bytes_per_packet_per_user || 0).toFixed(1);
         const users = sum.unique_users_count || 1;
-        document.getElementById('cap-stat-avg-user-packet').textContent = `${avgUser} B`;
-        document.getElementById('cap-stat-avg-user-sub').textContent = `Active Users: ${users}`;
-        document.getElementById('cap-stat-raw').textContent = `${(sum.total_raw_bytes || 0).toLocaleString()} B`;
-        document.getElementById('cap-stat-avg-raw').textContent = `Avg: ${(sum.avg_raw_bytes || 0).toFixed(1)} B`;
-        document.getElementById('cap-stat-comp').textContent = `${(sum.total_comp_bytes || 0).toLocaleString()} B`;
+        setText('cap-stat-avg-user-packet', `${avgUser} B`);
+        setText('cap-stat-avg-user-sub', `Active Users: ${users}`);
+        setText('cap-stat-raw', `${(sum.total_raw_bytes || 0).toLocaleString()} B`);
+        setText('cap-stat-avg-raw', `Avg: ${(sum.avg_raw_bytes || 0).toFixed(1)} B`);
+        setText('cap-stat-comp', `${(sum.total_comp_bytes || 0).toLocaleString()} B`);
         const saved = (sum.total_raw_bytes || 0) - (sum.total_comp_bytes || 0);
-        document.getElementById('cap-stat-saved').textContent = `Saved: ${saved.toLocaleString()} B`;
-        document.getElementById('cap-stat-savings').textContent = `+${(sum.net_savings_percent || 0).toFixed(2)}%`;
-        document.getElementById('cap-stat-avg-time').textContent = `Avg Time: ${(sum.avg_duration_us || 0).toFixed(1)} µs`;
+        setText('cap-stat-saved', `Saved: ${saved.toLocaleString()} B`);
+        setText('cap-stat-savings', `+${(sum.net_savings_percent || 0).toFixed(2)}%`);
+        setText('cap-stat-avg-time', `Avg Time: ${(sum.avg_duration_us || 0).toFixed(1)} µs`);
       }
 
       if (packRes.ok) {
@@ -772,9 +806,13 @@ directory = "${document.getElementById('cfg-capture-dir').value}"
   }
 
   matchesLogFilter(entry) {
-    const lvlFilter = document.getElementById('log-level-filter').value;
-    const srcFilter = document.getElementById('log-source-filter').value;
-    const search = document.getElementById('log-search-input').value.toLowerCase();
+    const lvlEl = document.getElementById('log-level-filter');
+    const srcEl = document.getElementById('log-source-filter');
+    const searchEl = document.getElementById('log-search-input');
+
+    const lvlFilter = lvlEl ? lvlEl.value : 'ALL';
+    const srcFilter = srcEl ? srcEl.value : 'ALL';
+    const search = searchEl ? searchEl.value.toLowerCase() : '';
 
     if (lvlFilter !== 'ALL' && !entry.level.toUpperCase().includes(lvlFilter)) return false;
     if (srcFilter !== 'ALL' && !entry.source.toLowerCase().includes(srcFilter.toLowerCase())) return false;
@@ -783,8 +821,9 @@ directory = "${document.getElementById('cfg-capture-dir').value}"
   }
 
   renderLogs() {
-    const consoleEl = document.getElementById('log-console');
-    consoleEl.innerHTML = '';
+    const container = document.getElementById('log-entries') || document.getElementById('log-console');
+    if (!container) return;
+    container.innerHTML = '';
     
     this.logs.forEach(entry => {
       if (this.matchesLogFilter(entry)) {
@@ -797,24 +836,29 @@ directory = "${document.getElementById('cfg-capture-dir').value}"
 
   updateLogCountBadge() {
     const total = this.logs.length;
-    document.getElementById('log-count-badge').textContent = total;
-    document.getElementById('log-count-indicator').textContent = `${total} buffered logs`;
+    const badge = document.getElementById('log-count-badge');
+    if (badge) badge.textContent = total;
+    const ind = document.getElementById('log-count-indicator');
+    if (ind) ind.textContent = `${total} buffered logs`;
   }
 
   appendLogEntry(entry) {
-    const consoleEl = document.getElementById('log-console');
+    const container = document.getElementById('log-entries') || document.getElementById('log-console');
+    const scrollParent = document.getElementById('log-console') || container;
+    if (!container) return;
+
     const div = document.createElement('div');
     div.className = 'log-entry';
     div.innerHTML = `
-      <span class="log-ts">${entry.timestamp.slice(11, 23)}</span>
-      <span class="log-lvl log-lvl-${entry.level.toLowerCase()}">[${entry.level}]</span>
-      <span class="log-src">&lt;${entry.source}&gt;</span>
-      <span class="log-msg">${escapeHtml(entry.message)}</span>
+      <span class="log-ts">${entry.timestamp ? entry.timestamp.slice(11, 23) : ''}</span>
+      <span class="log-lvl log-lvl-${(entry.level || 'info').toLowerCase()}">[${entry.level || 'INFO'}]</span>
+      <span class="log-src">&lt;${entry.source || 'sys'}&gt;</span>
+      <span class="log-msg">${escapeHtml(entry.message || '')}</span>
     `;
-    consoleEl.appendChild(div);
+    container.appendChild(div);
 
-    if (document.getElementById('log-autoscroll').checked) {
-      consoleEl.scrollTop = consoleEl.scrollHeight;
+    if (this.autoScrollLogs && scrollParent) {
+      scrollParent.scrollTop = scrollParent.scrollHeight;
     }
   }
 

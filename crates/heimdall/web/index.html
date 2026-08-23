@@ -257,7 +257,6 @@
               <option value="web_client">web_client</option>
               <option value="bifrost_tuning">bifrost_tuning</option>
               <option value="heimdall">heimdall</option>
-            </select>
               <option value="crawler">crawler</option>
               <option value="tuning">tuning</option>
             </select>
@@ -268,6 +267,7 @@
           </div>
           <div class="log-actions">
             <button id="btn-toggle-tail" class="retro-btn btn-sm active" aria-pressed="true">AUTO-SCROLL: ON</button>
+            <button id="btn-refresh-logs" class="retro-btn btn-sm">RELOAD</button>
             <button id="btn-clear-logs" class="retro-btn btn-sm btn-danger">CLEAR LOGS</button>
           </div>
         </div>
@@ -278,8 +278,10 @@
             <span class="panel-title">══ SYSTEM LOG STREAM ══</span>
             <span class="log-stream-status" id="log-stream-status">● LIVE STREAM</span>
           </div>
-          <div class="log-console-container" id="log-console" tabindex="0" role="log" aria-live="polite">
-            <div id="log-entries" class="log-entries"></div>
+          <div class="log-console-container" tabindex="0" role="log" aria-live="polite">
+            <div id="log-console" class="log-console">
+              <div id="log-entries" class="log-entries"></div>
+            </div>
           </div>
         </div>
       </div>
@@ -294,7 +296,7 @@
             <span class="panel-title">══ REGISTERED BBS APPS ══</span>
             <button id="btn-refresh-apps" class="retro-btn btn-sm">↻ REFRESH</button>
           </div>
-          <div class="app-cards-container" id="app-cards-container">
+          <div class="apps-grid" id="apps-grid">
             <!-- Dynamically Populated App Cards -->
           </div>
         </div>
