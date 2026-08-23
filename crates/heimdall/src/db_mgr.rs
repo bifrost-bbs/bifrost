@@ -1,7 +1,7 @@
 //! SQLite Database manager and inspector for Heimdall.
 
 use anyhow::{Context, Result};
-use bifrost_bbs::DatabaseStore;
+use bifrost_bbs::{DatabaseStore, DbTelemetryStats};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 pub struct TableSummary {
     pub namespace: String,
     pub count: usize,
+    pub size_bytes: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -21,9 +22,11 @@ pub struct KeyValueEntry {
 pub struct DatabaseSummary {
     pub path: String,
     pub exists: bool,
+    pub size_bytes: u64,
     pub total_tables: usize,
     pub total_records: usize,
     pub tables: Vec<TableSummary>,
+    pub telemetry: DbTelemetryStats,
 }
 
 #[derive(Debug)]
@@ -54,33 +57,41 @@ impl DatabaseManager {
     pub fn summary(&self) -> Result<DatabaseSummary> {
         let exists = self.db_path.exists();
         if !exists {
+            let in_mem = DatabaseStore::new_in_memory()?;
             return Ok(DatabaseSummary {
                 path: self.db_path.to_string_lossy().to_string(),
                 exists: false,
+                size_bytes: 0,
                 total_tables: 0,
                 total_records: 0,
                 tables: Vec::new(),
+                telemetry: in_mem.telemetry_stats(),
             });
         }
 
         let store = self.get_store()?;
-        let namespaces = store.namespaces().unwrap_or_default();
         let total_records = store.total_records().unwrap_or(0);
-        let mut tables = Vec::new();
-        for ns in &namespaces {
-            let count = store.count(ns).unwrap_or(0);
-            tables.push(TableSummary {
-                namespace: ns.clone(),
-                count,
-            });
-        }
+        let size_bytes = store.db_size_bytes();
+        let telemetry = store.telemetry_stats();
+
+        let table_stats = store.table_stats().unwrap_or_default();
+        let tables: Vec<TableSummary> = table_stats
+            .into_iter()
+            .map(|t| TableSummary {
+                namespace: t.namespace,
+                count: t.count,
+                size_bytes: t.size_bytes,
+            })
+            .collect();
 
         Ok(DatabaseSummary {
             path: self.db_path.to_string_lossy().to_string(),
             exists: true,
+            size_bytes,
             total_tables: tables.len(),
             total_records,
             tables,
+            telemetry,
         })
     }
 
@@ -89,16 +100,15 @@ impl DatabaseManager {
             return Ok(Vec::new());
         }
         let store = self.get_store()?;
-        let namespaces = store.namespaces().unwrap_or_default();
-        let mut summaries = Vec::new();
-        for ns in namespaces {
-            let count = store.count(&ns).unwrap_or(0);
-            summaries.push(TableSummary {
-                namespace: ns,
-                count,
-            });
-        }
-        Ok(summaries)
+        let table_stats = store.table_stats().unwrap_or_default();
+        Ok(table_stats
+            .into_iter()
+            .map(|t| TableSummary {
+                namespace: t.namespace,
+                count: t.count,
+                size_bytes: t.size_bytes,
+            })
+            .collect())
     }
 
     pub fn get_table_entries(&self, namespace: &str) -> Result<Vec<KeyValueEntry>> {
@@ -144,6 +154,27 @@ impl DatabaseManager {
         let store = self.get_store()?;
         let count = store.clear_namespace(namespace)?;
         Ok(count)
+    }
+
+    pub fn reset_db(&self) -> Result<()> {
+        let store = self.get_store()?;
+        store.reset_database()?;
+        Ok(())
+    }
+
+    pub fn backup_db(&self) -> Result<Vec<u8>> {
+        let store = self.get_store()?;
+        store.backup_bytes()
+    }
+
+    pub fn restore_db(&self, data: &[u8]) -> Result<()> {
+        let store = self.get_store()?;
+        store.restore_from_bytes(data)
+    }
+
+    pub fn telemetry(&self) -> Result<DbTelemetryStats> {
+        let store = self.get_store()?;
+        Ok(store.telemetry_stats())
     }
 }
 
@@ -193,6 +224,23 @@ pub(crate) mod tests {
         assert_eq!(cleared, 1);
         let users_empty = mgr.get_table_entries("users").unwrap();
         assert_eq!(users_empty.len(), 0);
+
+        // Backup
+        let backup = mgr.backup_db().unwrap();
+        assert!(!backup.is_empty());
+
+        // Reset
+        mgr.reset_db().unwrap();
+        let summary_reset = mgr.summary().unwrap();
+        assert_eq!(summary_reset.total_records, 0);
+
+        // Restore
+        mgr.restore_db(&backup).unwrap();
+        let summary_restored = mgr.summary().unwrap();
+        assert_eq!(summary_restored.total_records, 1);
+
+        let tel = mgr.telemetry().unwrap();
+        assert!(tel.total_queries > 0);
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }

@@ -907,3 +907,59 @@ body.crt-overlay::before {
   font-size: 11px;
   color: var(--term-muted);
 }
+
+/* ==========================================================================
+   MODALS & DATABASE STYLING
+   ========================================================================== */
+.retro-modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.85);
+  backdrop-filter: blur(2px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 9999;
+}
+
+.retro-modal-box {
+  background: var(--term-surface);
+  border: 2px solid var(--term-danger);
+  box-shadow: 0 0 30px rgba(255, 50, 50, 0.4), inset 0 0 15px rgba(255, 50, 50, 0.2);
+  width: 90%;
+  max-width: 520px;
+  padding: 16px;
+  font-family: var(--font-mono);
+  color: var(--term-fg);
+}
+
+.db-table-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 10px;
+  background: var(--term-bg);
+  border: 1px solid var(--term-border-dim);
+  cursor: pointer;
+  font-size: 11px;
+  transition: all 0.15s ease;
+}
+
+.db-table-item:hover, .db-table-item.active {
+  border-color: var(--term-accent);
+  background: var(--term-surface);
+  color: var(--term-accent);
+}
+
+.db-table-name {
+  font-weight: 700;
+}
+
+.db-table-meta {
+  color: var(--term-muted);
+  font-size: 10px;
+}
+

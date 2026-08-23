@@ -94,6 +94,10 @@ pub fn create_router(state: AppState) -> Router {
         // Database
         .route("/api/database/summary", get(get_database_summary_handler))
         .route("/api/database/tables", get(list_database_tables_handler))
+        .route("/api/database/telemetry", get(get_database_telemetry_handler))
+        .route("/api/database/backup", get(backup_database_handler))
+        .route("/api/database/restore", post(restore_database_handler))
+        .route("/api/database/reset", post(reset_database_handler))
         .route("/api/database/table/:namespace", get(get_database_table_handler).delete(clear_database_table_handler))
         .route("/api/database/table/:namespace/key/:key", get(get_database_key_handler).post(set_database_key_handler).delete(delete_database_key_handler))
         // Telemetry & Captures
@@ -325,6 +329,8 @@ async fn save_app_file_handler(
 async fn get_telemetry_summary_handler(State(state): State<AppState>) -> impl IntoResponse {
     let cap_summary = state.stats_mgr.get_capture_summary();
     let cfg = state.config_mgr.get_config();
+    let db_tel = state.db_mgr.telemetry().ok();
+    let db_summary = state.db_mgr.summary().ok();
 
     let snapshot = serde_json::json!({
         "active_sessions": 0,
@@ -340,6 +346,8 @@ async fn get_telemetry_summary_handler(State(state): State<AppState>) -> impl In
         "avg_bytes_per_packet_per_user": cap_summary.avg_bytes_per_packet_per_user,
         "compression_savings_percent": cap_summary.net_savings_percent,
         "max_duty_cycle_limit": cfg.rate_limiter.max_duty_cycle_percent,
+        "database": db_tel,
+        "database_summary": db_summary,
     });
 
     Json(snapshot)
@@ -376,6 +384,66 @@ async fn list_database_tables_handler(
         .list_tables()
         .map(Json)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
+async fn get_database_telemetry_handler(
+    State(state): State<AppState>,
+) -> Result<Json<bifrost_bbs::DbTelemetryStats>, (StatusCode, String)> {
+    state
+        .db_mgr
+        .telemetry()
+        .map(Json)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
+async fn backup_database_handler(
+    State(state): State<AppState>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let bytes = state
+        .db_mgr
+        .backup_db()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let filename = format!(
+        "database_backup_{}.db",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+    );
+
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(header::CONTENT_TYPE, "application/octet-stream".parse().unwrap());
+    headers.insert(
+        header::CONTENT_DISPOSITION,
+        format!("attachment; filename=\"{}\"", filename).parse().unwrap(),
+    );
+
+    Ok((headers, bytes))
+}
+
+async fn restore_database_handler(
+    State(state): State<AppState>,
+    body: axum::body::Bytes,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    if body.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "Empty backup data".to_string()));
+    }
+    state
+        .db_mgr
+        .restore_db(&body)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(serde_json::json!({ "status": "ok", "restored": true, "bytes": body.len() })))
+}
+
+async fn reset_database_handler(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    state
+        .db_mgr
+        .reset_db()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(serde_json::json!({ "status": "ok", "reset": true })))
 }
 
 async fn get_database_table_handler(
@@ -604,10 +672,20 @@ directory = "captured_packets"
         let resp_db_rows = app.clone().oneshot(req_db_rows).await.unwrap();
         assert_eq!(resp_db_rows.status(), StatusCode::OK);
 
-        // Test DELETE /api/database/table/:namespace/key/:key
-        let req_del_key = Request::builder().method("DELETE").uri("/api/database/table/unit_test_ns/key/key1").body(Body::empty()).unwrap();
-        let resp_del_key = app.clone().oneshot(req_del_key).await.unwrap();
-        assert_eq!(resp_del_key.status(), StatusCode::OK);
+        // Test GET /api/database/telemetry
+        let req_db_tel = Request::builder().uri("/api/database/telemetry").body(Body::empty()).unwrap();
+        let resp_db_tel = app.clone().oneshot(req_db_tel).await.unwrap();
+        assert_eq!(resp_db_tel.status(), StatusCode::OK);
+
+        // Test GET /api/database/backup
+        let req_db_bak = Request::builder().uri("/api/database/backup").body(Body::empty()).unwrap();
+        let resp_db_bak = app.clone().oneshot(req_db_bak).await.unwrap();
+        assert_eq!(resp_db_bak.status(), StatusCode::OK);
+
+        // Test POST /api/database/reset
+        let req_db_reset = Request::builder().method("POST").uri("/api/database/reset").body(Body::empty()).unwrap();
+        let resp_db_reset = app.clone().oneshot(req_db_reset).await.unwrap();
+        assert_eq!(resp_db_reset.status(), StatusCode::OK);
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }

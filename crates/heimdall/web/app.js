@@ -92,6 +92,83 @@ class HeimdallApp {
     document.getElementById('btn-clear-table').addEventListener('click', () => this.clearCurrentTable());
     document.getElementById('btn-save-key').addEventListener('click', () => this.saveCurrentKey());
 
+    // DB Backup / Restore / Reset
+    document.getElementById('btn-backup-db').addEventListener('click', () => {
+      window.location.href = '/api/database/backup';
+    });
+
+    const restoreInput = document.getElementById('db-restore-file-input');
+    document.getElementById('btn-restore-db').addEventListener('click', () => {
+      restoreInput.click();
+    });
+    restoreInput.addEventListener('change', async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      if (!confirm(`Restore database from file "${file.name}"? This will overwrite the active database.`)) {
+        restoreInput.value = '';
+        return;
+      }
+      try {
+        const buffer = await file.arrayBuffer();
+        const res = await fetch('/api/database/restore', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/octet-stream' },
+          body: buffer,
+        });
+        if (res.ok) {
+          alert('Database restored successfully!');
+          this.fetchDatabase();
+          this.fetchOverview();
+        } else {
+          alert('Failed to restore database: ' + await res.text());
+        }
+      } catch (err) {
+        alert('Error restoring database: ' + err);
+      } finally {
+        restoreInput.value = '';
+      }
+    });
+
+    const nukeModal = document.getElementById('modal-reset-db');
+    const nukeInput = document.getElementById('input-nuke-confirm');
+    const nukeConfirmBtn = document.getElementById('btn-confirm-nuke');
+    const nukeCancelBtn = document.getElementById('btn-cancel-nuke');
+
+    document.getElementById('btn-reset-db').addEventListener('click', () => {
+      if (!confirm('RESET DATABASE (Step 1 of 2): Are you sure you want to reset the database? All tables will be wiped.')) {
+        return;
+      }
+      nukeInput.value = '';
+      nukeConfirmBtn.disabled = true;
+      nukeModal.style.display = 'flex';
+      nukeInput.focus();
+    });
+
+    nukeInput.addEventListener('input', () => {
+      nukeConfirmBtn.disabled = nukeInput.value.trim().toUpperCase() !== 'NUKE IT';
+    });
+
+    nukeCancelBtn.addEventListener('click', () => {
+      nukeModal.style.display = 'none';
+      nukeInput.value = '';
+    });
+
+    nukeConfirmBtn.addEventListener('click', async () => {
+      try {
+        const res = await fetch('/api/database/reset', { method: 'POST' });
+        if (res.ok) {
+          alert('Database has been completely reset and vacuumed.');
+          nukeModal.style.display = 'none';
+          this.fetchDatabase();
+          this.fetchOverview();
+        } else {
+          alert('Failed to reset database: ' + await res.text());
+        }
+      } catch (err) {
+        alert('Error resetting database: ' + err);
+      }
+    });
+
     // Web Terminal Controls & Keyboard capture
     document.getElementById('btn-term-reconnect').addEventListener('click', () => this.connectTerminalWebSocket());
     document.getElementById('btn-term-reset').addEventListener('click', () => {
@@ -503,6 +580,39 @@ directory = "${document.getElementById('cfg-capture-dir').value}"
       document.getElementById('stat-ppm').textContent = `PPM: ${(s.send_ppm_1h || 0).toFixed(1)} TX / ${(s.recv_ppm_1h || 0).toFixed(1)} RX`;
       document.getElementById('stat-compression-savings').textContent = `+${(s.compression_savings_percent || 0).toFixed(1)}%`;
       document.getElementById('stat-raw-comp-bytes').textContent = `Raw: ${s.total_raw_bytes_sent || 0} B | Comp: ${s.total_compressed_bytes_sent || 0} B`;
+
+      // Surface DB numbers to Overview
+      if (s.database_summary) {
+        const dbSum = s.database_summary;
+        const dbTel = s.database || dbSum.telemetry || {};
+        const dbSizeEl = document.getElementById('stat-db-size');
+        if (dbSizeEl) dbSizeEl.textContent = formatBytes(dbSum.size_bytes || 0);
+        const dbSubEl = document.getElementById('stat-db-sub');
+        if (dbSubEl) dbSubEl.textContent = `Records: ${(dbSum.total_records || 0).toLocaleString()} | Growth: ${formatBytes(dbTel.byte_growth_per_day || 0)}/d`;
+      }
+
+      // Populate Database Telemetry & Stats grid
+      if (s.database) {
+        const dt = s.database;
+        const qphEl = document.getElementById('db-stat-qph');
+        if (qphEl) qphEl.textContent = (dt.queries_per_hour || 0).toFixed(1);
+        const totalQEl = document.getElementById('db-stat-total-queries');
+        if (totalQEl) totalQEl.textContent = `Total: ${(dt.total_queries || 0).toLocaleString()} queries`;
+        const avgTimeEl = document.getElementById('db-stat-avg-time');
+        if (avgTimeEl) avgTimeEl.textContent = `${(dt.avg_query_time_micros || 0).toFixed(1)} µs`;
+        const latRangeEl = document.getElementById('db-stat-latency-range');
+        if (latRangeEl) latRangeEl.textContent = `Min: ${dt.min_query_time_micros || 0} µs | Max: ${dt.max_query_time_micros || 0} µs`;
+        const rwRatioEl = document.getElementById('db-stat-rw-ratio');
+        if (rwRatioEl) rwRatioEl.textContent = `${(dt.read_queries || 0).toLocaleString()} / ${(dt.write_queries || 0).toLocaleString()}`;
+        const dbSizeEl = document.getElementById('db-stat-size');
+        if (dbSizeEl) dbSizeEl.textContent = formatBytes(dt.db_size_bytes || 0);
+        const totalRecEl = document.getElementById('db-stat-total-records');
+        if (totalRecEl) totalRecEl.textContent = `Records: ${(dt.total_records || 0).toLocaleString()}`;
+        const byteGrowthEl = document.getElementById('db-stat-byte-growth');
+        if (byteGrowthEl) byteGrowthEl.textContent = `+${formatBytes(dt.byte_growth_per_day || 0)}/d`;
+        const recGrowthEl = document.getElementById('db-stat-record-growth');
+        if (recGrowthEl) recGrowthEl.textContent = `+${(dt.record_growth_per_day || 0).toFixed(1)} rec/d`;
+      }
     } catch (e) {
       console.warn('Telemetry fetch error:', e);
     }
@@ -774,10 +884,12 @@ directory = "${document.getElementById('cfg-capture-dir').value}"
 
       const pathEl = document.getElementById('db-file-path');
       if (pathEl) pathEl.textContent = data.path;
+      const sizeEl = document.getElementById('db-file-size');
+      if (sizeEl) sizeEl.textContent = `${(data.size_bytes || 0).toLocaleString()} bytes (${formatBytes(data.size_bytes || 0)})`;
       const totalTblEl = document.getElementById('db-total-tables');
       if (totalTblEl) totalTblEl.textContent = data.total_tables;
       const totalRecEl = document.getElementById('db-total-records');
-      if (totalRecEl) totalRecEl.textContent = data.total_records;
+      if (totalRecEl) totalRecEl.textContent = (data.total_records || 0).toLocaleString();
 
       const container = document.getElementById('db-tables-container');
       if (!container) return;
@@ -794,8 +906,12 @@ directory = "${document.getElementById('cfg-capture-dir').value}"
         btn.style.textAlign = 'left';
         btn.style.display = 'flex';
         btn.style.justifyContent = 'space-between';
+        btn.style.alignItems = 'center';
         btn.style.padding = '6px 10px';
-        btn.innerHTML = `<span><strong>${escapeHtml(tbl.namespace)}</strong></span> <span class="badge">${tbl.count}</span>`;
+        btn.innerHTML = `
+          <span><strong>${escapeHtml(tbl.namespace)}</strong></span>
+          <span class="badge" style="font-size: 10px;">${(tbl.count || 0).toLocaleString()} recs | ${formatBytes(tbl.size_bytes || 0)}</span>
+        `;
         btn.addEventListener('click', () => this.selectTable(tbl.namespace));
         container.appendChild(btn);
       });
@@ -923,6 +1039,14 @@ directory = "${document.getElementById('cfg-capture-dir').value}"
 function escapeHtml(text) {
   const map = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' };
   return text.replace(/[&<>"']/g, m => map[m]);
+}
+
+function formatBytes(bytes) {
+  if (!bytes || bytes === 0) return '0 B';
+  const k = 1024;
+  const sizes = ['B', 'KB', 'MB', 'GB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return (bytes / Math.pow(k, i)).toFixed(i === 0 ? 0 : 1) + ' ' + sizes[i];
 }
 
 window.app = new HeimdallApp();

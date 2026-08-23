@@ -13,7 +13,7 @@ use std::time::Instant;
 use tokio::sync::mpsc;
 
 pub mod db;
-pub use db::{DatabaseConfig, DatabaseStore, default_database_config};
+pub use db::{DatabaseConfig, DatabaseStore, DbTelemetryStats, TableStats, default_database_config};
 
 // Pull from sibling workspace crates
 use bifrost_transport::{

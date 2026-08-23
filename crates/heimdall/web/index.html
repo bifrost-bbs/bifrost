@@ -62,7 +62,7 @@
       <span class="tab-key">[5]</span> CONFIG
     </button>
     <button class="nav-tab" data-tab="telemetry" id="tab-btn-telemetry" aria-controls="tab-telemetry" aria-selected="false">
-      <span class="tab-key">[6]</span> TELEMETRY
+      <span class="tab-key">[6]</span> TELEMETRY &amp; STATS
     </button>
     <button class="nav-tab" data-tab="tuning" id="tab-btn-tuning" aria-controls="tab-tuning" aria-selected="false">
       <span class="tab-key">[7]</span> TUNING &amp; TOOLS
@@ -112,6 +112,11 @@
           <span class="card-label">COMPRESSION SAVINGS</span>
           <span class="card-value" id="stat-compression-savings">+0.0%</span>
           <span class="card-sub" id="stat-raw-comp-bytes">Raw: 0 B | Comp: 0 B</span>
+        </div>
+        <div class="retro-card stat-card">
+          <span class="card-label">SQLITE DB SIZE &amp; RECORDS</span>
+          <span class="card-value" id="stat-db-size">0 B</span>
+          <span class="card-sub" id="stat-db-sub">Records: 0 | Growth: 0 B/d</span>
         </div>
       </div>
 
@@ -253,30 +258,44 @@
               <option value="bifrost_tuning">bifrost_tuning</option>
               <option value="heimdall">heimdall</option>
             </select>
-            <input type="text" id="log-search-input" class="retro-input" placeholder="Search log buffer...">
-            <label class="checkbox-label">
-              <input type="checkbox" id="log-autoscroll" checked> Auto-Scroll
-            </label>
-            <button id="btn-refresh-logs" class="retro-btn btn-sm">RELOAD</button>
-            <button id="btn-clear-logs" class="retro-btn btn-sm">CLEAR</button>
+              <option value="crawler">crawler</option>
+              <option value="tuning">tuning</option>
+            </select>
+          </div>
+          <div class="filter-group flex-1">
+            <label for="log-search-input">Search:</label>
+            <input type="text" id="log-search-input" class="retro-input" placeholder="Regex or substring search...">
+          </div>
+          <div class="log-actions">
+            <button id="btn-toggle-tail" class="retro-btn btn-sm active" aria-pressed="true">AUTO-SCROLL: ON</button>
+            <button id="btn-clear-logs" class="retro-btn btn-sm btn-danger">CLEAR LOGS</button>
           </div>
         </div>
-        <div class="log-console" id="log-console">
-          <!-- Log Entries Streamed Here -->
+
+        <!-- Terminal Logs Window -->
+        <div class="retro-panel log-window-panel">
+          <div class="panel-header">
+            <span class="panel-title">══ SYSTEM LOG STREAM ══</span>
+            <span class="log-stream-status" id="log-stream-status">● LIVE STREAM</span>
+          </div>
+          <div class="log-console-container" id="log-console" tabindex="0" role="log" aria-live="polite">
+            <div id="log-entries" class="log-entries"></div>
+          </div>
         </div>
       </div>
     </section>
 
-    <!-- TAB 4: APP MANAGER & MULTI-FILE EDITOR -->
+    <!-- TAB 4: APPS & ASSETS -->
     <section id="tab-apps" class="tab-pane" role="tabpanel" aria-labelledby="tab-btn-apps">
-      <div class="apps-three-pane-layout">
-        <!-- 1. Applications List -->
-        <div class="retro-panel apps-list-panel">
+      <div class="apps-grid-layout">
+        <!-- 1. App Catalog List -->
+        <div class="retro-panel app-list-panel">
           <div class="panel-header">
-            <span class="panel-title">══ APPLICATIONS ══</span>
+            <span class="panel-title">══ REGISTERED BBS APPS ══</span>
+            <button id="btn-refresh-apps" class="retro-btn btn-sm">↻ REFRESH</button>
           </div>
-          <div class="apps-grid" id="apps-grid">
-            <!-- Dynamically Loaded App Cards -->
+          <div class="app-cards-container" id="app-cards-container">
+            <!-- Dynamically Populated App Cards -->
           </div>
         </div>
 
@@ -408,8 +427,11 @@
       </div>
     </section>
 
-    <!-- TAB 6: TELEMETRY & CAPTURE LOGS -->
+    <!-- TAB 6: TELEMETRY & STATS -->
     <section id="tab-telemetry" class="tab-pane" role="tabpanel" aria-labelledby="tab-btn-telemetry">
+      <div class="panel-header" style="margin-bottom: 8px;">
+        <span class="panel-title">══ RADIO &amp; TRANSPORT PACKET TELEMETRY ══</span>
+      </div>
       <div class="telemetry-stats-grid">
         <div class="retro-card">
           <span class="card-label">TOTAL PACKET SAMPLES</span>
@@ -443,7 +465,44 @@
         </div>
       </div>
 
-      <div class="retro-panel">
+      <!-- Database Performance & Growth Section -->
+      <div class="panel-header" style="margin-top: 20px; margin-bottom: 8px;">
+        <span class="panel-title">══ SQLITE DATABASE TELEMETRY &amp; STATS ══</span>
+      </div>
+      <div class="telemetry-stats-grid">
+        <div class="retro-card">
+          <span class="card-label">QUERIES / HOUR</span>
+          <span class="card-value" id="db-stat-qph">0.0</span>
+          <span class="card-sub" id="db-stat-total-queries">Total: 0 queries</span>
+        </div>
+        <div class="retro-card">
+          <span class="card-label">AVG QUERY LATENCY</span>
+          <span class="card-value" id="db-stat-avg-time">0.0 µs</span>
+          <span class="card-sub" id="db-stat-latency-range">Min: 0 µs | Max: 0 µs</span>
+        </div>
+        <div class="retro-card">
+          <span class="card-label">READ / WRITE RATIO</span>
+          <span class="card-value" id="db-stat-rw-ratio">0 / 0</span>
+          <span class="card-sub" id="db-stat-rw-sub">Reads vs Writes</span>
+        </div>
+        <div class="retro-card">
+          <span class="card-label">DATABASE SIZE</span>
+          <span class="card-value" id="db-stat-size">0 B</span>
+          <span class="card-sub" id="db-stat-total-records">Records: 0</span>
+        </div>
+        <div class="retro-card">
+          <span class="card-label">BYTE GROWTH / DAY</span>
+          <span class="card-value" id="db-stat-byte-growth">+0.0 B/d</span>
+          <span class="card-sub" id="db-stat-byte-growth-sub">Projected 24h</span>
+        </div>
+        <div class="retro-card">
+          <span class="card-label">RECORD GROWTH / DAY</span>
+          <span class="card-value text-success" id="db-stat-record-growth">+0.0 rec/d</span>
+          <span class="card-sub" id="db-stat-record-growth-sub">Rate / 24h</span>
+        </div>
+      </div>
+
+      <div class="retro-panel" style="margin-top: 15px;">
         <div class="panel-header">
           <span class="panel-title">══ PACKET CAPTURE LOG (compression_log.csv) ══</span>
           <button id="btn-refresh-captures" class="retro-btn btn-sm">↻ REFRESH</button>
@@ -509,7 +568,7 @@
 
     <!-- TAB 8: DATABASE MANAGER -->
     <section id="tab-database" class="tab-pane" role="tabpanel" aria-labelledby="tab-btn-database">
-      <div class="database-grid" style="display: grid; grid-template-columns: 320px 1fr; gap: 15px;">
+      <div class="database-grid" style="display: grid; grid-template-columns: 340px 1fr; gap: 15px;">
         <div class="retro-panel">
           <div class="panel-header">
             <span class="panel-title">══ SQLITE PERSISTENCE ══</span>
@@ -520,6 +579,10 @@
             <span class="meta-val" id="db-file-path" style="font-family: monospace; font-size: 11px;">database.db</span>
           </div>
           <div class="meta-row">
+            <span class="meta-label">DATABASE SIZE:</span>
+            <span class="meta-val" id="db-file-size" style="font-weight: bold; color: var(--accent);">0 bytes</span>
+          </div>
+          <div class="meta-row">
             <span class="meta-label">TOTAL TABLES:</span>
             <span class="meta-val" id="db-total-tables">0</span>
           </div>
@@ -527,12 +590,22 @@
             <span class="meta-label">TOTAL RECORDS:</span>
             <span class="meta-val" id="db-total-records">0</span>
           </div>
+
+          <!-- DB Backup / Restore / Reset Toolbar -->
+          <div class="db-maintenance-group" style="margin-top: 12px; display: flex; flex-direction: column; gap: 6px;">
+            <button id="btn-backup-db" class="retro-btn btn-sm btn-success" style="width: 100%;">💾 BACKUP DATABASE</button>
+            <div style="display: flex; gap: 6px;">
+              <button id="btn-restore-db" class="retro-btn btn-sm" style="flex: 1;">📥 RESTORE DB</button>
+              <input type="file" id="db-restore-file-input" accept=".db,.sqlite" style="display: none;">
+              <button id="btn-reset-db" class="retro-btn btn-sm btn-danger" style="flex: 1;">☢️ RESET DB</button>
+            </div>
+          </div>
           
           <div class="panel-header" style="margin-top: 15px;">
-            <span class="panel-title">══ NAMESPACES / TABLES ══</span>
+            <span class="panel-title">══ TABLES (RECORDS / BYTES) ══</span>
           </div>
-          <div class="db-tables-list" id="db-tables-container" style="margin-top: 8px; display: flex; flex-direction: column; gap: 4px; max-height: 400px; overflow-y: auto;">
-            <!-- Dynamically populated tables list -->
+          <div class="db-tables-list" id="db-tables-container" style="margin-top: 8px; display: flex; flex-direction: column; gap: 4px; max-height: 360px; overflow-y: auto;">
+            <!-- Dynamically populated tables list with records & bytes -->
           </div>
         </div>
 
@@ -567,6 +640,31 @@
     </section>
 
   </main>
+
+  <!-- Funny Double Confirmation Modal for Reset DB -->
+  <div id="modal-reset-db" class="retro-modal-overlay" style="display: none;">
+    <div class="retro-modal-box">
+      <div class="panel-header" style="color: #ff3333; font-weight: bold;">
+        <span>☢️ CRITICAL WARNING: TOTAL DATABASE OBLITERATION ☢️</span>
+      </div>
+      <div class="retro-modal-body" style="padding: 15px 0; line-height: 1.5;">
+        <p style="color: #ff5555; font-weight: bold; margin-bottom: 10px;">
+          Hold on, Space Commander! Are you ABSOLUTELY, UNEQUIVOCALLY SURE?!
+        </p>
+        <p style="margin-bottom: 10px;">
+          Pressing the big red button will permanently vaporize all user accounts, messages, Void Trader galaxies, door game high scores, and marketplace wares into cosmic static! There is no warp drive that can bring them back!
+        </p>
+        <p style="margin-bottom: 15px;">
+          Type <strong style="color: #ffff55;">"NUKE IT"</strong> below to confirm total annihilation:
+        </p>
+        <input type="text" id="input-nuke-confirm" class="retro-input" placeholder="Type NUKE IT" style="width: 100%; text-align: center; text-transform: uppercase; font-size: 14px; font-weight: bold;">
+      </div>
+      <div class="retro-modal-actions" style="display: flex; justify-content: flex-end; gap: 10px; margin-top: 10px;">
+        <button id="btn-cancel-nuke" class="retro-btn">ABORT / MERCY!</button>
+        <button id="btn-confirm-nuke" class="retro-btn btn-danger" disabled>💥 OBLITERATE EVERYTHING 💥</button>
+      </div>
+    </div>
+  </div>
 
   <!-- Global Footer Bar -->
   <footer class="heimdall-footer" role="contentinfo">
