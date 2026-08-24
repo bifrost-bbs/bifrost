@@ -49,12 +49,17 @@ function board.show_categories(session)
     
     session.await_input(200, function(submission)
         if type(submission) == "string" then
-            board.show_categories(session)
+            local s = submission:lower()
+            if s == "m" or s == "q" or s == "b" or s == "x" or s == "exit" or s == "quit" then
+                session.load_app("main_menu")
+            else
+                board.show_categories(session)
+            end
             return
         end
 
         local action = submission.submit
-        if action == "main_menu" then
+        if action == "main_menu" or action == "back" or action == "exit" or action == "quit" then
             session.load_app("main_menu")
         elseif action == "admin_manage" then
             if session.has_permission("admin") then

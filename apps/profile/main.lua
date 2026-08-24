@@ -26,7 +26,12 @@ function profile.on_start(session)
 
     session.await_input(20, function(submission)
         if type(submission) == "string" then
-            profile.on_start(session)
+            local s = submission:lower()
+            if s == "q" or s == "b" or s == "m" or s == "cancel" or s == "exit" or s == "quit" then
+                session.load_app("main_menu")
+            else
+                profile.on_start(session)
+            end
             return
         end
 
