@@ -1,8 +1,0 @@
-[app]
-id = "weather"
-name = "Weather Forecast"
-description = "Fetches nearby weather forecast using local node position"
-author = "Bifrost Contributors"
-version = "1.0.0"
-repository = "https://github.com/pmumby/bifrost"
-entry_point = "main.lua"

@@ -1361,18 +1361,11 @@ mod tests {
         assert!(content1.contains("Bifrost") || content1.contains("___"), "Should contain Bifrost banner art");
         assert!(desc1.contains("main_menu_banner.ans"));
 
-        // With new template and menu assets registered, find dungeon and voidtrader assets
-        let dungeon_banner = get_asset_content_by_id(0x0104);
-        assert!(dungeon_banner.is_some(), "Dungeon banner 0x0104 should resolve");
-        let (content2, desc2) = dungeon_banner.unwrap();
-        assert!(desc2.contains("dungeon_banner.ans"));
-        assert_ne!(content1, content2, "Dungeon banner must be distinct from main menu banner");
-
-        let vt_banner = get_asset_content_by_id(0x0108);
-        assert!(vt_banner.is_some(), "Void Trader banner 0x0108 should resolve");
-        let (content3, desc3) = vt_banner.unwrap();
-        assert!(desc3.contains("voidtrader_banner.ans"));
-        assert_ne!(content1, content3, "Void Trader banner must be distinct from main menu banner");
+        let main_border = get_asset_content_by_id(0x0102);
+        assert!(main_border.is_some(), "Main menu border 0x0102 should resolve");
+        let (content2, desc2) = main_border.unwrap();
+        assert!(desc2.contains("main_menu_border.ans"));
+        assert_ne!(content1, content2, "Main menu border must be distinct from banner");
     }
 
     #[test]

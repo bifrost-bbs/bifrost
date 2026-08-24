@@ -80,6 +80,9 @@
     <button class="nav-tab" data-tab="users" id="tab-btn-users" aria-controls="tab-users" aria-selected="false">
       <span class="tab-key">[9]</span> USERS
     </button>
+    <button class="nav-tab" data-tab="store" id="tab-btn-store" aria-controls="tab-store" aria-selected="false">
+      <span class="tab-key">[0]</span> APP STORE
+    </button>
   </nav>
 
   <!-- Impersonation Alert Banner -->
@@ -689,6 +692,30 @@
               <tr><td colspan="5" class="empty-state">Loading users...</td></tr>
             </tbody>
           </table>
+        </div>
+      </div>
+    <!-- TAB 10: APP STORE -->
+    <section id="tab-store" class="tab-pane" role="tabpanel" aria-labelledby="tab-btn-store">
+      <div class="retro-panel app-store-panel">
+        <div class="panel-header" style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
+          <div>
+            <span class="panel-title">══ BIFROST APP STORE &amp; CATALOG ══</span>
+            <span class="text-muted" style="margin-left: 10px; font-size: 11px;" id="store-updated-at">Official Catalog</span>
+          </div>
+          <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
+            <select id="store-category-filter" class="retro-select" style="min-width: 140px;">
+              <option value="ALL">All Categories</option>
+              <option value="games">Games</option>
+              <option value="utilities">Utilities</option>
+              <option value="marketplace">Marketplace</option>
+              <option value="messaging">Messaging</option>
+            </select>
+            <input type="text" id="store-search-input" class="retro-input" placeholder="Search catalog..." style="width: 180px;">
+            <button id="btn-refresh-catalog" class="retro-btn btn-sm">↻ REFRESH CATALOG</button>
+          </div>
+        </div>
+        <div class="store-grid" id="store-grid" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 15px; padding: 15px;">
+          <!-- Dynamically populated from /api/catalog -->
         </div>
       </div>
     </section>

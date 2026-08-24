@@ -1,8 +1,0 @@
-# form_id=10
-# align=bottom_center
-# tag,id,label,col,row,key
-resume,resume,ResumeGame,2,16,R
-new_game,new_game,StartAgain,18,16,N
-leaderboard,leaderboard,Leaderboard,34,16,L
-help,help,HelpGuide,50,16,H
-exit,exit,Exit,64,16,X

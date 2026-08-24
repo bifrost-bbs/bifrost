@@ -1,7 +1,0 @@
-# form_id=10
-# align=bottom_center
-# tag,id,label,col,row,key
-chart1,buy_chart1,BuyChart1,2,9,1
-chart2,buy_chart2,BuyChart2,2,9,2
-chart3,buy_chart3,BuyChart3,2,9,3
-return,return,Return,2,9,R

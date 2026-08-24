@@ -20,6 +20,7 @@ Welcome to the **Bifrost MeshBBS Lua Application Framework** developer guide. Th
 7. [Asset Management & Caching](#7-asset-management--caching)
 8. [Session Lifecycle & Resumption Hooks](#8-session-lifecycle--resumption-hooks)
 9. [Airtime & Performance Best Practices](#9-airtime--performance-best-practices)
+10. [Publishing, App Catalog & Heimdall App Store](#10-publishing-app-catalog--heimdall-app-store)
 
 ---
 
@@ -491,6 +492,84 @@ return game
    * Prefix database namespaces with your app name (e.g. `vt_players`, `vt_sectors`) to avoid key collisions with other BBS applications.
 5. **Keep Line Lengths Under 80 Columns:**
    * Bifrost virtual terminals standardize on an **80x25 character grid**. Content exceeding column 80 will wrap to the next line.
+
+---
+
+## 10. Publishing, App Catalog & Heimdall App Store
+
+Bifrost BBS uses a decentralized package and catalog distribution architecture. Applications can be developed and maintained independently across GitHub, versioned with SemVer tags, and indexed in the central Bifrost App Catalog for one-click installation through Heimdall.
+
+### 🏢 Repository Structure & Naming Convention
+
+* **Core Built-in Applications:** `messages`, `profile`, and `admin` live directly in the main `bifrost` workspace repository under `apps/`.
+* **Standalone Applications:** Every community door game, utility, and module lives in its own GitHub repository under the **`bifrost-bbs`** organization, prefixed with `app-`:
+  * `https://github.com/bifrost-bbs/app-minidungeon`
+  * `https://github.com/bifrost-bbs/app-marketplace`
+  * `https://github.com/bifrost-bbs/app-weather`
+  * `https://github.com/bifrost-bbs/app-voidtrader`
+
+Each standalone repository contains the application files directly at root:
+```
+app-<app_id>/
+├── manifest.toml
+├── main.lua
+├── README.md
+└── assets/
+    └── ...
+```
+
+### 🏷️ Semantic Versioning & Releases
+
+1. Start your application in beta at **`version = "0.1.0"`** in `manifest.toml`.
+2. Commit your changes and tag your release with a matching semantic version:
+   ```bash
+   git tag v0.1.0
+   git push origin v0.1.0
+   ```
+3. Create a GitHub Release for tag `v0.1.0` using GitHub CLI or web interface:
+   ```bash
+   gh release create v0.1.0 --title "v0.1.0 Beta Release" --notes "Initial standalone release."
+   ```
+
+### 📦 Publishing to the Official App Catalog (`app-catalog`)
+
+The **`bifrost-bbs/app-catalog`** repository serves as the official registry for verified Bifrost BBS applications.
+
+1. Fork and clone `https://github.com/bifrost-bbs/app-catalog`.
+2. Add your application metadata to `catalog.json` following `schema.json`:
+   ```json
+   {
+     "id": "my_app",
+     "name": "My App Name",
+     "author": "Your Handle",
+     "description": "Short summary of what the app does.",
+     "category": "games",
+     "repository": "https://github.com/bifrost-bbs/app-my_app",
+     "latest_version": "0.1.0",
+     "latest_tag": "v0.1.0",
+     "icon": "🕹️",
+     "releases": [
+       {
+         "version": "0.1.0",
+         "tag": "v0.1.0",
+         "published_at": "2026-08-24T00:00:00Z",
+         "min_bifrost_version": "0.1.0",
+         "tarball_url": "https://github.com/bifrost-bbs/app-my_app/archive/refs/tags/v0.1.0.tar.gz",
+         "changelog": "Initial v0.1.0 release."
+       }
+     ]
+   }
+   ```
+3. Submit a Pull Request to `bifrost-bbs/app-catalog`. Once merged, your app appears immediately in the Heimdall App Store across all Bifrost nodes!
+
+### 🏪 Managing Apps with Heimdall App Store
+
+BBS SysOps can manage apps via the Heimdall web dashboard or REST API:
+
+1. **Browse Catalog:** Open Heimdall (`http://localhost:9324`) and switch to the **[0] APP STORE** tab. Filter by category or search by keyword.
+2. **One-Click Install:** Click **`+ INSTALL`** on any catalog application. Heimdall downloads the release tarball, extracts it into `apps/<app_id>/`, and automatically registers it in `config.toml`.
+3. **Seamless Updates:** When a new release is published to the catalog, Heimdall highlights an **`⬆ UPDATE`** button showing version diffs (`v0.1.0 → v0.2.0`).
+4. **Enable / Disable / Uninstall:** Toggle apps in real-time or delete them safely with a single click.
 
 ---
 

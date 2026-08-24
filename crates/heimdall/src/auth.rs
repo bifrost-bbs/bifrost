@@ -1,7 +1,7 @@
 //! Authentication and session management supporting token authentication,
 //! granular permissions, and admin impersonation.
 
-use crate::user_mgr::{hex_to_node_id, UserInfo, PERM_ADMIN, PERM_HEIMDALL_LOGIN};
+use crate::user_mgr::{hex_to_node_id, UserInfo, PERM_ADMIN};
 use axum::http::HeaderMap;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -218,6 +218,7 @@ fn current_unix_timestamp() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::user_mgr::PERM_HEIMDALL_LOGIN;
 
     #[test]
     fn test_session_creation_and_permission() {

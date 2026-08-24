@@ -1,5 +1,0 @@
-# form_id=10
-# tag,id,label,col,row,key
-attack,attack,Attack,2,9,A
-shields_up,shields_up,ShieldsUp,2,9,S
-flee,flee,FleeWarp,2,9,F

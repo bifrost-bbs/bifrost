@@ -1818,11 +1818,7 @@ fn get_client_asset_content(node_id: &[u8; 32], asset_id: u16) -> Option<String>
     let enabled_apps = vec![
         "messages".to_string(),
         "profile".to_string(),
-        "minidungeon".to_string(),
         "admin".to_string(),
-        "marketplace".to_string(),
-        "weather".to_string(),
-        "voidtrader".to_string(),
     ];
     let manifest_map = bifrost_bbs::load_app_manifests(&enabled_apps);
     if let Some((_, rel_path)) = manifest_map.get(&asset_id) {
@@ -2492,17 +2488,13 @@ mod tests {
         let enabled_apps = vec![
             "messages".to_string(),
             "profile".to_string(),
-            "minidungeon".to_string(),
             "admin".to_string(),
-            "marketplace".to_string(),
-            "weather".to_string(),
-            "voidtrader".to_string(),
         ];
         let manifest_map = bifrost_bbs::load_app_manifests(&enabled_apps);
         let (&entry_menu_id, _) = manifest_map
             .iter()
-            .find(|(_, (name, _))| name == "voidtrader/entry_menu")
-            .expect("voidtrader/entry_menu must be in manifest");
+            .find(|(_, (name, _))| name == "assets/main_nav" || name == "main_nav")
+            .expect("assets/main_nav must be in manifest");
 
         let mut bytecode = Vec::new();
         bytecode.push(0x01);
@@ -2514,18 +2506,17 @@ mod tests {
             0x00,
             0x00,
             0x00,
-            0x1F,
-        ]); // 5 buttons mask=0x1F
+            0xFF,
+        ]); // 8 buttons mask=0xFF
         bytecode.push(0xD3);
 
         interpret_bytecode(&server_node, &bytecode, &mut form, LayoutMode::Full, 0, 0, &tx);
 
         assert!(form.active);
-        assert_eq!(form.fields.len(), 5);
+        assert_eq!(form.fields.len(), 8);
         for f in &form.fields {
             // Every field must be strictly within the 1..25 virtual terminal canvas
-            assert!(f.row <= 24, "Field row {} should be <= 24 inside virtual terminal", f.row);
-            assert!(f.row >= 20, "Bottom aligned field row {} should be >= 20", f.row);
+            assert!(f.row <= 25, "Field row {} should be <= 25 inside virtual terminal", f.row);
             assert!(f.col + f.width <= 80, "Field col + width {} should not overflow 80 cols", f.col + f.width);
         }
     }
