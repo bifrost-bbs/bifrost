@@ -43,7 +43,8 @@ admin_nodes = [
 
 [apps]
 # The default entrypoint application (replaces hardcoded main menu)
-main_app = "main_menu"
+# main_app = "main_menu"
+
 # List of enabled applications to load and register (external apps installed via Heimdall App Store)
 enabled = [
     "messages",

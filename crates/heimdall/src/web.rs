@@ -1130,6 +1130,14 @@ mod tests {
         let resp_create_u = app.clone().oneshot(req_create_u).await.unwrap();
         assert_eq!(resp_create_u.status(), StatusCode::OK);
 
+        // Test GET /api/catalog
+        let req_catalog = Request::builder().uri("/api/catalog").body(Body::empty()).unwrap();
+        let resp_catalog = app.clone().oneshot(req_catalog).await.unwrap();
+        assert_eq!(resp_catalog.status(), StatusCode::OK);
+        let cat_bytes = axum::body::to_bytes(resp_catalog.into_body(), usize::MAX).await.unwrap();
+        let cat_val: serde_json::Value = serde_json::from_slice(&cat_bytes).unwrap();
+        assert!(cat_val["apps"].as_array().unwrap().len() >= 4);
+
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }
