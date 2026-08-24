@@ -1,7 +1,0 @@
-# form_id=10
-# tag,id,label,col,row,key
-sloop,buy_sloop,ScoutSloop,2,9,S
-hauler,buy_hauler,MerchantHauler,2,9,M
-freighter,buy_freighter,ArmoredFreighter,2,9,F
-cruiser,buy_cruiser,DreadnoughtCruiser,2,9,D
-return,return,Return,2,9,R

@@ -139,14 +139,9 @@ fn default_main_app() -> String {
 
 fn default_enabled_apps() -> Vec<String> {
     vec![
-        "main_menu".to_string(),
         "messages".to_string(),
         "profile".to_string(),
-        "minidungeon".to_string(),
         "admin".to_string(),
-        "marketplace".to_string(),
-        "weather".to_string(),
-        "voidtrader".to_string(),
     ]
 }
 
@@ -165,6 +160,78 @@ fn default_apps_config() -> AppsConfig {
     }
 }
 
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq)]
+pub struct MainMenuConfig {
+    #[serde(default = "default_menu_banner")]
+    pub banner_asset: Option<String>,
+    #[serde(default = "default_menu_title")]
+    pub title: String,
+    #[serde(default = "default_menu_header_fg")]
+    pub header_fg: u8,
+    #[serde(default = "default_menu_header_bg")]
+    pub header_bg: u8,
+    #[serde(default = "default_menu_layout")]
+    pub layout: String,
+    #[serde(default = "default_menu_start_col")]
+    pub start_col: u8,
+    #[serde(default = "default_menu_start_row")]
+    pub start_row: u8,
+    #[serde(default = "default_menu_col_width")]
+    pub col_width: u8,
+    #[serde(default = "default_true")]
+    pub show_logout: bool,
+}
+
+fn default_menu_banner() -> Option<String> {
+    Some("main_menu_banner".to_string())
+}
+
+fn default_menu_title() -> String {
+    "=== BIFROST MESHBBS ===".to_string()
+}
+
+fn default_menu_header_fg() -> u8 {
+    14
+}
+
+fn default_menu_header_bg() -> u8 {
+    0
+}
+
+fn default_menu_layout() -> String {
+    "grid".to_string()
+}
+
+fn default_menu_start_col() -> u8 {
+    2
+}
+
+fn default_menu_start_row() -> u8 {
+    10
+}
+
+fn default_menu_col_width() -> u8 {
+    16
+}
+
+fn default_true() -> bool {
+    true
+}
+
+pub fn default_main_menu_config() -> MainMenuConfig {
+    MainMenuConfig {
+        banner_asset: default_menu_banner(),
+        title: default_menu_title(),
+        header_fg: default_menu_header_fg(),
+        header_bg: default_menu_header_bg(),
+        layout: default_menu_layout(),
+        start_col: default_menu_start_col(),
+        start_row: default_menu_start_row(),
+        col_width: default_menu_col_width(),
+        show_logout: default_true(),
+    }
+}
+
 /// Bifrost BBS Server Configuration Loaded from config.toml
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq)]
 pub struct AppConfig {
@@ -178,6 +245,8 @@ pub struct AppConfig {
     pub admin_nodes: Vec<String>,
     #[serde(default = "default_apps_config")]
     pub apps: AppsConfig,
+    #[serde(default = "default_main_menu_config")]
+    pub main_menu: MainMenuConfig,
     #[serde(default = "default_packet_capture_config")]
     pub packet_capture: PacketCaptureConfig,
     #[serde(default = "default_database_config")]
@@ -376,6 +445,7 @@ pub fn default_config() -> AppConfig {
         },
         admin_nodes: Vec::new(),
         apps: default_apps_config(),
+        main_menu: default_main_menu_config(),
         packet_capture: default_packet_capture_config(),
         database: default_database_config(),
     }
@@ -442,6 +512,12 @@ pub struct AppMetadata {
     pub version: Option<String>,
     pub repository: Option<String>,
     pub entry_point: Option<String>,
+    #[serde(default)]
+    pub admin_only: Option<bool>,
+    #[serde(default)]
+    pub required_permission: Option<String>,
+    #[serde(default)]
+    pub hotkey: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -459,13 +535,224 @@ pub struct AppManifest {
     pub assets: Vec<AppAssetEntry>,
 }
 
-/// Loads the static public asset manifests for all enabled apps.
+pub const EMBEDDED_MAIN_MENU_LUA: &str = r#"
+local menu = {}
+
+function menu.on_start(session)
+    local user_id = session.node_id()
+    local user = db.get("users", user_id)
+
+    term.clear()
+    local cfg = nil
+    if type(session.get_menu_config) == "function" then
+        cfg = session.get_menu_config()
+    end
+    if not cfg then
+        cfg = {
+            banner_asset = "main_menu_banner",
+            title = "=== BIFROST MESHBBS ===",
+            header_fg = 14,
+            header_bg = 0,
+            layout = "grid",
+            start_col = 2,
+            start_row = 10,
+            col_width = 16,
+            show_logout = true
+        }
+    end
+
+    if cfg.banner_asset and cfg.banner_asset ~= "" then
+        term.render_asset(cfg.banner_asset)
+    end
+
+    term.move_to(2, 6)
+    term.set_color(cfg.header_fg or 14, cfg.header_bg or 0)
+
+    if not user or not user.nickname then
+        local default_nick = "Operator"
+        if user and user.node_name then
+            default_nick = user.node_name
+        end
+
+        -- Force register nickname on very first connection
+        term.print("Welcome to Bifrost! Please set a nickname:\n")
+        term.define_form(1)
+        term.print("  Your Nickname: ")
+        term.add_input_field("nickname", 18, 8, 15, default_nick)
+        term.print("\n")
+        term.add_submit_button("register", 2, 10)
+        term.flush_form()
+
+        session.await_input(1, function(submission)
+            if type(submission) == "string" then
+                menu.on_start(session)
+                return
+            end
+            local nick = submission.nickname or default_nick
+            local updated_user = user or {}
+            updated_user.nickname = nick
+            db.set("users", user_id, updated_user)
+            log.info("New user registered nickname: " .. nick)
+            menu.on_start(session)
+        end)
+        return
+    end
+
+    term.print("Hello, " .. user.nickname .. "!\n")
+    term.set_color(7, 0)
+    term.print("Select options using Tab/Arrows or Hotkeys:\n\n")
+
+    local is_admin = session.has_permission("admin")
+    local apps = nil
+    if type(session.get_apps) == "function" then
+        apps = session.get_apps()
+    end
+    if not apps or #apps == 0 then
+        apps = {}
+    end
+
+    term.define_form(10)
+
+    local start_col = cfg.start_col or 2
+    local start_row = cfg.start_row or 10
+    local col_width = cfg.col_width or 16
+    local layout = cfg.layout or "grid"
+
+    local current_row = start_row
+    local current_col = start_col
+    local items_in_col = 0
+    local registered_apps = {}
+
+    for _, app_info in ipairs(apps) do
+        local can_show = true
+        if app_info.admin_only and not is_admin then
+            can_show = false
+        elseif app_info.required_permission and app_info.required_permission ~= "" then
+            if not is_admin and not session.has_permission(app_info.required_permission) then
+                can_show = false
+            end
+        end
+
+        if can_show then
+            local button_id = app_info.id
+            registered_apps[button_id] = app_info.id
+
+            term.add_submit_button(button_id, current_col, current_row)
+
+            if layout == "grid" then
+                items_in_col = items_in_col + 1
+                if items_in_col % 3 == 0 then
+                    current_col = current_col + col_width
+                    current_row = start_row
+                else
+                    current_row = current_row + 2
+                end
+            else
+                current_row = current_row + 2
+            end
+        end
+    end
+
+    if cfg.show_logout then
+        term.add_submit_button("logout", current_col, current_row)
+    end
+
+    term.flush_form()
+
+    session.await_input(10, function(submission)
+        if type(submission) == "string" then
+            menu.on_start(session)
+            return
+        end
+
+        local action = submission.submit
+        log.info("Main menu selected action: " .. tostring(action))
+
+        if action == "logout" then
+            log.info("User logged out: " .. user.nickname)
+            term.clear()
+            term.print("Goodbye, " .. user.nickname .. "!\n")
+            term.flush()
+            session.close()
+        elseif registered_apps[action] then
+            session.load_app(registered_apps[action])
+        elseif action == "read_boards" or action == "messages" then
+            session.load_app("messages")
+        elseif action == "profile" then
+            session.load_app("profile")
+        elseif action == "admin" then
+            session.load_app("admin")
+        else
+            local matched = false
+            for _, app_info in ipairs(apps) do
+                if app_info.id == action then
+                    session.load_app(app_info.id)
+                    matched = true
+                    break
+                end
+            end
+            if not matched then
+                menu.on_start(session)
+            end
+        end
+    end)
+end
+
+function menu.on_resume(session)
+    menu.on_start(session)
+end
+
+return menu
+"#;
+
+/// Loads the static public asset manifests for all enabled apps as well as global assets.
 /// Dynamically assigns unique 16-bit AssetIDs to prevent conflicts.
 /// Maps AssetID -> (CanonicalNamespacedName, ResolvedRelativePath).
 pub fn load_app_manifests(enabled_apps: &[String]) -> HashMap<u16, (String, String)> {
     let mut map = HashMap::new();
     let mut next_dynamic_id: u16 = 0x0101;
 
+    // 1. Scan global top-level assets directory (e.g. "assets/")
+    let global_assets_dir = find_workspace_path("assets");
+    if global_assets_dir.is_dir() {
+        if let Ok(entries) = std::fs::read_dir(&global_assets_dir) {
+            let mut entries_vec: Vec<_> = entries.flatten().collect();
+            entries_vec.sort_by_key(|e| e.path());
+            for entry in entries_vec {
+                let path = entry.path();
+                if path.is_file() {
+                    let file_name = path
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string();
+                    let asset_stem = path
+                        .file_stem()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string();
+
+                    while map.contains_key(&next_dynamic_id) {
+                        next_dynamic_id = next_dynamic_id.wrapping_add(1);
+                    }
+                    let id = next_dynamic_id;
+                    next_dynamic_id = next_dynamic_id.wrapping_add(1);
+
+                    let asset_rel_path = format!("assets/{}", file_name);
+                    let namespaced_name = format!("assets/{}", asset_stem);
+                    log::debug!(
+                        "Registered global asset 0x{:04X}: '{}' -> '{}'",
+                        id,
+                        namespaced_name,
+                        asset_rel_path
+                    );
+                    map.insert(id, (namespaced_name, asset_rel_path));
+                }
+            }
+        }
+    }
+
+    // 2. Scan per-app manifests
     for app_id in enabled_apps {
         let manifest_rel = format!("apps/{}/manifest.toml", app_id);
         let manifest_path = find_workspace_path(&manifest_rel);
@@ -528,6 +815,7 @@ pub fn resolve_asset_id_and_content(
 ) -> (u16, Option<String>) {
     let normalized_target = asset_name.replace("::", "/").replace(':', "/");
     let relative_target = format!("{}/{}", current_app, normalized_target);
+    let assets_target = format!("assets/{}", normalized_target);
 
     // 1. Exact match with current app namespace (e.g. "voidtrader/combat_menu")
     let matched = manifest_map
@@ -543,14 +831,21 @@ pub fn resolve_asset_id_and_content(
                 n_norm == normalized_target
             })
         })
-        // 3. Suffix match (e.g. ".../combat_menu")
+        // 3. Exact match with global assets namespace (e.g. "assets/main_menu_banner")
+        .or_else(|| {
+            manifest_map.iter().find(|(_, (n, _))| {
+                let n_norm = n.replace("::", "/").replace(':', "/");
+                n_norm == assets_target
+            })
+        })
+        // 4. Suffix match (e.g. ".../combat_menu" or ".../main_menu_banner")
         .or_else(|| {
             manifest_map.iter().find(|(_, (n, _))| {
                 let n_norm = n.replace("::", "/").replace(':', "/");
                 n_norm.ends_with(&format!("/{}", normalized_target))
             })
         })
-        // 4. Substring match fallback
+        // 5. Substring match fallback
         .or_else(|| {
             manifest_map.iter().find(|(_, (n, _))| {
                 n.to_ascii_uppercase().contains(&asset_name.to_ascii_uppercase())
@@ -1042,6 +1337,7 @@ pub async fn start_server_with_stats(
                                 let admin_nodes_config = config.admin_nodes.clone();
                                 let asset_manifest_clone = asset_manifest_map.clone();
                                 let apps_config_clone = config.apps.clone();
+                                let main_menu_config_clone = config.main_menu.clone();
                                 let bbs_stats_inner = bbs_stats_clone.clone();
                                 let transport_stats_inner = transport_stats.clone();
                                 let packet_recorder_inner = packet_recorder.clone();
@@ -1057,6 +1353,7 @@ pub async fn start_server_with_stats(
                                         admin_nodes_config,
                                         asset_manifest_clone,
                                         apps_config_clone,
+                                        main_menu_config_clone,
                                         bbs_stats_inner.clone(),
                                         transport_stats_inner,
                                         packet_recorder_inner,
@@ -1287,6 +1584,7 @@ fn run_session_task(
     admin_nodes: Vec<String>,
     asset_manifest: Arc<HashMap<u16, (String, String)>>,
     apps_config: AppsConfig,
+    main_menu_config: MainMenuConfig,
     bbs_stats: Arc<BbsStats>,
     transport_stats: Option<Arc<TransportStats>>,
     packet_recorder: Option<Arc<PacketRecorder>>,
@@ -2147,23 +2445,29 @@ fn run_session_task(
     )?;
 
     let enabled_apps = apps_config.enabled.clone();
+    let main_app_name_clone = apps_config.main_app.clone();
     let active_app_clone = active_app.clone();
     let load_app = lua.create_function(move |lua, app_name: String| {
-        if !enabled_apps.contains(&app_name) {
+        let is_main = app_name == "main_menu" || app_name == main_app_name_clone;
+        if !is_main && !enabled_apps.contains(&app_name) {
             log::error!("Application '{}' not found or not enabled in config", app_name);
             return Ok(());
         }
         let entry_file = format!("apps/{}/main.lua", app_name);
         let path = find_workspace_path(&entry_file);
-        if path.exists() {
-            *active_app_clone.lock().unwrap() = app_name.clone();
-            let code = std::fs::read_to_string(&path)?;
-            let app: mlua::Table = lua.load(&code).set_name(&app_name).eval()?;
-            let on_start: mlua::Function = app.get("on_start")?;
-            on_start.call::<_, ()>(lua.globals().get::<_, mlua::Table>("session")?)?;
+        let code = if path.exists() {
+            std::fs::read_to_string(&path)?
+        } else if is_main {
+            EMBEDDED_MAIN_MENU_LUA.to_string()
         } else {
             log::error!("Application '{}' entry point not found at {:?}", app_name, path);
-        }
+            return Ok(());
+        };
+
+        *active_app_clone.lock().unwrap() = app_name.clone();
+        let app: mlua::Table = lua.load(&code).set_name(&app_name).eval()?;
+        let on_start: mlua::Function = app.get("on_start")?;
+        on_start.call::<_, ()>(lua.globals().get::<_, mlua::Table>("session")?)?;
         Ok(())
     })?;
     session.set("load_app", load_app.clone())?;
@@ -2192,6 +2496,71 @@ fn run_session_task(
         })?,
     )?;
 
+    let main_menu_cfg_clone = main_menu_config.clone();
+    session.set(
+        "get_menu_config",
+        lua.create_function(move |lua, (): ()| {
+            let tbl = lua.create_table()?;
+            tbl.set("banner_asset", main_menu_cfg_clone.banner_asset.clone())?;
+            tbl.set("title", main_menu_cfg_clone.title.clone())?;
+            tbl.set("header_fg", main_menu_cfg_clone.header_fg)?;
+            tbl.set("header_bg", main_menu_cfg_clone.header_bg)?;
+            tbl.set("layout", main_menu_cfg_clone.layout.clone())?;
+            tbl.set("start_col", main_menu_cfg_clone.start_col)?;
+            tbl.set("start_row", main_menu_cfg_clone.start_row)?;
+            tbl.set("col_width", main_menu_cfg_clone.col_width)?;
+            tbl.set("show_logout", main_menu_cfg_clone.show_logout)?;
+            Ok(tbl)
+        })?,
+    )?;
+
+    let enabled_apps_for_get = apps_config.enabled.clone();
+    session.set(
+        "get_apps",
+        lua.create_function(move |lua, (): ()| {
+            let tbl = lua.create_table()?;
+            let mut idx = 1;
+            for app_id in &enabled_apps_for_get {
+                if app_id == "main_menu" {
+                    continue;
+                }
+                let manifest_rel = format!("apps/{}/manifest.toml", app_id);
+                let manifest_path = find_workspace_path(&manifest_rel);
+                if !manifest_path.is_file() {
+                    continue;
+                }
+
+                let mut name = app_id.clone();
+                let mut description = String::new();
+                let mut admin_only = app_id == "admin";
+                let mut required_permission = None;
+                let mut hotkey = None;
+
+                if let Ok(contents) = std::fs::read_to_string(&manifest_path) {
+                    if let Ok(app_manifest) = toml::from_str::<AppManifest>(&contents) {
+                        name = app_manifest.app.name;
+                        description = app_manifest.app.description.unwrap_or_default();
+                        admin_only = app_manifest.app.admin_only.unwrap_or(app_id == "admin");
+                        required_permission = app_manifest.app.required_permission;
+                        hotkey = app_manifest.app.hotkey;
+                    }
+                }
+
+                let app_tbl = lua.create_table()?;
+                app_tbl.set("id", app_id.clone())?;
+                app_tbl.set("name", name)?;
+                app_tbl.set("description", description)?;
+                app_tbl.set("admin_only", admin_only)?;
+                app_tbl.set("required_permission", required_permission)?;
+                app_tbl.set("hotkey", hotkey)?;
+
+                tbl.set(idx, app_tbl)?;
+                idx += 1;
+            }
+            Ok(tbl)
+        })?,
+    )?;
+
     globals.set("session", session)?;
 
     // Start initial application specified in config (default: main_menu)
@@ -2199,8 +2568,15 @@ fn run_session_task(
     log::debug!("Loading initial app '{}'...", main_app_name);
     let main_entry_file = format!("apps/{}/main.lua", main_app_name);
     let main_path = find_workspace_path(&main_entry_file);
-    if main_path.exists() {
-        let main_code = std::fs::read_to_string(&main_path)?;
+    let main_code_opt = if main_path.exists() {
+        std::fs::read_to_string(&main_path).ok()
+    } else if main_app_name == "main_menu" {
+        Some(EMBEDDED_MAIN_MENU_LUA.to_string())
+    } else {
+        None
+    };
+
+    if let Some(main_code) = main_code_opt {
         log::debug!("Evaluating app '{}' code...", main_app_name);
         let app: mlua::Table = lua.load(&main_code).set_name(&main_app_name).eval()?;
         log::debug!("App '{}' code evaluated successfully", main_app_name);
@@ -2304,38 +2680,44 @@ fn run_session_task(
                 );
                 let entry_file = format!("apps/{}/main.lua", current_app_name);
                 let path = find_workspace_path(&entry_file);
-                if path.exists() {
-                    if let Ok(code) = std::fs::read_to_string(&path) {
-                        if let Ok(app_table) =
-                            lua.load(&code).set_name(&current_app_name).eval::<mlua::Table>()
+                let code_opt = if path.exists() {
+                    std::fs::read_to_string(&path).ok()
+                } else if current_app_name == "main_menu" {
+                    Some(EMBEDDED_MAIN_MENU_LUA.to_string())
+                } else {
+                    None
+                };
+
+                if let Some(code) = code_opt {
+                    if let Ok(app_table) =
+                        lua.load(&code).set_name(&current_app_name).eval::<mlua::Table>()
+                    {
+                        let session_table =
+                            lua.globals().get::<_, mlua::Table>("session")?;
+                        if let Ok(on_resume) =
+                            app_table.get::<_, mlua::Function>("on_resume")
                         {
-                            let session_table =
-                                lua.globals().get::<_, mlua::Table>("session")?;
-                            if let Ok(on_resume) =
-                                app_table.get::<_, mlua::Function>("on_resume")
-                            {
-                                log::debug!("Invoking on_resume for '{}'...", current_app_name);
-                                if let Err(e) = on_resume.call::<_, ()>(session_table) {
-                                    log::error!(
-                                        "Error in on_resume for '{}': {:?}",
-                                        current_app_name,
-                                        e
-                                    );
-                                }
-                            } else if let Ok(on_start) =
-                                app_table.get::<_, mlua::Function>("on_start")
-                            {
-                                log::debug!(
-                                    "Invoking on_start fallback on resume for '{}'...",
-                                    current_app_name
+                            log::debug!("Invoking on_resume for '{}'...", current_app_name);
+                            if let Err(e) = on_resume.call::<_, ()>(session_table) {
+                                log::error!(
+                                    "Error in on_resume for '{}': {:?}",
+                                    current_app_name,
+                                    e
                                 );
-                                if let Err(e) = on_start.call::<_, ()>(session_table) {
-                                    log::error!(
-                                        "Error in on_start on resume for '{}': {:?}",
-                                        current_app_name,
-                                        e
-                                    );
-                                }
+                            }
+                        } else if let Ok(on_start) =
+                            app_table.get::<_, mlua::Function>("on_start")
+                        {
+                            log::debug!(
+                                "Invoking on_start fallback on resume for '{}'...",
+                                current_app_name
+                            );
+                            if let Err(e) = on_start.call::<_, ()>(session_table) {
+                                log::error!(
+                                    "Error in on_start on resume for '{}': {:?}",
+                                    current_app_name,
+                                    e
+                                );
                             }
                         }
                     }
@@ -3247,38 +3629,27 @@ max_asset_broadcast_duty_cycle = 0.15
 
     #[test]
     fn test_asset_manifest_loading() {
-        let manifest = load_app_manifests(&["main_menu".to_string(), "minidungeon".to_string()]);
-        assert!(manifest.len() >= 3, "Manifest should contain at least the 3 app assets");
+        let manifest = load_app_manifests(&["minidungeon".to_string()]);
+        assert!(manifest.len() >= 3, "Manifest should contain global assets and minidungeon assets");
 
         let banner_entry = manifest
             .iter()
-            .find(|(_, (name, _))| name == "main_menu/main_menu_banner");
-        assert!(banner_entry.is_some(), "main_menu/main_menu_banner must be registered");
+            .find(|(_, (name, _))| name == "assets/main_menu_banner" || name == "main_menu_banner");
+        assert!(banner_entry.is_some(), "assets/main_menu_banner must be registered");
         let (&banner_id, (banner_name, banner_path)) = banner_entry.unwrap();
-        assert_eq!(banner_name, "main_menu/main_menu_banner");
-        assert_eq!(banner_path, "apps/main_menu/assets/main_menu_banner.ans");
+        assert!(banner_name.contains("main_menu_banner"));
+        assert_eq!(banner_path, "assets/main_menu_banner.ans");
 
-        let dungeon_entry = manifest
+        let border_entry = manifest
             .iter()
-            .find(|(_, (name, _))| name == "minidungeon/dungeon_banner");
-        assert!(dungeon_entry.is_some(), "minidungeon/dungeon_banner must be registered");
-        let (&dungeon_id, _) = dungeon_entry.unwrap();
-        assert_ne!(banner_id, dungeon_id, "Asset IDs must be unique");
+            .find(|(_, (name, _))| name == "assets/main_menu_border" || name == "main_menu_border");
+        assert!(border_entry.is_some(), "assets/main_menu_border must be registered");
+        let (&border_id, _) = border_entry.unwrap();
+        assert_ne!(banner_id, border_id, "Asset IDs must be unique");
 
-        // Test scoped resolution precedence when multiple apps share identical asset names (e.g. combat_menu)
-        let full_manifest = load_app_manifests(&["minidungeon".to_string(), "voidtrader".to_string()]);
-        let (vt_combat_id, _) = resolve_asset_id_and_content(&full_manifest, "voidtrader", "combat_menu");
-        let (md_combat_id, _) = resolve_asset_id_and_content(&full_manifest, "minidungeon", "combat_menu");
-
-        assert_ne!(vt_combat_id, md_combat_id, "Different apps must resolve their own scoped asset IDs");
-        assert_eq!(
-            full_manifest.get(&vt_combat_id).unwrap().0,
-            "voidtrader/combat_menu"
-        );
-        assert_eq!(
-            full_manifest.get(&md_combat_id).unwrap().0,
-            "minidungeon/combat_menu"
-        );
+        // Test global asset resolution
+        let (resolved_banner_id, _) = resolve_asset_id_and_content(&manifest, "messages", "main_menu_banner");
+        assert_eq!(resolved_banner_id, banner_id);
     }
 
     #[tokio::test]
@@ -3288,8 +3659,8 @@ max_asset_broadcast_duty_cycle = 0.15
         let manifest = load_app_manifests(&config.apps.enabled);
         let (&req_asset_id, (_, _)) = manifest
             .iter()
-            .find(|(_, (n, _))| n == "main_menu/main_menu_banner")
-            .expect("main_menu/main_menu_banner must exist in manifest");
+            .find(|(_, (n, _))| n == "assets/main_menu_banner" || n == "main_menu_banner")
+            .expect("main_menu_banner must exist in manifest");
 
         let server_transport = Arc::new(MockSocketTransport::new_server(
             "127.0.0.1:9098".to_string(),
@@ -3384,7 +3755,7 @@ max_asset_broadcast_duty_cycle = 0.15
 
         assert!(
             expected_total_chunks > 0,
-            "Did not receive any broadcast asset chunks for 0x0103"
+            "Did not receive any broadcast asset chunks for asset"
         );
         assert_eq!(
             chunks_received.len(),
@@ -3403,7 +3774,7 @@ max_asset_broadcast_duty_cycle = 0.15
             "CRC32 mismatch on assembled broadcast asset"
         );
 
-        let banner_path = find_workspace_path("apps/main_menu/assets/main_menu_banner.ans");
+        let banner_path = find_workspace_path("assets/main_menu_banner.ans");
         let expected_bytes = std::fs::read(banner_path).unwrap();
         assert_eq!(assembled_bytes, expected_bytes, "Broadcast asset content does not match original file");
 
@@ -3513,31 +3884,20 @@ max_asset_broadcast_duty_cycle = 0.15
     }
 
     #[test]
-    fn test_minidungeon_xp_and_stat_mechanics() {
+    fn test_core_apps_syntax() {
+        let core_apps = ["messages", "profile", "admin"];
         let lua = mlua::Lua::new();
-        let code = std::fs::read_to_string(find_workspace_path("apps/minidungeon/main.lua"))
-            .unwrap();
-
-        // Verify exponential XP progression
-        let xp_checks: (i64, i64, i64, i64) = lua
-            .load(
-                r#"
-                local function xp_needed(level)
-                    return 50 * (math.floor(2 ^ level) - 1)
-                end
-                return xp_needed(1), xp_needed(2), xp_needed(3), xp_needed(4)
-                "#,
-            )
-            .eval()
-            .unwrap();
-
-        assert_eq!(xp_checks.0, 50, "Level 1->2 should need 50 XP");
-        assert_eq!(xp_checks.1, 150, "Level 2->3 should need 150 total XP");
-        assert_eq!(xp_checks.2, 350, "Level 3->4 should need 350 total XP");
-        assert_eq!(xp_checks.3, 750, "Level 4->5 should need 750 total XP");
-
-        // Verify minidungeon script compiles without syntax errors
-        assert!(!code.is_empty());
+        for app in &core_apps {
+            let path = find_workspace_path(&format!("apps/{}/main.lua", app));
+            let code = std::fs::read_to_string(&path)
+                .unwrap_or_else(|_| panic!("Failed to read apps/{}/main.lua", app));
+            let chunk = lua.load(&code);
+            assert!(
+                chunk.into_function().is_ok(),
+                "apps/{}/main.lua should compile as valid Lua",
+                app
+            );
+        }
     }
 
     #[test]
@@ -3631,17 +3991,8 @@ max_asset_broadcast_duty_cycle = 0.15
         assert_eq!(s2_from_all_name, "Alpha Outpost");
     }
 
-    #[test]
-    fn test_marketplace_app_syntax() {
-        let path = find_workspace_path("apps/marketplace/main.lua");
-        let content = std::fs::read_to_string(path).unwrap();
-        let lua = mlua::Lua::new();
-        let chunk = lua.load(&content);
-        assert!(chunk.into_function().is_ok(), "marketplace/main.lua should compile as valid Lua");
-    }
-
     #[tokio::test]
-    async fn test_marketplace_session_navigation() {
+    async fn test_messages_session_navigation() {
         let _ = env_logger::builder().is_test(true).try_init();
         let config = default_config();
         let server_transport = Arc::new(MockSocketTransport::new_server("127.0.0.1:9094".to_string(), 0.0, 0, 200));
@@ -3686,8 +4037,8 @@ max_asset_broadcast_duty_cycle = 0.15
             }
         }
 
-        // 2. Register nickname "TraderBob"
-        let register_json = r#"{"nickname":"TraderBob","submit":"register"}"#;
+        // 2. Register nickname "MsgBob"
+        let register_json = r#"{"nickname":"MsgBob","submit":"register"}"#;
         let register_msg = MeshBbsMessage::new(0x02, 0x02, 0x00, register_json.as_bytes().to_vec());
         let register_payloads = register_msg.to_fragments(200).unwrap();
         let packet = RadioPacket {
@@ -3714,28 +4065,28 @@ max_asset_broadcast_duty_cycle = 0.15
             }
         }
 
-        // 3. Submit "marketplace" action from main menu (Form ID 10)
-        let market_select_json = r#"{"submit":"marketplace"}"#;
-        let market_msg = MeshBbsMessage::new(0x02, 0x02, 0x00, market_select_json.as_bytes().to_vec());
-        let market_payloads = market_msg.to_fragments(200).unwrap();
+        // 3. Submit "messages" action from main menu
+        let msg_select_json = r#"{"submit":"messages"}"#;
+        let msg_msg = MeshBbsMessage::new(0x02, 0x02, 0x00, msg_select_json.as_bytes().to_vec());
+        let msg_payloads = msg_msg.to_fragments(200).unwrap();
         let packet = RadioPacket {
             is_broadcast: false,
             src_node: client_key,
             dst_node: [0; 32],
-            payload: market_payloads[0].clone(),
+            payload: msg_payloads[0].clone(),
             signal_rssi: -50,
             signal_snr: 10,
         };
         client_transport.send_packet(packet).await.unwrap();
 
-        // 4. Receive Marketplace screen
-        let mut market_screen = None;
+        // 4. Receive Messages screen
+        let mut msg_screen = None;
         let start_time = tokio::time::Instant::now();
         while start_time.elapsed() < tokio::time::Duration::from_millis(1500) {
             match tokio::time::timeout(tokio::time::Duration::from_millis(100), client_transport.receive_packet()).await {
                 Ok(Ok(packet)) => {
                     if let Some(msg) = client_reassembler.process_packet([0; 32], &packet.payload).unwrap() {
-                        market_screen = Some(msg);
+                        msg_screen = Some(msg);
                         break;
                     }
                 }
@@ -3743,35 +4094,59 @@ max_asset_broadcast_duty_cycle = 0.15
             }
         }
 
-        let resp = market_screen.expect("Should receive Marketplace screen");
+        let resp = msg_screen.expect("Should receive Messages screen");
         let uncompressed_payload = decode_test_msg(&mut client_cache, &resp, &static_dict);
         let screen_text = String::from_utf8_lossy(&uncompressed_payload);
-        assert!(screen_text.contains("MARKETPLACE"), "Should contain MARKETPLACE header, got: {}", screen_text);
+        assert!(screen_text.contains("MESSAGES") || screen_text.contains("Messages") || screen_text.contains("General"), "Should contain MESSAGES header, got: {}", screen_text);
+
+        // 5. Navigate back to Main Menu from Messages
+        let back_menu_json = r#"{"submit":"main_menu"}"#;
+        let back_msg = MeshBbsMessage::new(0x02, 0x02, 0x00, back_menu_json.as_bytes().to_vec());
+        let back_payloads = back_msg.to_fragments(200).unwrap();
+        let packet = RadioPacket {
+            is_broadcast: false,
+            src_node: client_key,
+            dst_node: [0; 32],
+            payload: back_payloads[0].clone(),
+            signal_rssi: -50,
+            signal_snr: 10,
+        };
+        client_transport.send_packet(packet).await.unwrap();
+
+        // Receive Main Menu screen again
+        let mut main_return_screen = None;
+        let start_time = tokio::time::Instant::now();
+        while start_time.elapsed() < tokio::time::Duration::from_millis(1500) {
+            match tokio::time::timeout(tokio::time::Duration::from_millis(100), client_transport.receive_packet()).await {
+                Ok(Ok(packet)) => {
+                    if let Some(msg) = client_reassembler.process_packet([0; 32], &packet.payload).unwrap() {
+                        main_return_screen = Some(msg);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let main_resp = main_return_screen.expect("Should receive Main Menu screen when navigating back");
+        let main_payload = decode_test_msg(&mut client_cache, &main_resp, &static_dict);
+        let main_text = String::from_utf8_lossy(&main_payload);
+        assert!(main_text.contains("Select options") || main_text.contains("messages"), "Should contain main menu options, got: {}", main_text);
 
         let _ = server_handle.await;
     }
 
-    #[test]
-    fn test_weather_app_syntax() {
-        let path = find_workspace_path("apps/weather/main.lua");
-        let content = std::fs::read_to_string(path).unwrap();
-        let lua = mlua::Lua::new();
-        let chunk = lua.load(&content);
-        assert!(chunk.into_function().is_ok(), "weather/main.lua should compile as valid Lua");
-    }
-
     #[tokio::test]
-    async fn test_weather_session_navigation() {
+    async fn test_profile_session_navigation() {
         let _ = env_logger::builder().is_test(true).try_init();
         let config = default_config();
-        let server_transport = Arc::new(MockSocketTransport::new_server("127.0.0.1:9095".to_string(), 0.0, 0, 200));
+        let server_transport = Arc::new(MockSocketTransport::new_server("127.0.0.1:9118".to_string(), 0.0, 0, 200));
 
         let server_handle = tokio::spawn(async move {
             start_server(config, server_transport, Some(4)).await
         });
 
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-        let client_transport = MockSocketTransport::new_client("127.0.0.1:9095".to_string(), 0.0, 0, 200);
+        let client_transport = MockSocketTransport::new_client("127.0.0.1:9118".to_string(), 0.0, 0, 200);
         let client_key = [11u8; 32];
         let mut client_cache = bifrost_transport::SessionPayloadCache::new(100);
         let static_dict = bifrost_compression::CompressionDictionary::standard_static();
@@ -3806,8 +4181,8 @@ max_asset_broadcast_duty_cycle = 0.15
             }
         }
 
-        // 2. Register nickname "WeatherBob"
-        let register_json = r#"{"nickname":"WeatherBob","submit":"register"}"#;
+        // 2. Register nickname "ProfBob"
+        let register_json = r#"{"nickname":"ProfBob","submit":"register"}"#;
         let register_msg = MeshBbsMessage::new(0x02, 0x02, 0x00, register_json.as_bytes().to_vec());
         let register_payloads = register_msg.to_fragments(200).unwrap();
         let packet = RadioPacket {
@@ -3834,28 +4209,28 @@ max_asset_broadcast_duty_cycle = 0.15
             }
         }
 
-        // 3. Submit "weather" action from main menu (Form ID 10)
-        let weather_select_json = r#"{"submit":"weather"}"#;
-        let weather_msg = MeshBbsMessage::new(0x02, 0x02, 0x00, weather_select_json.as_bytes().to_vec());
-        let weather_payloads = weather_msg.to_fragments(200).unwrap();
+        // 3. Submit "profile" action from main menu
+        let profile_select_json = r#"{"submit":"profile"}"#;
+        let profile_msg = MeshBbsMessage::new(0x02, 0x02, 0x00, profile_select_json.as_bytes().to_vec());
+        let profile_payloads = profile_msg.to_fragments(200).unwrap();
         let packet = RadioPacket {
             is_broadcast: false,
             src_node: client_key,
             dst_node: [0; 32],
-            payload: weather_payloads[0].clone(),
+            payload: profile_payloads[0].clone(),
             signal_rssi: -50,
             signal_snr: 10,
         };
         client_transport.send_packet(packet).await.unwrap();
 
-        // 4. Receive Weather screen
-        let mut weather_screen = None;
+        // 4. Receive Profile screen
+        let mut prof_screen = None;
         let start_time = tokio::time::Instant::now();
         while start_time.elapsed() < tokio::time::Duration::from_millis(1500) {
             match tokio::time::timeout(tokio::time::Duration::from_millis(100), client_transport.receive_packet()).await {
                 Ok(Ok(packet)) => {
                     if let Some(msg) = client_reassembler.process_packet([0; 32], &packet.payload).unwrap() {
-                        weather_screen = Some(msg);
+                        prof_screen = Some(msg);
                         break;
                     }
                 }
@@ -3863,164 +4238,43 @@ max_asset_broadcast_duty_cycle = 0.15
             }
         }
 
-        let resp = weather_screen.expect("Should receive Weather screen");
+        let resp = prof_screen.expect("Should receive Profile screen");
         let uncompressed_payload = decode_test_msg(&mut client_cache, &resp, &static_dict);
         let screen_text = String::from_utf8_lossy(&uncompressed_payload);
-        assert!(screen_text.contains("WEATHER FORECAST"), "Should contain WEATHER FORECAST header, got: {}", screen_text);
+        assert!(screen_text.contains("PROFILE") || screen_text.contains("Profile") || screen_text.contains("ProfBob"), "Should contain PROFILE header, got: {}", screen_text);
 
-        let _ = server_handle.await;
-    }
-
-    #[test]
-    fn test_voidtrader_app_syntax() {
-        let path = find_workspace_path("apps/voidtrader/main.lua");
-        let content = std::fs::read_to_string(path).unwrap();
-        let lua = mlua::Lua::new();
-        let chunk = lua.load(&content);
-        assert!(chunk.into_function().is_ok(), "voidtrader/main.lua should compile as valid Lua");
-    }
-
-    #[tokio::test]
-    async fn test_voidtrader_session_navigation() {
-        let _ = env_logger::builder().is_test(true).try_init();
-        let config = default_config();
-        let server_transport = Arc::new(MockSocketTransport::new_server("127.0.0.1:9102".to_string(), 0.0, 0, 200));
-
-        let server_handle = tokio::spawn(async move {
-            start_server(config, server_transport, Some(4)).await
-        });
-
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-        let client_transport = MockSocketTransport::new_client("127.0.0.1:9102".to_string(), 0.0, 0, 200);
-        let client_key = [14u8; 32];
-        let mut client_cache = bifrost_transport::SessionPayloadCache::new(100);
-        let static_dict = bifrost_compression::CompressionDictionary::standard_static();
-
-        // Handshake
-        let handshake_msg = MeshBbsMessage::new(0x03, 0x01, 0x00, Vec::new());
-        let handshake_payloads = handshake_msg.to_fragments(200).unwrap();
-
+        // 5. Navigate back to Main Menu from Profile by canceling
+        let cancel_json = r#"{"submit":"cancel"}"#;
+        let cancel_msg = MeshBbsMessage::new(0x02, 0x02, 0x00, cancel_json.as_bytes().to_vec());
+        let cancel_payloads = cancel_msg.to_fragments(200).unwrap();
         let packet = RadioPacket {
             is_broadcast: false,
             src_node: client_key,
             dst_node: [0; 32],
-            payload: handshake_payloads[0].clone(),
+            payload: cancel_payloads[0].clone(),
             signal_rssi: -50,
             signal_snr: 10,
         };
         client_transport.send_packet(packet).await.unwrap();
 
-        let mut client_reassembler = MessageReassembler::new();
-
-        // 1. Receive register screen
+        // Receive Main Menu screen again
+        let mut main_return_screen = None;
         let start_time = tokio::time::Instant::now();
         while start_time.elapsed() < tokio::time::Duration::from_millis(1500) {
             match tokio::time::timeout(tokio::time::Duration::from_millis(100), client_transport.receive_packet()).await {
                 Ok(Ok(packet)) => {
                     if let Some(msg) = client_reassembler.process_packet([0; 32], &packet.payload).unwrap() {
-                        let _ = decode_test_msg(&mut client_cache, &msg, &static_dict);
+                        main_return_screen = Some(msg);
                         break;
                     }
                 }
                 _ => {}
             }
         }
-
-        // 2. Register nickname "TraderBob"
-        let register_json = r#"{"nickname":"TraderBob","submit":"register"}"#;
-        let register_msg = MeshBbsMessage::new(0x02, 0x02, 0x00, register_json.as_bytes().to_vec());
-        let register_payloads = register_msg.to_fragments(200).unwrap();
-        let packet = RadioPacket {
-            is_broadcast: false,
-            src_node: client_key,
-            dst_node: [0; 32],
-            payload: register_payloads[0].clone(),
-            signal_rssi: -50,
-            signal_snr: 10,
-        };
-        client_transport.send_packet(packet).await.unwrap();
-
-        // Receive Main Menu screen
-        let start_time = tokio::time::Instant::now();
-        while start_time.elapsed() < tokio::time::Duration::from_millis(1500) {
-            match tokio::time::timeout(tokio::time::Duration::from_millis(100), client_transport.receive_packet()).await {
-                Ok(Ok(packet)) => {
-                    if let Some(msg) = client_reassembler.process_packet([0; 32], &packet.payload).unwrap() {
-                        let _ = decode_test_msg(&mut client_cache, &msg, &static_dict);
-                        break;
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        // 3. Submit "voidtrader" action from main menu (Form ID 10)
-        let voidtrader_select_json = r#"{"submit":"voidtrader"}"#;
-        let voidtrader_msg = MeshBbsMessage::new(0x02, 0x02, 0x00, voidtrader_select_json.as_bytes().to_vec());
-        let voidtrader_payloads = voidtrader_msg.to_fragments(200).unwrap();
-        let packet = RadioPacket {
-            is_broadcast: false,
-            src_node: client_key,
-            dst_node: [0; 32],
-            payload: voidtrader_payloads[0].clone(),
-            signal_rssi: -50,
-            signal_snr: 10,
-        };
-        client_transport.send_packet(packet).await.unwrap();
-
-        // 4. Receive Void Trader Sector screen
-        let mut vt_screen = None;
-        let start_time = tokio::time::Instant::now();
-        while start_time.elapsed() < tokio::time::Duration::from_millis(1500) {
-            match tokio::time::timeout(tokio::time::Duration::from_millis(100), client_transport.receive_packet()).await {
-                Ok(Ok(packet)) => {
-                    if let Some(msg) = client_reassembler.process_packet([0; 32], &packet.payload).unwrap() {
-                        vt_screen = Some(msg);
-                        break;
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        let resp = vt_screen.expect("Should receive Void Trader entry screen");
-        let uncompressed_payload = decode_test_msg(&mut client_cache, &resp, &static_dict);
-        let screen_text = String::from_utf8_lossy(&uncompressed_payload);
-        assert!(screen_text.contains("INTERSTELLAR PILOT DISPATCH") || screen_text.contains("Void Trader"), "Should contain Void Trader entry view, got: {}", screen_text);
-
-        // 5. Submit "resume" action from entry menu
-        let resume_json = r#"{"submit":"resume"}"#;
-        let resume_msg = MeshBbsMessage::new(0x02, 0x02, 0x00, resume_json.as_bytes().to_vec());
-        let resume_payloads = resume_msg.to_fragments(200).unwrap();
-        let packet = RadioPacket {
-            is_broadcast: false,
-            src_node: client_key,
-            dst_node: [0; 32],
-            payload: resume_payloads[0].clone(),
-            signal_rssi: -50,
-            signal_snr: 10,
-        };
-        client_transport.send_packet(packet).await.unwrap();
-
-        // 6. Receive Sector view screen
-        let mut sector_screen = None;
-        let start_time = tokio::time::Instant::now();
-        while start_time.elapsed() < tokio::time::Duration::from_millis(1500) {
-            match tokio::time::timeout(tokio::time::Duration::from_millis(100), client_transport.receive_packet()).await {
-                Ok(Ok(packet)) => {
-                    if let Some(msg) = client_reassembler.process_packet([0; 32], &packet.payload).unwrap() {
-                        sector_screen = Some(msg);
-                        break;
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        let resp_sector = sector_screen.expect("Should receive Sector screen");
-        let sector_payload = decode_test_msg(&mut client_cache, &resp_sector, &static_dict);
-        let sector_text = String::from_utf8_lossy(&sector_payload);
-        assert!(sector_text.contains("Alpha Stardock") || sector_text.contains("Available Warps"), "Should contain sector view, got: {}", sector_text);
+        let main_resp = main_return_screen.expect("Should receive Main Menu screen when canceling profile");
+        let main_payload = decode_test_msg(&mut client_cache, &main_resp, &static_dict);
+        let main_text = String::from_utf8_lossy(&main_payload);
+        assert!(main_text.contains("Select options") || main_text.contains("messages"), "Should contain main menu options, got: {}", main_text);
 
         let _ = server_handle.await;
     }
@@ -4131,22 +4385,16 @@ max_asset_broadcast_duty_cycle = 0.15
     #[test]
     fn test_all_app_manifests_valid() {
         let enabled = vec![
-            "main_menu".to_string(),
             "messages".to_string(),
             "profile".to_string(),
-            "minidungeon".to_string(),
             "admin".to_string(),
-            "marketplace".to_string(),
-            "weather".to_string(),
-            "voidtrader".to_string(),
         ];
         let manifest_map = load_app_manifests(&enabled);
-        assert!(manifest_map.contains_key(&0x0101)); // main menu banner
-        assert!(manifest_map.contains_key(&0x0102)); // main menu border
-        assert!(manifest_map.contains_key(&0x0103)); // dungeon banner
-        assert!(manifest_map.contains_key(&0x0104)); // voidtrader banner
+        assert!(manifest_map.contains_key(&0x0101)); // global assets/main_menu_banner
+        assert!(manifest_map.contains_key(&0x0102)); // global assets/main_menu_border
+        assert!(manifest_map.contains_key(&0x0103)); // global assets/main_nav
 
-        // Verify each main.lua exists
+        // Verify each enabled app's main.lua exists
         for app_id in &enabled {
             let entry = format!("apps/{}/main.lua", app_id);
             let path = find_workspace_path(&entry);

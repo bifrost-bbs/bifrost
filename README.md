@@ -21,8 +21,11 @@ Bifrost is a next-generation Bulletin Board System (MeshBBS) and compression run
     *   Nearby listening nodes passively cache them locally partitioned by BBS Node ID (`.client_cache/<node_id>/`), enabling zero-airtime rendering.
 *   **⏱️ 10-Minute Seamless Session Resumption:**
     *   Preserves active session state and variables across transient disconnections within a 10-minute window, invoking `on_resume()` hooks.
+*   **🏪 Decentralized App Catalog & Heimdall App Store:**
+    *   Standalone apps live in independent GitHub repositories under the **`bifrost-bbs`** organization (`app-minidungeon`, `app-marketplace`, `app-weather`, `app-voidtrader`).
+    *   Central verified catalog registry (`bifrost-bbs/app-catalog`) enables one-click installation, version updates, enabling/disabling, and removal via the Heimdall App Store.
 *   **🛠️ Sandboxed Lua Application Engine:**
-    *   Applications (`main_menu`, `messages`, `marketplace`, `minidungeon`, `profile`, `admin`) run within sandboxed `mlua` instances with strict memory (512 KB) and instruction limits.
+    *   Core apps (`messages`, `profile`, `admin`) and modular door games run within sandboxed `mlua` (Lua 5.4) instances with strict memory (512 KB) and instruction limits.
 *   **🛡️ Regulatory QoS & Airtime Regulator:**
     *   Enforces rolling duty-cycle caps (1.0% by default) via token-bucket limiting and a 5-tier Priority Queue.
 *   **🤖 Automated Crawler & Tuning Benchmark Suite (`bifrost-tuning`):**
@@ -40,15 +43,14 @@ The project is managed as a Rust Cargo Workspace:
 ├── README.md                        # Project documentation
 ├── AGENTS.md                        # AI coding assistant guidelines
 ├── docs/
+│   ├── Lua_App_Development_Guide.md     # Lua application developer tutorial & API reference
 │   ├── MeshBBS_MeshANSI_Requirements_Specification.md  # Protocol & architecture spec
 │   └── PRD.md                       # Product Requirements Document
-├── apps/                            # Encapsulated Lua BBS Applications
-│   ├── main_menu/                   # Default navigation entry point
+├── apps/                            # Core Built-in BBS Applications
 │   ├── messages/                    # Discussion forums & boards
-│   ├── marketplace/                 # Decentralized classifieds & auctions
-│   ├── minidungeon/                 # Turn-based door game
-│   ├── profile/                     # Profile editor
+│   ├── profile/                     # User profile editor
 │   └── admin/                       # Sysop admin console
+├── assets/                          # Global shared system artwork & menus
 ├── config/                          # Default configurations & pre-trained dictionaries
 │   └── bbs_dict.bin                 # Trained BBS domain dictionary (Asset 0x00DF)
 └── crates/
@@ -57,7 +59,8 @@ The project is managed as a Rust Cargo Workspace:
     ├── bifrost-transport/          # Packet framing, session deduplication cache, stats
     ├── bifrost-bbs/                # Main host server daemon (kernel, Lua runner, packet capture)
     ├── bifrost-client/             # Interactive terminal emulator & automated crawler
-    └── bifrost-tuning/             # Parameter grid search & dictionary training CLI
+    ├── bifrost-tuning/             # Parameter grid search & dictionary training CLI
+    └── heimdall/                   # Master supervisor, NOC web dashboard & App Store
 ```
 ---
 
@@ -75,6 +78,18 @@ To compile and run Bifrost:
 ```bash
 cargo build --release
 ```
+
+### ⚙️ Initial Configuration Setup
+
+Bifrost ships with an example configuration template. Copy it to create your local `config.toml` (which is gitignored so local configurations and installed catalog apps remain untouched):
+
+```bash
+# Copy example configuration template
+cp config.example.toml config.toml
+```
+
+> [!NOTE]
+> `config.toml` is gitignored to keep node operator credentials, form colors, and local settings private. The core applications (`apps/admin`, `apps/messages`, `apps/profile`) are committed to the repository, while external apps downloaded via the Heimdall App Store into `apps/<app_id>/` are automatically gitignored.
 
 ### 🧪 Running Tests & Code Coverage
 
@@ -121,6 +136,7 @@ cargo run --bin bifrost-tuning -- train --dir captured_packets/raw --out config/
 
 ## 📖 Documentation
 
+*   **[Lua Application Development Guide](docs/Lua_App_Development_Guide.md):** Complete guide, tutorials, and host API reference (`term`, `session`, `db`, `log`, `http`) for developing MeshBBS apps.
 *   **[Product Requirements Document (PRD)](docs/PRD.md):** Vision, functional requirements, and architecture diagrams.
 *   **[Protocol & Architecture Specification](docs/MeshBBS_MeshANSI_Requirements_Specification.md):** Wire format, opcode tables, deduplication schemas, and compression pipelines.
 *   **[Developer & Agent Guidelines](AGENTS.md):** Architecture rules and development SOPs.

@@ -1,6 +1,0 @@
-# form_id=10
-# align=bottom_center
-# tag,id,label,col,row,key
-next,next,NextPage,2,19,N
-prev,prev,PrevPage,18,19,P
-return,return,Return,34,19,R

@@ -1,6 +1,0 @@
-# form_id=20
-# tag,id,label,col,row,key
-attack,attack,Attack,2,14,A
-cast,cast,CastSpell,12,14,C
-potion,potion,DrinkPotion,24,14,P
-flee,flee,Flee,38,14,F

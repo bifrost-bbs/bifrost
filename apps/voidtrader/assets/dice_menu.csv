@@ -1,7 +1,0 @@
-# form_id=10
-# align=bottom_center
-# tag,id,label,col,row,key
-bet_low,bet_50,Bet50cr,2,9,L
-bet_mid,bet_200,Bet200cr,2,9,M
-bet_high,bet_500,Bet500cr,2,9,H
-return,return,LeaveTable,2,9,R

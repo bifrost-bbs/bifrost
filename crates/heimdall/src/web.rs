@@ -110,6 +110,27 @@ pub struct ResetPasswordBody {
     pub new_password: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct CatalogQuery {
+    pub refresh: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct InstallCatalogAppBody {
+    pub app_id: String,
+    pub tag: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UninstallCatalogAppBody {
+    pub app_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ToggleAppBody {
+    pub enabled: bool,
+}
+
 #[derive(Debug, Serialize)]
 pub struct AuthStatusResponse {
     pub setup_required: bool,
@@ -160,12 +181,16 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/logs/clear", post(clear_logs_handler))
         // Config
         .route("/api/config", get(get_config_handler).post(save_config_handler))
-        // Apps
+        // Apps & Catalog
         .route("/api/apps", get(list_apps_handler))
         .route("/api/apps/:app_id", get(get_app_detail_handler))
+        .route("/api/apps/:app_id/toggle", post(toggle_app_handler))
         .route("/api/apps/:app_id/files", get(list_app_files_handler))
         .route("/api/apps/:app_id/file_content", get(get_app_file_content_handler).post(save_app_file_content_handler))
         .route("/api/apps/:app_id/files/:filename", post(save_app_file_handler))
+        .route("/api/catalog", get(get_catalog_handler))
+        .route("/api/catalog/install", post(install_catalog_app_handler))
+        .route("/api/catalog/uninstall", post(uninstall_catalog_app_handler))
         // Database
         .route("/api/database/summary", get(get_database_summary_handler))
         .route("/api/database/tables", get(list_database_tables_handler))
@@ -688,6 +713,112 @@ async fn save_app_file_handler(
     Ok(Json(serde_json::json!({ "status": "saved" })))
 }
 
+async fn toggle_app_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath(app_id): AxumPath<String>,
+    Json(body): Json<ToggleAppBody>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    require_perm(&state, &headers, PERM_ADMIN)?;
+
+    let mut cfg = state.config_mgr.get_config();
+    if body.enabled {
+        if !cfg.apps.enabled.iter().any(|e| e == &app_id) {
+            cfg.apps.enabled.push(app_id.clone());
+        }
+    } else {
+        cfg.apps.enabled.retain(|e| e != &app_id);
+    }
+    let all_enabled = cfg.apps.enabled.clone();
+    state
+        .config_mgr
+        .save_config(cfg)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(serde_json::json!({
+        "app_id": app_id,
+        "enabled": body.enabled,
+        "all_enabled": all_enabled,
+    })))
+}
+
+async fn get_catalog_handler(
+    State(state): State<AppState>,
+    Query(q): Query<CatalogQuery>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let force_refresh = q.refresh.unwrap_or(false);
+    let catalog = state
+        .app_mgr
+        .fetch_catalog(None, force_refresh)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let cfg = state.config_mgr.get_config();
+    let statuses = state
+        .app_mgr
+        .get_catalog_status(&catalog, &cfg.apps.enabled, &cfg.apps.main_app);
+    Ok(Json(serde_json::json!({
+        "catalog_version": catalog.catalog_version,
+        "updated_at": catalog.updated_at,
+        "apps": statuses,
+    })))
+}
+
+async fn install_catalog_app_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<InstallCatalogAppBody>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    require_perm(&state, &headers, PERM_ADMIN)?;
+
+    let catalog = state
+        .app_mgr
+        .fetch_catalog(None, false)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    state
+        .app_mgr
+        .install_catalog_app(&body.app_id, body.tag.as_deref(), &catalog)
+        .await
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+
+    // Automatically enable in config.toml if not already enabled
+    let mut cfg = state.config_mgr.get_config();
+    if !cfg.apps.enabled.iter().any(|e| e == &body.app_id) {
+        cfg.apps.enabled.push(body.app_id.clone());
+        let _ = state.config_mgr.save_config(cfg);
+    }
+
+    Ok(Json(serde_json::json!({
+        "status": "installed",
+        "app_id": body.app_id,
+        "tag": body.tag,
+    })))
+}
+
+async fn uninstall_catalog_app_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<UninstallCatalogAppBody>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    require_perm(&state, &headers, PERM_ADMIN)?;
+
+    state
+        .app_mgr
+        .uninstall_app(&body.app_id)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+
+    // Disable in config.toml
+    let mut cfg = state.config_mgr.get_config();
+    cfg.apps.enabled.retain(|e| e != &body.app_id);
+    let _ = state.config_mgr.save_config(cfg);
+
+    Ok(Json(serde_json::json!({
+        "status": "uninstalled",
+        "app_id": body.app_id,
+    })))
+}
+
 async fn get_telemetry_summary_handler(State(state): State<AppState>) -> impl IntoResponse {
     let cap_summary = state.stats_mgr.get_capture_summary();
     let cfg = state.config_mgr.get_config();
@@ -998,6 +1129,14 @@ mod tests {
             .unwrap();
         let resp_create_u = app.clone().oneshot(req_create_u).await.unwrap();
         assert_eq!(resp_create_u.status(), StatusCode::OK);
+
+        // Test GET /api/catalog
+        let req_catalog = Request::builder().uri("/api/catalog").body(Body::empty()).unwrap();
+        let resp_catalog = app.clone().oneshot(req_catalog).await.unwrap();
+        assert_eq!(resp_catalog.status(), StatusCode::OK);
+        let cat_bytes = axum::body::to_bytes(resp_catalog.into_body(), usize::MAX).await.unwrap();
+        let cat_val: serde_json::Value = serde_json::from_slice(&cat_bytes).unwrap();
+        assert!(cat_val["apps"].as_array().unwrap().len() >= 4);
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }

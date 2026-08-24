@@ -205,7 +205,7 @@ Client->>Client: Verify Server Signature
 Client->>Server: Client DH PubKey (encrypted)
 Server->>Server: Derives Ephemeral Symmetric Session Key
 Client->>Client: Derives Ephemeral Symmetric Session Key
-Server->>Client: Establish Encrypted Channel -> Enter configured main_app (apps/main_menu/main.lua)
+Server->>Client: Establish Encrypted Channel -> Enter configured main_app (e.g. dynamic main menu)
 ```
 
 ### 5.3 Passive Multicast Caching Flow
@@ -237,6 +237,7 @@ Client B->>Client B: Reads 0x015A from SPI Flash (Cache Hit!) -> Renders instant
 * **Multihop Asset Broadcasts:** How do we optimize the trickle broadcast across multiple repeater hops without flooding the entire mesh? Will need a hop-limiting mechanism or geographic bounding.
 * **Differential Screen Updates on Dynamic Door Games:** Can we standardise a Lua coordinate diffing library to automate screen deltas, or should the developer manually write delta redraw logic?
 * **C-based Client Implementation:** Need to draft a lightweight C-library for Heatshrink decompression and MeshANSI drawing to make client development on T-Deck / ESP32 simple.
+* **Decentralized App Store & Catalog:** Official and community applications are hosted in standalone Git repositories (`bifrost-bbs/app-*`), indexed in `bifrost-bbs/app-catalog`, and managed through the Heimdall supervisor.
 
 ---
 
@@ -246,4 +247,4 @@ Client B->>Client B: Reads 0x015A from SPI Flash (Cache Hit!) -> Renders instant
 2. **Mock Test Verification:** Can successfully run a simulated BBS session over the Local TCP harness with 10% simulated packet loss and verify that the session handles packet drops correctly.
 3. **MeshANSI Validation:** An input ANSI screen translates to bytecode, compresses via Heatshrink, decompress on mock client, and accurately recreates the visual screen character-for-character.
 4. **Rate Limiting Guard:** Sending continuous rapid commands triggers the queue throttling and respects the 350ms inter-packet guard window.
-5. **Lua App Load:** The main menu, a message thread system, and the mini-combat dungeon execute correctly within their memory quotas.
+5. **Lua App Load & App Store:** Dynamic navigation menus, core message threads, user profile editing, and catalog-installed door games execute correctly within their memory quotas.

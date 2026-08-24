@@ -1,0 +1,6 @@
+# form_id=10
+# tag,id,label,col,row,key
+messages,messages,MessageBoards,2,10,M
+profile,profile,Profile,18,10,P
+admin,admin,AdminPanel,34,10,A
+logout,logout,Logout,2,12,L

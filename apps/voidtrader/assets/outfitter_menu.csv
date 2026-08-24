@@ -1,8 +1,0 @@
-# form_id=10
-# tag,id,label,col,row,key
-holds,buy_holds,CargoHolds,2,9,H
-nav,upgrade_nav,NavComputer,2,9,N
-fighters,buy_fighters,CombatFighters,2,9,F
-shields,buy_shields,DeflectorShields,2,9,S
-fuel,buy_fuel,FuelOre,2,9,O
-return,return,Return,2,9,R

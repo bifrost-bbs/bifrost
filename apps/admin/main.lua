@@ -54,12 +54,17 @@ function admin.on_start(session)
 
     session.await_input(40, function(submission)
         if type(submission) == "string" then
-            admin.on_start(session)
+            local s = submission:lower()
+            if s == "b" or s == "q" or s == "m" or s == "back" or s == "exit" or s == "quit" then
+                session.load_app("main_menu")
+            else
+                admin.on_start(session)
+            end
             return
         end
 
         local action = submission.submit
-        if action == "back" then
+        if action == "back" or action == "main_menu" or action == "exit" or action == "quit" then
             session.load_app("main_menu")
         elseif action == "toggle_admin" then
             local prefix = submission.target_id or ""
@@ -94,6 +99,10 @@ function admin.on_start(session)
             admin.on_start(session)
         end
     end)
+end
+
+function admin.on_resume(session)
+    admin.on_start(session)
 end
 
 return admin

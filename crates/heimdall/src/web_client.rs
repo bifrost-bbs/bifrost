@@ -931,16 +931,22 @@ pub fn get_asset_content_by_id(asset_id: u16) -> Option<(String, String)> {
     }
 
     // 2. Canonical dynamic asset registry matching BBS server allocation exactly
-    let enabled_apps = vec![
-        "main_menu".to_string(),
+    let mut enabled_apps = vec![
         "messages".to_string(),
         "profile".to_string(),
-        "minidungeon".to_string(),
         "admin".to_string(),
-        "marketplace".to_string(),
-        "weather".to_string(),
-        "voidtrader".to_string(),
     ];
+    let apps_dir = bifrost_bbs::find_workspace_path("apps");
+    if let Ok(entries) = std::fs::read_dir(&apps_dir) {
+        for entry in entries.flatten() {
+            if entry.path().is_dir() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if !name.starts_with('.') && !enabled_apps.contains(&name) {
+                    enabled_apps.push(name);
+                }
+            }
+        }
+    }
     let manifest_map = bifrost_bbs::load_app_manifests(&enabled_apps);
     if let Some((name, rel_path)) = manifest_map.get(&asset_id) {
         let candidates = [
@@ -1362,18 +1368,11 @@ mod tests {
         assert!(content1.contains("Bifrost") || content1.contains("___"), "Should contain Bifrost banner art");
         assert!(desc1.contains("main_menu_banner.ans"));
 
-        // With new template and menu assets registered, find dungeon and voidtrader assets
-        let dungeon_banner = get_asset_content_by_id(0x0104);
-        assert!(dungeon_banner.is_some(), "Dungeon banner 0x0104 should resolve");
-        let (content2, desc2) = dungeon_banner.unwrap();
-        assert!(desc2.contains("dungeon_banner.ans"));
-        assert_ne!(content1, content2, "Dungeon banner must be distinct from main menu banner");
-
-        let vt_banner = get_asset_content_by_id(0x0108);
-        assert!(vt_banner.is_some(), "Void Trader banner 0x0108 should resolve");
-        let (content3, desc3) = vt_banner.unwrap();
-        assert!(desc3.contains("voidtrader_banner.ans"));
-        assert_ne!(content1, content3, "Void Trader banner must be distinct from main menu banner");
+        let main_border = get_asset_content_by_id(0x0102);
+        assert!(main_border.is_some(), "Main menu border 0x0102 should resolve");
+        let (content2, desc2) = main_border.unwrap();
+        assert!(desc2.contains("main_menu_border.ans"));
+        assert_ne!(content1, content2, "Main menu border must be distinct from banner");
     }
 
     #[test]
@@ -1394,17 +1393,17 @@ mod tests {
         }
         assert!(canvas.active_form.is_some(), "Form should be active");
         let form = canvas.active_form.as_ref().unwrap();
-        assert_eq!(form.fields.len(), 8, "Should have 8 buttons");
-        assert_eq!(form.fields[0].id, "read_boards");
+        assert_eq!(form.fields.len(), 4, "Should have 4 core buttons");
+        assert_eq!(form.fields[0].id, "messages");
         assert_eq!(form.fields[0].val, "MessageBoards");
 
-        // Test hotkey submission with 'v' for Void Trader
-        match canvas.process_key("v") {
+        // Test hotkey submission with 'm' for Messages
+        match canvas.process_key("m") {
             KeyAction::SendBytes(bytes) => {
                 let json_str = String::from_utf8(bytes).unwrap();
-                assert!(json_str.contains("\"submit\":\"voidtrader\""), "Should submit voidtrader on 'v' hotkey");
+                assert!(json_str.contains("\"submit\":\"messages\""), "Should submit messages on 'm' hotkey");
             }
-            _ => panic!("Expected SendBytes on 'v' hotkey"),
+            _ => panic!("Expected SendBytes on 'm' hotkey"),
         }
     }
 }

@@ -27,6 +27,7 @@ packet_capture/
 scratch/
 
 # Local configuration overrides
+config.toml
 config.local.toml
 database.db
 database.db-journal
@@ -39,5 +40,13 @@ database.db-journal
 # Client asset cache directory
 .client_cache/
 **/.client_cache/
+
+# Dynamically installed BBS apps from App Store (keep core built-ins)
+apps/*
+!apps/admin/
+!apps/messages/
+!apps/profile/
+!apps/README.md
+!apps/.gitkeep
 
 

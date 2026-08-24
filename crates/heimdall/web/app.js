@@ -56,6 +56,7 @@ class HeimdallApp {
     this.fetchOverview();
     this.fetchServices();
     this.fetchApps();
+    this.fetchCatalog();
     this.fetchConfig();
     this.fetchTelemetry();
     this.fetchCaptures();
@@ -187,6 +188,11 @@ class HeimdallApp {
 
     // Apps Refresh
     on('btn-refresh-apps', 'click', () => this.fetchApps());
+
+    // App Store Catalog Controls
+    on('btn-refresh-catalog', 'click', () => this.fetchCatalog(true));
+    on('store-category-filter', 'change', () => this.renderCatalog());
+    on('store-search-input', 'input', () => this.renderCatalog());
 
     // Database Controls
     on('btn-refresh-db', 'click', () => this.fetchDatabase());
@@ -576,6 +582,7 @@ class HeimdallApp {
       'tuning': 'heimdall.tuning',
       'database': 'heimdall.database',
       'users': 'heimdall.users',
+      'store': 'heimdall.apps',
     };
 
     document.querySelectorAll('.nav-tab').forEach(tabBtn => {
@@ -597,6 +604,7 @@ class HeimdallApp {
       'tuning': 'heimdall.tuning',
       'database': 'heimdall.database',
       'users': 'heimdall.users',
+      'store': 'heimdall.apps',
     };
 
     const reqPerm = permMap[tabId];
@@ -629,6 +637,8 @@ class HeimdallApp {
       this.fetchHistoricalLogs();
     } else if (tabId === 'users') {
       this.fetchUsers();
+    } else if (tabId === 'store') {
+      this.fetchCatalog();
     }
   }
 
@@ -838,6 +848,215 @@ class HeimdallApp {
     }
   }
 
+  // --- APP STORE & CATALOG METHODS ---
+
+  async fetchCatalog(forceRefresh = false) {
+    try {
+      const res = await this.apiFetch(`/api/catalog?refresh=${forceRefresh}`);
+      if (!res.ok) return;
+      const data = await res.json();
+      this.catalogData = data;
+      const upd = document.getElementById('store-updated-at');
+      if (upd && data.updated_at) {
+        upd.textContent = `Catalog v${data.catalog_version} (Updated ${new Date(data.updated_at).toLocaleDateString()})`;
+      }
+      this.renderCatalog();
+    } catch (e) {
+      console.warn('Fetch catalog error:', e);
+    }
+  }
+
+  renderCatalog() {
+    if (!this.catalogData || !this.catalogData.apps) return;
+    const grid = document.getElementById('store-grid');
+    if (!grid) return;
+    grid.innerHTML = '';
+
+    const catFilter = document.getElementById('store-category-filter')?.value || 'ALL';
+    const searchFilter = (document.getElementById('store-search-input')?.value || '').toLowerCase().trim();
+
+    const filtered = this.catalogData.apps.filter(app => {
+      if (catFilter !== 'ALL' && app.category !== catFilter) return false;
+      if (searchFilter) {
+        const text = `${app.name} ${app.id} ${app.description} ${app.author}`.toLowerCase();
+        if (!text.includes(searchFilter)) return false;
+      }
+      return true;
+    });
+
+    if (filtered.length === 0) {
+      grid.innerHTML = '<div style="grid-column: 1 / -1; padding: 30px; text-align: center; color: var(--text-muted);">No applications found matching your filter criteria.</div>';
+      return;
+    }
+
+    filtered.forEach(app => {
+      const card = document.createElement('div');
+      card.className = 'retro-panel';
+      card.style.padding = '14px';
+      card.style.display = 'flex';
+      card.style.flexDirection = 'column';
+      card.style.justifyContent = 'space-between';
+      card.style.position = 'relative';
+
+      const icon = app.icon || '📦';
+      let statusBadge = '';
+      if (app.is_builtin) {
+        statusBadge = '<span class="badge" style="background: #2a5a7a; color: #fff;">BUILT-IN</span>';
+      } else if (app.installed) {
+        if (app.update_available) {
+          statusBadge = `<span class="badge" style="background: #e6a100; color: #000;">UPDATE: v${app.installed_version} → v${app.latest_version}</span>`;
+        } else {
+          statusBadge = `<span class="badge" style="background: var(--success); color: #000;">INSTALLED v${app.installed_version}</span>`;
+        }
+      } else {
+        statusBadge = `<span class="badge" style="background: var(--border-color); color: var(--text-main);">v${app.latest_version}</span>`;
+      }
+
+      let actionsHtml = '';
+      if (app.is_builtin) {
+        actionsHtml = `<div style="display: flex; gap: 8px; align-items: center;"><span class="text-muted" style="font-size: 11px;">Core System App</span></div>`;
+      } else if (!app.installed) {
+        const releaseOptions = (app.releases || []).map(r => `<option value="${r.tag}">${r.tag} (${r.version})</option>`).join('');
+        actionsHtml = `
+          <div style="display: flex; gap: 6px; align-items: center; width: 100%;">
+            <select class="retro-select store-tag-select" id="tag-select-${app.id}" style="flex: 1; font-size: 11px; padding: 4px;">
+              ${releaseOptions || `<option value="${app.latest_tag}">${app.latest_tag}</option>`}
+            </select>
+            <button class="retro-btn btn-sm btn-success btn-install-app" data-app="${app.id}" style="padding: 4px 10px;">+ INSTALL</button>
+          </div>
+        `;
+      } else {
+        actionsHtml = `
+          <div style="display: flex; gap: 6px; align-items: center; width: 100%; flex-wrap: wrap;">
+            ${app.update_available ? `<button class="retro-btn btn-sm btn-warning btn-update-app" data-app="${app.id}" data-tag="${app.latest_tag}" style="flex: 1;">⬆ UPDATE (v${app.latest_version})</button>` : ''}
+            <button class="retro-btn btn-sm ${app.enabled ? 'btn-danger' : 'btn-success'} btn-toggle-app" data-app="${app.id}" data-enabled="${!app.enabled}" style="flex: 1;">
+              ${app.enabled ? 'DISABLE' : 'ENABLE'}
+            </button>
+            <button class="retro-btn btn-sm btn-danger btn-uninstall-app" data-app="${app.id}" title="Uninstall Application">🗑</button>
+          </div>
+        `;
+      }
+
+      card.innerHTML = `
+        <div>
+          <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 6px;">
+            <div style="display: flex; align-items: center; gap: 8px;">
+              <span style="font-size: 24px;">${icon}</span>
+              <div>
+                <strong style="font-size: 14px; color: var(--accent);">${app.name}</strong>
+                <div style="font-size: 11px; color: var(--text-muted);">${app.id} · by ${app.author}</div>
+              </div>
+            </div>
+            ${statusBadge}
+          </div>
+          <p style="font-size: 12px; margin: 8px 0; color: var(--text-main); line-height: 1.4;">${app.description}</p>
+          <div style="margin-bottom: 12px; font-size: 11px;">
+            <span class="badge" style="background: rgba(255,255,255,0.08);">${app.category.toUpperCase()}</span>
+            <a href="${app.repository}" target="_blank" rel="noopener noreferrer" style="color: var(--accent); margin-left: 8px; text-decoration: none;">GitHub ↗</a>
+          </div>
+        </div>
+        <div style="margin-top: auto; padding-top: 10px; border-top: 1px dashed var(--border-color);">
+          ${actionsHtml}
+        </div>
+      `;
+
+      grid.appendChild(card);
+    });
+
+    grid.querySelectorAll('.btn-install-app').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const appId = btn.dataset.app;
+        const tagSelect = document.getElementById(`tag-select-${appId}`);
+        const tag = tagSelect ? tagSelect.value : null;
+        await this.installCatalogApp(appId, tag);
+      });
+    });
+
+    grid.querySelectorAll('.btn-update-app').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const appId = btn.dataset.app;
+        const tag = btn.dataset.tag;
+        await this.installCatalogApp(appId, tag);
+      });
+    });
+
+    grid.querySelectorAll('.btn-toggle-app').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const appId = btn.dataset.app;
+        const enabled = btn.dataset.enabled === 'true';
+        await this.toggleApp(appId, enabled);
+      });
+    });
+
+    grid.querySelectorAll('.btn-uninstall-app').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const appId = btn.dataset.app;
+        if (confirm(`Are you sure you want to uninstall '${appId}'? This will delete the app files.`)) {
+          await this.uninstallCatalogApp(appId);
+        }
+      });
+    });
+  }
+
+  async installCatalogApp(appId, tag) {
+    try {
+      const res = await this.apiFetch('/api/catalog/install', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ app_id: appId, tag: tag || null }),
+      });
+      if (res.ok) {
+        alert(`Application '${appId}' successfully installed/updated and enabled!`);
+        await this.fetchCatalog(true);
+        await this.fetchApps();
+        await this.fetchConfig();
+      } else {
+        alert(`Failed to install '${appId}': ` + await res.text());
+      }
+    } catch (e) {
+      alert(`Error installing '${appId}': ` + e);
+    }
+  }
+
+  async uninstallCatalogApp(appId) {
+    try {
+      const res = await this.apiFetch('/api/catalog/uninstall', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ app_id: appId }),
+      });
+      if (res.ok) {
+        alert(`Application '${appId}' uninstalled.`);
+        await this.fetchCatalog(true);
+        await this.fetchApps();
+        await this.fetchConfig();
+      } else {
+        alert(`Failed to uninstall '${appId}': ` + await res.text());
+      }
+    } catch (e) {
+      alert(`Error uninstalling '${appId}': ` + e);
+    }
+  }
+
+  async toggleApp(appId, enabled) {
+    try {
+      const res = await this.apiFetch(`/api/apps/${appId}/toggle`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled }),
+      });
+      if (res.ok) {
+        await this.fetchCatalog(false);
+        await this.fetchApps();
+        await this.fetchConfig();
+      } else {
+        alert(`Failed to toggle '${appId}': ` + await res.text());
+      }
+    } catch (e) {
+      alert(`Error toggling '${appId}': ` + e);
+    }
+  }
+
   async fetchConfig() {
     try {
       const res = await this.apiFetch('/api/config');
@@ -881,7 +1100,9 @@ class HeimdallApp {
 
   async saveConfigForm() {
     const rawEditor = document.getElementById('raw-toml-editor');
-    
+    const currentEnabled = this.currentConfig?.apps?.enabled || ["messages", "profile", "admin"];
+    const enabledJson = JSON.stringify(currentEnabled, null, 4);
+
     // Construct valid TOML matching AppConfig
     const tomlStr = `# Bifrost MeshBBS Host Configuration
 
@@ -910,14 +1131,7 @@ admin_nodes = [
 
 [apps]
 main_app = "${document.getElementById('cfg-main-app').value}"
-enabled = [
-    "main_menu",
-    "messages",
-    "profile",
-    "minidungeon",
-    "admin",
-    "marketplace",
-]
+enabled = ${enabledJson}
 
 [packet_capture]
 enabled = ${document.getElementById('cfg-capture-enabled').checked}
