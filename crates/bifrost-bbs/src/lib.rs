@@ -2445,9 +2445,11 @@ fn run_session_task(
     )?;
 
     let enabled_apps = apps_config.enabled.clone();
+    let main_app_name_clone = apps_config.main_app.clone();
     let active_app_clone = active_app.clone();
     let load_app = lua.create_function(move |lua, app_name: String| {
-        if !enabled_apps.contains(&app_name) {
+        let is_main = app_name == "main_menu" || app_name == main_app_name_clone;
+        if !is_main && !enabled_apps.contains(&app_name) {
             log::error!("Application '{}' not found or not enabled in config", app_name);
             return Ok(());
         }
@@ -2455,7 +2457,7 @@ fn run_session_task(
         let path = find_workspace_path(&entry_file);
         let code = if path.exists() {
             std::fs::read_to_string(&path)?
-        } else if app_name == "main_menu" {
+        } else if is_main {
             EMBEDDED_MAIN_MENU_LUA.to_string()
         } else {
             log::error!("Application '{}' entry point not found at {:?}", app_name, path);
@@ -4097,6 +4099,39 @@ max_asset_broadcast_duty_cycle = 0.15
         let screen_text = String::from_utf8_lossy(&uncompressed_payload);
         assert!(screen_text.contains("MESSAGES") || screen_text.contains("Messages") || screen_text.contains("General"), "Should contain MESSAGES header, got: {}", screen_text);
 
+        // 5. Navigate back to Main Menu from Messages
+        let back_menu_json = r#"{"submit":"main_menu"}"#;
+        let back_msg = MeshBbsMessage::new(0x02, 0x02, 0x00, back_menu_json.as_bytes().to_vec());
+        let back_payloads = back_msg.to_fragments(200).unwrap();
+        let packet = RadioPacket {
+            is_broadcast: false,
+            src_node: client_key,
+            dst_node: [0; 32],
+            payload: back_payloads[0].clone(),
+            signal_rssi: -50,
+            signal_snr: 10,
+        };
+        client_transport.send_packet(packet).await.unwrap();
+
+        // Receive Main Menu screen again
+        let mut main_return_screen = None;
+        let start_time = tokio::time::Instant::now();
+        while start_time.elapsed() < tokio::time::Duration::from_millis(1500) {
+            match tokio::time::timeout(tokio::time::Duration::from_millis(100), client_transport.receive_packet()).await {
+                Ok(Ok(packet)) => {
+                    if let Some(msg) = client_reassembler.process_packet([0; 32], &packet.payload).unwrap() {
+                        main_return_screen = Some(msg);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let main_resp = main_return_screen.expect("Should receive Main Menu screen when navigating back");
+        let main_payload = decode_test_msg(&mut client_cache, &main_resp, &static_dict);
+        let main_text = String::from_utf8_lossy(&main_payload);
+        assert!(main_text.contains("Select options") || main_text.contains("messages"), "Should contain main menu options, got: {}", main_text);
+
         let _ = server_handle.await;
     }
 
@@ -4207,6 +4242,39 @@ max_asset_broadcast_duty_cycle = 0.15
         let uncompressed_payload = decode_test_msg(&mut client_cache, &resp, &static_dict);
         let screen_text = String::from_utf8_lossy(&uncompressed_payload);
         assert!(screen_text.contains("PROFILE") || screen_text.contains("Profile") || screen_text.contains("ProfBob"), "Should contain PROFILE header, got: {}", screen_text);
+
+        // 5. Navigate back to Main Menu from Profile by canceling
+        let cancel_json = r#"{"submit":"cancel"}"#;
+        let cancel_msg = MeshBbsMessage::new(0x02, 0x02, 0x00, cancel_json.as_bytes().to_vec());
+        let cancel_payloads = cancel_msg.to_fragments(200).unwrap();
+        let packet = RadioPacket {
+            is_broadcast: false,
+            src_node: client_key,
+            dst_node: [0; 32],
+            payload: cancel_payloads[0].clone(),
+            signal_rssi: -50,
+            signal_snr: 10,
+        };
+        client_transport.send_packet(packet).await.unwrap();
+
+        // Receive Main Menu screen again
+        let mut main_return_screen = None;
+        let start_time = tokio::time::Instant::now();
+        while start_time.elapsed() < tokio::time::Duration::from_millis(1500) {
+            match tokio::time::timeout(tokio::time::Duration::from_millis(100), client_transport.receive_packet()).await {
+                Ok(Ok(packet)) => {
+                    if let Some(msg) = client_reassembler.process_packet([0; 32], &packet.payload).unwrap() {
+                        main_return_screen = Some(msg);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let main_resp = main_return_screen.expect("Should receive Main Menu screen when canceling profile");
+        let main_payload = decode_test_msg(&mut client_cache, &main_resp, &static_dict);
+        let main_text = String::from_utf8_lossy(&main_payload);
+        assert!(main_text.contains("Select options") || main_text.contains("messages"), "Should contain main menu options, got: {}", main_text);
 
         let _ = server_handle.await;
     }
