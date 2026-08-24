@@ -963,3 +963,66 @@ body.crt-overlay::before {
   font-size: 10px;
 }
 
+/* Impersonation Banner */
+.impersonation-banner {
+  background: #ffaa0022;
+  border-bottom: 2px solid var(--term-warn);
+  color: var(--term-warn);
+  padding: 8px 16px;
+  display: flex;
+  align-items: center;
+  font-size: 13px;
+  font-weight: bold;
+  box-shadow: 0 0 15px rgba(255, 170, 0, 0.2);
+}
+
+.impersonation-banner .banner-icon {
+  margin-right: 8px;
+  font-size: 16px;
+}
+
+/* Permissions selection grid & items */
+.perm-item-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  cursor: pointer;
+  padding: 3px 5px;
+  border-radius: 2px;
+  user-select: none;
+}
+
+.perm-item-label:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.role-badge {
+  display: inline-block;
+  padding: 2px 6px;
+  border-radius: 3px;
+  font-size: 10px;
+  font-weight: bold;
+  text-transform: uppercase;
+  margin: 1px 2px;
+}
+
+.role-badge-admin {
+  background: rgba(255, 68, 68, 0.2);
+  border: 1px solid var(--term-danger);
+  color: var(--term-danger);
+}
+
+.role-badge-user {
+  background: rgba(0, 255, 102, 0.15);
+  border: 1px solid var(--term-accent);
+  color: var(--term-accent);
+}
+
+.role-badge-perm {
+  background: rgba(0, 180, 255, 0.1);
+  border: 1px solid rgba(0, 180, 255, 0.4);
+  color: #55ccff;
+}
+
+

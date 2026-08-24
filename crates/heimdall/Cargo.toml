@@ -23,6 +23,7 @@ bifrost-ansi = { path = "../bifrost-ansi" }
 bifrost-compression = { path = "../bifrost-compression" }
 bifrost-bbs = { path = "../bifrost-bbs" }
 rusqlite = { version = "0.40.2", features = ["bundled"] }
+sha2 = "0.10"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

@@ -984,18 +984,26 @@ pub fn load_active_client_dictionary() -> bifrost_compression::CompressionDictio
     bifrost_compression::CompressionDictionary::standard_static()
 }
 
-pub async fn handle_web_terminal_ws(socket: WebSocket, radio_port: String, log_buf: Arc<LogBuffer>) {
+pub async fn handle_web_terminal_ws(
+    socket: WebSocket,
+    radio_port: String,
+    log_buf: Arc<LogBuffer>,
+    authenticated_node: Option<[u8; 32]>,
+) {
     let (mut ws_sender, mut ws_receiver) = socket.split();
 
     // Create client radio transport connected to the BBS mock server
     let target_addr = radio_port;
     let client_transport = Arc::new(MockSocketTransport::new_client(target_addr, 0.0, 0, 200));
 
-    // Generate random node identity
-    let mut client_node = [0u8; 32];
-    for b in client_node.iter_mut() {
-        *b = rand_byte();
-    }
+    // Use authenticated persistent node identity if provided, otherwise generate random
+    let client_node = authenticated_node.unwrap_or_else(|| {
+        let mut node = [0u8; 32];
+        for b in node.iter_mut() {
+            *b = rand_byte();
+        }
+        node
+    });
     let node_hex = hex_encode(&client_node);
     let short_id = format!("{:02x}{:02x}..{:02x}{:02x}", client_node[0], client_node[1], client_node[30], client_node[31]);
 

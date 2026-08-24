@@ -21,6 +21,13 @@
     </div>
 
     <div class="header-status-group">
+      <div class="status-pill" id="user-status-pill" title="Logged in user identity">
+        <span class="pill-title">USER</span>
+        <span class="pill-value" id="current-user-badge">Not Logged In</span>
+        <button id="btn-open-change-password" class="retro-btn btn-sm" style="margin-left: 5px; padding: 2px 6px;" title="Change Password">🔑</button>
+        <button id="btn-logout" class="retro-btn btn-sm btn-danger" style="margin-left: 3px; padding: 2px 6px;" title="Logout">🚪</button>
+      </div>
+
       <div class="status-pill" id="bbs-status-pill" aria-live="polite">
         <span class="indicator-dot" id="bbs-indicator"></span>
         <span class="status-label">BBS: <strong id="bbs-status-text">CONNECTING...</strong></span>
@@ -70,7 +77,17 @@
     <button class="nav-tab" data-tab="database" id="tab-btn-database" aria-controls="tab-database" aria-selected="false">
       <span class="tab-key">[8]</span> DATABASE
     </button>
+    <button class="nav-tab" data-tab="users" id="tab-btn-users" aria-controls="tab-users" aria-selected="false">
+      <span class="tab-key">[9]</span> USERS
+    </button>
   </nav>
+
+  <!-- Impersonation Alert Banner -->
+  <div id="impersonation-banner" class="impersonation-banner" style="display: none;">
+    <span class="banner-icon">⚠️</span>
+    <span>IMPERSONATING USER: <strong id="impersonating-user-name">...</strong> (Node: <code id="impersonating-node-id">...</code>)</span>
+    <button id="btn-stop-impersonate" class="retro-btn btn-sm btn-warning" style="margin-left: 15px;">RETURN TO ADMIN SESSION</button>
+  </div>
 
   <!-- Main Content Container -->
   <main class="main-content" role="main">
@@ -641,7 +658,174 @@
       </div>
     </section>
 
+    <!-- TAB 9: USERS & PERMISSIONS -->
+    <section id="tab-users" class="tab-pane" role="tabpanel" aria-labelledby="tab-btn-users">
+      <div class="retro-panel">
+        <div class="panel-header">
+          <span class="panel-title">══ USER &amp; IDENTITY MANAGEMENT ══</span>
+          <div style="display: flex; gap: 8px;">
+            <button id="btn-open-create-user" class="retro-btn btn-success btn-sm">➕ CREATE USER</button>
+            <button id="btn-refresh-users" class="retro-btn btn-sm">↻ REFRESH</button>
+          </div>
+        </div>
+
+        <div style="margin: 10px 0; display: flex; gap: 10px; align-items: center;">
+          <input type="text" id="users-search-input" class="retro-input" placeholder="Search by nickname or node ID..." style="flex: 1; max-width: 400px;">
+          <span style="color: var(--text-dim);" id="users-count-label">Total Users: 0</span>
+        </div>
+
+        <div class="table-container" style="max-height: 550px; overflow-y: auto;">
+          <table class="retro-table" id="users-table">
+            <thead>
+              <tr>
+                <th style="width: 140px;">NICKNAME</th>
+                <th style="width: 220px;">NODE ID</th>
+                <th>PERMISSIONS &amp; ROLES</th>
+                <th style="width: 90px; text-align: center;">PASSWORD</th>
+                <th style="width: 150px; text-align: center;">ACTIONS</th>
+              </tr>
+            </thead>
+            <tbody id="users-tbody">
+              <tr><td colspan="5" class="empty-state">Loading users...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
   </main>
+
+  <!-- AUTH / LOGIN / SETUP MODAL -->
+  <div id="auth-modal" class="retro-modal-overlay" style="display: none;">
+    <div class="retro-modal-box" style="max-width: 460px;">
+      <div class="panel-header">
+        <span class="panel-title" id="auth-modal-title">══ HEIMDALL AUTHENTICATION ══</span>
+      </div>
+      <div class="retro-modal-body" style="padding: 15px 0;">
+        <p id="auth-modal-desc" style="margin-bottom: 15px; color: var(--accent-color); font-size: 13px;">
+          Enter your operator nickname and password to access Heimdall.
+        </p>
+
+        <div class="form-group" style="margin-bottom: 12px;">
+          <label for="auth-username" style="display: block; margin-bottom: 4px; font-weight: bold;">NICKNAME / USERNAME:</label>
+          <input type="text" id="auth-username" class="retro-input" placeholder="e.g. SysOp" style="width: 100%;">
+        </div>
+
+        <div class="form-group" style="margin-bottom: 12px;">
+          <label for="auth-password" style="display: block; margin-bottom: 4px; font-weight: bold;">PASSWORD:</label>
+          <input type="password" id="auth-password" class="retro-input" placeholder="••••••••" style="width: 100%;">
+        </div>
+
+        <div class="form-group" id="auth-confirm-group" style="display: none; margin-bottom: 12px;">
+          <label for="auth-confirm-password" style="display: block; margin-bottom: 4px; font-weight: bold;">CONFIRM PASSWORD:</label>
+          <input type="password" id="auth-confirm-password" class="retro-input" placeholder="••••••••" style="width: 100%;">
+        </div>
+
+        <div id="auth-error-msg" style="color: #ff4444; font-size: 12px; margin-top: 8px; display: none;"></div>
+      </div>
+
+      <div class="retro-modal-actions" style="display: flex; justify-content: flex-end; gap: 10px; margin-top: 10px;">
+        <button id="btn-submit-auth" class="retro-btn btn-success" style="width: 100%;">LOGIN TO HEIMDALL</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- CREATE USER MODAL -->
+  <div id="modal-create-user" class="retro-modal-overlay" style="display: none;">
+    <div class="retro-modal-box" style="max-width: 520px;">
+      <div class="panel-header">
+        <span class="panel-title">══ CREATE NEW BBS USER ══</span>
+      </div>
+      <div class="retro-modal-body" style="padding: 15px 0;">
+        <div class="form-group" style="margin-bottom: 10px;">
+          <label for="create-username" style="display: block; margin-bottom: 4px; font-weight: bold;">NICKNAME:</label>
+          <input type="text" id="create-username" class="retro-input" placeholder="e.g. Alice" style="width: 100%;">
+        </div>
+        <div class="form-group" style="margin-bottom: 15px;">
+          <label for="create-password" style="display: block; margin-bottom: 4px; font-weight: bold;">PASSWORD:</label>
+          <input type="password" id="create-password" class="retro-input" placeholder="••••••••" style="width: 100%;">
+        </div>
+
+        <label style="display: block; margin-bottom: 6px; font-weight: bold;">PERMISSIONS &amp; CAPABILITIES:</label>
+        <div id="create-user-perms-list" class="perms-grid" style="display: grid; grid-template-columns: 1fr 1fr; gap: 6px; max-height: 200px; overflow-y: auto; padding: 6px; border: 1px solid var(--border-color); background: var(--card-bg);">
+          <!-- Injected via JS -->
+        </div>
+        <div id="create-user-error" style="color: #ff4444; font-size: 12px; margin-top: 8px; display: none;"></div>
+      </div>
+      <div class="retro-modal-actions" style="display: flex; justify-content: flex-end; gap: 10px;">
+        <button id="btn-cancel-create-user" class="retro-btn">CANCEL</button>
+        <button id="btn-confirm-create-user" class="retro-btn btn-success">CREATE USER</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- EDIT PERMISSIONS MODAL -->
+  <div id="modal-edit-permissions" class="retro-modal-overlay" style="display: none;">
+    <div class="retro-modal-box" style="max-width: 520px;">
+      <div class="panel-header">
+        <span class="panel-title">══ EDIT PERMISSIONS: <span id="edit-perm-username">...</span> ══</span>
+      </div>
+      <div class="retro-modal-body" style="padding: 15px 0;">
+        <p style="font-size: 12px; color: var(--text-dim); margin-bottom: 10px;">Node ID: <code id="edit-perm-node-id">...</code></p>
+        <div id="edit-perms-list" class="perms-grid" style="display: grid; grid-template-columns: 1fr 1fr; gap: 6px; max-height: 250px; overflow-y: auto; padding: 6px; border: 1px solid var(--border-color); background: var(--card-bg);">
+          <!-- Injected via JS -->
+        </div>
+        <div id="edit-perms-error" style="color: #ff4444; font-size: 12px; margin-top: 8px; display: none;"></div>
+      </div>
+      <div class="retro-modal-actions" style="display: flex; justify-content: flex-end; gap: 10px;">
+        <button id="btn-cancel-edit-perms" class="retro-btn">CANCEL</button>
+        <button id="btn-save-edit-perms" class="retro-btn btn-success">SAVE PERMISSIONS</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- RESET USER PASSWORD MODAL -->
+  <div id="modal-reset-password" class="retro-modal-overlay" style="display: none;">
+    <div class="retro-modal-box" style="max-width: 440px;">
+      <div class="panel-header">
+        <span class="panel-title">══ RESET PASSWORD: <span id="reset-pass-username">...</span> ══</span>
+      </div>
+      <div class="retro-modal-body" style="padding: 15px 0;">
+        <div class="form-group">
+          <label for="input-reset-new-pass" style="display: block; margin-bottom: 4px; font-weight: bold;">NEW PASSWORD:</label>
+          <input type="password" id="input-reset-new-pass" class="retro-input" placeholder="••••••••" style="width: 100%;">
+        </div>
+        <div id="reset-pass-error" style="color: #ff4444; font-size: 12px; margin-top: 8px; display: none;"></div>
+      </div>
+      <div class="retro-modal-actions" style="display: flex; justify-content: flex-end; gap: 10px;">
+        <button id="btn-cancel-reset-pass" class="retro-btn">CANCEL</button>
+        <button id="btn-confirm-reset-pass" class="retro-btn btn-warning">SET NEW PASSWORD</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- CHANGE MY PASSWORD MODAL -->
+  <div id="modal-change-password" class="retro-modal-overlay" style="display: none;">
+    <div class="retro-modal-box" style="max-width: 440px;">
+      <div class="panel-header">
+        <span class="panel-title">══ CHANGE MY PASSWORD ══</span>
+      </div>
+      <div class="retro-modal-body" style="padding: 15px 0;">
+        <div class="form-group" style="margin-bottom: 10px;">
+          <label for="change-old-pass" style="display: block; margin-bottom: 4px; font-weight: bold;">CURRENT PASSWORD:</label>
+          <input type="password" id="change-old-pass" class="retro-input" placeholder="••••••••" style="width: 100%;">
+        </div>
+        <div class="form-group" style="margin-bottom: 10px;">
+          <label for="change-new-pass" style="display: block; margin-bottom: 4px; font-weight: bold;">NEW PASSWORD:</label>
+          <input type="password" id="change-new-pass" class="retro-input" placeholder="••••••••" style="width: 100%;">
+        </div>
+        <div class="form-group">
+          <label for="change-confirm-new-pass" style="display: block; margin-bottom: 4px; font-weight: bold;">CONFIRM NEW PASSWORD:</label>
+          <input type="password" id="change-confirm-new-pass" class="retro-input" placeholder="••••••••" style="width: 100%;">
+        </div>
+        <div id="change-pass-error" style="color: #ff4444; font-size: 12px; margin-top: 8px; display: none;"></div>
+      </div>
+      <div class="retro-modal-actions" style="display: flex; justify-content: flex-end; gap: 10px;">
+        <button id="btn-cancel-change-pass" class="retro-btn">CANCEL</button>
+        <button id="btn-confirm-change-pass" class="retro-btn btn-success">UPDATE PASSWORD</button>
+      </div>
+    </div>
+  </div>
 
   <!-- Funny Double Confirmation Modal for Reset DB -->
   <div id="modal-reset-db" class="retro-modal-overlay" style="display: none;">

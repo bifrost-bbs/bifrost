@@ -14,16 +14,45 @@ class HeimdallApp {
     this.currentEditingFile = null;
     this.currentConfig = null;
     this.currentSelectedTable = null;
+
+    // Authentication & Identity State
+    this.token = localStorage.getItem('heimdall_token') || null;
+    this.currentUser = null;
+    this.impersonating = null;
+    this.allPermissions = [];
+    this.usersList = [];
+    this.setupRequired = false;
     
     this.init();
   }
 
-  init() {
+  async apiFetch(url, options = {}) {
+    options.headers = options.headers || {};
+    if (this.token) {
+      options.headers['Authorization'] = `Bearer ${this.token}`;
+    }
+    try {
+      const res = await fetch(url, options);
+      if (res.status === 401 && !url.includes('/api/auth/')) {
+        this.token = null;
+        localStorage.removeItem('heimdall_token');
+        this.checkAuthStatus();
+      }
+      return res;
+    } catch (e) {
+      throw e;
+    }
+  }
+
+  async init() {
     this.bindEvents();
     this.initTheme();
     this.startClock();
     
-    // Initial fetches
+    // Check Authentication & Setup status first
+    await this.checkAuthStatus();
+
+    // Initial data fetches
     this.fetchOverview();
     this.fetchServices();
     this.fetchApps();
@@ -32,6 +61,9 @@ class HeimdallApp {
     this.fetchCaptures();
     this.fetchDatabase();
     this.fetchHistoricalLogs();
+    if (this.hasPerm('heimdall.users')) {
+      this.fetchUsers();
+    }
 
     // Connect Log Stream WebSocket
     this.connectLogsWebSocket();
@@ -47,7 +79,17 @@ class HeimdallApp {
       if (this.activeTab === 'database') {
         this.fetchDatabase();
       }
+      if (this.activeTab === 'users' && this.hasPerm('heimdall.users')) {
+        this.fetchUsers();
+      }
     }, 3000);
+  }
+
+  hasPerm(perm) {
+    if (!this.currentUser) return true; // fallback if open
+    if (this.currentUser.is_admin) return true;
+    const perms = this.currentUser.permissions || [];
+    return perms.includes('admin') || perms.includes('*') || perms.includes(perm);
   }
 
   bindEvents() {
@@ -75,6 +117,45 @@ class HeimdallApp {
         btn.textContent = `CRT FX: ${isOverlay ? 'ON' : 'OFF'}`;
         btn.setAttribute('aria-pressed', isOverlay);
       }
+    });
+
+    // Auth & Profile Controls
+    on('btn-submit-auth', 'click', () => this.submitAuthForm());
+    on('auth-password', 'keydown', (e) => {
+      if (e.key === 'Enter') this.submitAuthForm();
+    });
+    on('auth-confirm-password', 'keydown', (e) => {
+      if (e.key === 'Enter') this.submitAuthForm();
+    });
+    on('btn-logout', 'click', () => this.logout());
+    on('btn-open-change-password', 'click', () => this.openChangePasswordModal());
+    on('btn-confirm-change-pass', 'click', () => this.submitChangePassword());
+    on('btn-cancel-change-pass', 'click', () => {
+      const m = document.getElementById('modal-change-password');
+      if (m) m.style.display = 'none';
+    });
+
+    // Impersonation Banner
+    on('btn-stop-impersonate', 'click', () => this.stopImpersonating());
+
+    // Users Tab Controls & Modals
+    on('btn-refresh-users', 'click', () => this.fetchUsers());
+    on('users-search-input', 'input', () => this.renderUsers());
+    on('btn-open-create-user', 'click', () => this.openCreateUserModal());
+    on('btn-confirm-create-user', 'click', () => this.submitCreateUser());
+    on('btn-cancel-create-user', 'click', () => {
+      const m = document.getElementById('modal-create-user');
+      if (m) m.style.display = 'none';
+    });
+    on('btn-save-edit-perms', 'click', () => this.submitEditPermissions());
+    on('btn-cancel-edit-perms', 'click', () => {
+      const m = document.getElementById('modal-edit-permissions');
+      if (m) m.style.display = 'none';
+    });
+    on('btn-confirm-reset-pass', 'click', () => this.submitResetPassword());
+    on('btn-cancel-reset-pass', 'click', () => {
+      const m = document.getElementById('modal-reset-password');
+      if (m) m.style.display = 'none';
     });
 
     // Supervisor Quick Actions
@@ -114,7 +195,7 @@ class HeimdallApp {
 
     // DB Backup / Restore / Reset
     on('btn-backup-db', 'click', () => {
-      window.location.href = '/api/database/backup';
+      window.location.href = '/api/database/backup' + (this.token ? `?token=${encodeURIComponent(this.token)}` : '');
     });
 
     const restoreInput = document.getElementById('db-restore-file-input');
@@ -131,7 +212,7 @@ class HeimdallApp {
         }
         try {
           const buffer = await file.arrayBuffer();
-          const res = await fetch('/api/database/restore', {
+          const res = await this.apiFetch('/api/database/restore', {
             method: 'POST',
             headers: { 'Content-Type': 'application/octet-stream' },
             body: buffer,
@@ -184,7 +265,7 @@ class HeimdallApp {
     if (nukeConfirmBtn) {
       nukeConfirmBtn.addEventListener('click', async () => {
         try {
-          const res = await fetch('/api/database/reset', { method: 'POST' });
+          const res = await this.apiFetch('/api/database/reset', { method: 'POST' });
           if (res.ok) {
             alert('Database has been completely reset and vacuumed.');
             if (nukeModal) nukeModal.style.display = 'none';
@@ -258,7 +339,272 @@ class HeimdallApp {
     on('btn-refresh-captures', 'click', () => this.fetchCaptures());
   }
 
+  async checkAuthStatus() {
+    try {
+      const res = await this.apiFetch('/api/auth/status');
+      if (!res.ok) return;
+      const data = await res.json();
+      
+      this.setupRequired = !!data.setup_required;
+      this.allPermissions = data.all_permissions || [];
+      this.impersonating = data.impersonating || null;
+
+      const authModal = document.getElementById('auth-modal');
+      const userBadge = document.getElementById('current-user-badge');
+      const impBanner = document.getElementById('impersonation-banner');
+
+      if (this.setupRequired) {
+        this.showAuthModal(true);
+        if (userBadge) userBadge.textContent = 'Setup Required';
+      } else if (!data.authenticated) {
+        this.currentUser = null;
+        this.showAuthModal(false);
+        if (userBadge) userBadge.textContent = 'Not Logged In';
+      } else {
+        this.currentUser = data.user;
+        if (authModal) authModal.style.display = 'none';
+
+        if (userBadge && this.currentUser) {
+          const role = this.currentUser.is_admin ? 'ADMIN' : 'USER';
+          userBadge.textContent = `${this.currentUser.nickname} [${role}]`;
+        }
+
+        // Impersonation Banner
+        if (impBanner) {
+          if (this.impersonating) {
+            impBanner.style.display = 'flex';
+            document.getElementById('impersonating-user-name').textContent = this.currentUser.nickname;
+            document.getElementById('impersonating-node-id').textContent = this.currentUser.id.slice(0, 16) + '...';
+          } else {
+            impBanner.style.display = 'none';
+          }
+        }
+
+        // Update tab accessibility
+        this.updateTabPermissions();
+      }
+    } catch (e) {
+      console.warn('Auth status check failed:', e);
+    }
+  }
+
+  showAuthModal(isSetup) {
+    const modal = document.getElementById('auth-modal');
+    const title = document.getElementById('auth-modal-title');
+    const desc = document.getElementById('auth-modal-desc');
+    const confirmGroup = document.getElementById('auth-confirm-group');
+    const submitBtn = document.getElementById('btn-submit-auth');
+    const errorMsg = document.getElementById('auth-error-msg');
+
+    if (!modal) return;
+    if (errorMsg) errorMsg.style.display = 'none';
+
+    if (isSetup) {
+      if (title) title.textContent = '══ FIRST TIME SETUP: CREATE ADMINISTRATOR ══';
+      if (desc) desc.textContent = 'Welcome to Bifrost MeshBBS! Create your root administrative account to initialize the BBS node.';
+      if (confirmGroup) confirmGroup.style.display = 'block';
+      if (submitBtn) submitBtn.textContent = 'CREATE ROOT ADMIN & LOGIN';
+    } else {
+      if (title) title.textContent = '══ HEIMDALL AUTHENTICATION ══';
+      if (desc) desc.textContent = 'Enter your BBS nickname and password to access Heimdall.';
+      if (confirmGroup) confirmGroup.style.display = 'none';
+      if (submitBtn) submitBtn.textContent = 'LOGIN TO HEIMDALL';
+    }
+
+    modal.style.display = 'flex';
+    const userInp = document.getElementById('auth-username');
+    if (userInp) userInp.focus();
+  }
+
+  async submitAuthForm() {
+    const username = (document.getElementById('auth-username').value || '').trim();
+    const password = document.getElementById('auth-password').value || '';
+    const confirmPassword = document.getElementById('auth-confirm-password').value || '';
+    const errorMsg = document.getElementById('auth-error-msg');
+
+    const showError = (msg) => {
+      if (errorMsg) {
+        errorMsg.textContent = msg;
+        errorMsg.style.display = 'block';
+      }
+    };
+
+    if (!username || !password) {
+      showError('Nickname and password are required.');
+      return;
+    }
+
+    if (this.setupRequired) {
+      if (password !== confirmPassword) {
+        showError('Passwords do not match.');
+        return;
+      }
+      try {
+        const res = await fetch('/api/auth/setup', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username, password }),
+        });
+        if (!res.ok) {
+          showError(await res.text());
+          return;
+        }
+        const data = await res.json();
+        this.token = data.token;
+        localStorage.setItem('heimdall_token', this.token);
+        document.getElementById('auth-password').value = '';
+        document.getElementById('auth-confirm-password').value = '';
+        await this.checkAuthStatus();
+        this.fetchOverview();
+        if (this.hasPerm('heimdall.users')) this.fetchUsers();
+      } catch (e) {
+        showError('Setup failed: ' + e);
+      }
+    } else {
+      try {
+        const res = await fetch('/api/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username, password }),
+        });
+        if (!res.ok) {
+          showError('Invalid nickname or password.');
+          return;
+        }
+        const data = await res.json();
+        this.token = data.token;
+        localStorage.setItem('heimdall_token', this.token);
+        document.getElementById('auth-password').value = '';
+        await this.checkAuthStatus();
+        this.fetchOverview();
+        if (this.hasPerm('heimdall.users')) this.fetchUsers();
+      } catch (e) {
+        showError('Login error: ' + e);
+      }
+    }
+  }
+
+  async logout() {
+    try {
+      await this.apiFetch('/api/auth/logout', { method: 'POST' });
+    } catch (e) {}
+    this.token = null;
+    this.currentUser = null;
+    this.impersonating = null;
+    localStorage.removeItem('heimdall_token');
+    if (this.termWs) this.termWs.close();
+    await this.checkAuthStatus();
+  }
+
+  openChangePasswordModal() {
+    const modal = document.getElementById('modal-change-password');
+    const err = document.getElementById('change-pass-error');
+    if (err) err.style.display = 'none';
+    document.getElementById('change-old-pass').value = '';
+    document.getElementById('change-new-pass').value = '';
+    document.getElementById('change-confirm-new-pass').value = '';
+    if (modal) modal.style.display = 'flex';
+  }
+
+  async submitChangePassword() {
+    const oldPass = document.getElementById('change-old-pass').value;
+    const newPass = document.getElementById('change-new-pass').value;
+    const confirmPass = document.getElementById('change-confirm-new-pass').value;
+    const err = document.getElementById('change-pass-error');
+
+    const showErr = (m) => {
+      if (err) { err.textContent = m; err.style.display = 'block'; }
+    };
+
+    if (!oldPass || !newPass) {
+      showErr('All password fields are required.');
+      return;
+    }
+    if (newPass !== confirmPass) {
+      showErr('New passwords do not match.');
+      return;
+    }
+
+    try {
+      const res = await this.apiFetch('/api/auth/change_password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ old_password: oldPass, new_password: newPass }),
+      });
+      if (res.ok) {
+        alert('Password updated successfully!');
+        const modal = document.getElementById('modal-change-password');
+        if (modal) modal.style.display = 'none';
+      } else {
+        showErr(await res.text());
+      }
+    } catch (e) {
+      showErr('Error updating password: ' + e);
+    }
+  }
+
+  async stopImpersonating() {
+    try {
+      const res = await this.apiFetch('/api/auth/stop_impersonating', { method: 'POST' });
+      if (res.ok) {
+        const data = await res.json();
+        this.token = data.token;
+        localStorage.setItem('heimdall_token', this.token);
+        if (this.termWs) {
+          this.termWs.close();
+          this.connectTerminalWebSocket();
+        }
+        await this.checkAuthStatus();
+        this.fetchOverview();
+        if (this.hasPerm('heimdall.users')) this.fetchUsers();
+      } else {
+        alert('Failed to stop impersonating: ' + await res.text());
+      }
+    } catch (e) {
+      alert('Error stopping impersonation: ' + e);
+    }
+  }
+
+  updateTabPermissions() {
+    const permMap = {
+      'overview': 'heimdall.overview',
+      'terminal': 'heimdall.terminal',
+      'logs': 'heimdall.logs',
+      'apps': 'heimdall.apps',
+      'config': 'heimdall.config',
+      'telemetry': 'heimdall.telemetry',
+      'tuning': 'heimdall.tuning',
+      'database': 'heimdall.database',
+      'users': 'heimdall.users',
+    };
+
+    document.querySelectorAll('.nav-tab').forEach(tabBtn => {
+      const tabId = tabBtn.dataset.tab;
+      const reqPerm = permMap[tabId];
+      const allowed = !reqPerm || this.hasPerm(reqPerm);
+      tabBtn.style.display = allowed ? '' : 'none';
+    });
+  }
+
   switchTab(tabId) {
+    const permMap = {
+      'overview': 'heimdall.overview',
+      'terminal': 'heimdall.terminal',
+      'logs': 'heimdall.logs',
+      'apps': 'heimdall.apps',
+      'config': 'heimdall.config',
+      'telemetry': 'heimdall.telemetry',
+      'tuning': 'heimdall.tuning',
+      'database': 'heimdall.database',
+      'users': 'heimdall.users',
+    };
+
+    const reqPerm = permMap[tabId];
+    if (reqPerm && !this.hasPerm(reqPerm)) {
+      alert(`Access Denied: You do not have permission '${reqPerm}'`);
+      return;
+    }
+
     this.activeTab = tabId;
 
     document.querySelectorAll('.nav-tab').forEach(btn => {
@@ -281,6 +627,8 @@ class HeimdallApp {
       }, 100);
     } else if (tabId === 'logs') {
       this.fetchHistoricalLogs();
+    } else if (tabId === 'users') {
+      this.fetchUsers();
     }
   }
 
@@ -308,7 +656,7 @@ class HeimdallApp {
 
   async fetchOverview() {
     try {
-      const res = await fetch('/api/supervisor/status');
+      const res = await this.apiFetch('/api/supervisor/status');
       if (!res.ok) return;
       const data = await res.json();
       
@@ -336,7 +684,7 @@ class HeimdallApp {
 
   async fetchServices() {
     try {
-      const res = await fetch('/api/supervisor/status');
+      const res = await this.apiFetch('/api/supervisor/status');
       if (!res.ok) return;
       const services = await res.json();
       
@@ -369,7 +717,7 @@ class HeimdallApp {
 
   async fetchApps() {
     try {
-      const res = await fetch('/api/apps');
+      const res = await this.apiFetch('/api/apps');
       if (!res.ok) return;
       const apps = await res.json();
       
@@ -410,7 +758,7 @@ class HeimdallApp {
 
   async fetchAppFiles(appId) {
     try {
-      const res = await fetch(`/api/apps/${appId}/files`);
+      const res = await this.apiFetch(`/api/apps/${appId}/files`);
       if (!res.ok) return;
       const files = await res.json();
 
@@ -457,7 +805,7 @@ class HeimdallApp {
     document.getElementById('editor-file-badge').textContent = filePath;
 
     try {
-      const res = await fetch(`/api/apps/${appId}/file_content?path=${encodeURIComponent(filePath)}`);
+      const res = await this.apiFetch(`/api/apps/${appId}/file_content?path=${encodeURIComponent(filePath)}`);
       if (res.ok) {
         const text = await res.text();
         const editor = document.getElementById('app-file-editor');
@@ -474,7 +822,7 @@ class HeimdallApp {
     const content = document.getElementById('app-file-editor').value;
 
     try {
-      const res = await fetch(`/api/apps/${this.currentSelectedApp}/file_content?path=${encodeURIComponent(this.currentEditingFile)}`, {
+      const res = await this.apiFetch(`/api/apps/${this.currentSelectedApp}/file_content?path=${encodeURIComponent(this.currentEditingFile)}`, {
         method: 'POST',
         headers: { 'Content-Type': 'text/plain' },
         body: content,
@@ -492,7 +840,7 @@ class HeimdallApp {
 
   async fetchConfig() {
     try {
-      const res = await fetch('/api/config');
+      const res = await this.apiFetch('/api/config');
       if (!res.ok) return;
       const cfg = await res.json();
       this.currentConfig = cfg.parsed;
@@ -583,7 +931,7 @@ directory = "${document.getElementById('cfg-capture-dir').value}"
   async saveRawToml() {
     const content = document.getElementById('raw-toml-editor').value;
     try {
-      const res = await fetch('/api/config', {
+      const res = await this.apiFetch('/api/config', {
         method: 'POST',
         headers: { 'Content-Type': 'text/plain' },
         body: content,
@@ -602,7 +950,7 @@ directory = "${document.getElementById('cfg-capture-dir').value}"
 
   async fetchTelemetry() {
     try {
-      const res = await fetch('/api/telemetry/summary');
+      const res = await this.apiFetch('/api/telemetry/summary');
       if (!res.ok) return;
       const s = await res.json();
 
@@ -649,8 +997,8 @@ directory = "${document.getElementById('cfg-capture-dir').value}"
   async fetchCaptures() {
     try {
       const [sumRes, packRes] = await Promise.all([
-        fetch('/api/telemetry/capture_summary'),
-        fetch('/api/telemetry/captures?limit=50')
+        this.apiFetch('/api/telemetry/capture_summary'),
+        this.apiFetch('/api/telemetry/captures?limit=50')
       ]);
 
       const setText = (id, val) => {
@@ -658,7 +1006,7 @@ directory = "${document.getElementById('cfg-capture-dir').value}"
         if (el) el.textContent = val;
       };
 
-      if (sumRes.ok) {
+      if (sumRes && sumRes.ok) {
         const sum = await sumRes.json();
         setText('cap-stat-samples', sum.total_samples || 0);
         setText('cap-stat-tx-rx', `TX: ${sum.tx_count || 0} | RX: ${sum.rx_count || 0}`);
@@ -680,7 +1028,7 @@ directory = "${document.getElementById('cfg-capture-dir').value}"
         setText('cap-stat-avg-time', `Avg Time: ${(sum.avg_duration_us || 0).toFixed(1)} µs`);
       }
 
-      if (packRes.ok) {
+      if (packRes && packRes.ok) {
         const data = await packRes.json();
         const tbody = document.getElementById('captures-tbody');
         tbody.innerHTML = '';
@@ -709,7 +1057,7 @@ directory = "${document.getElementById('cfg-capture-dir').value}"
 
   async callSupervisorAction(action) {
     try {
-      const res = await fetch(`/api/supervisor/${action}`, { method: 'POST' });
+      const res = await this.apiFetch(`/api/supervisor/${action}`, { method: 'POST' });
       if (res.ok) {
         this.fetchOverview();
         this.fetchServices();
@@ -723,7 +1071,7 @@ directory = "${document.getElementById('cfg-capture-dir').value}"
 
   async startCrawler(steps, delay) {
     try {
-      const res = await fetch(`/api/supervisor/crawler?steps=${steps}&delay=${delay}`, { method: 'POST' });
+      const res = await this.apiFetch(`/api/supervisor/crawler?steps=${steps}&delay=${delay}`, { method: 'POST' });
       if (res.ok) {
         this.switchTab('logs');
       }
@@ -734,7 +1082,7 @@ directory = "${document.getElementById('cfg-capture-dir').value}"
 
   async runTuning(subcmd, extraArgs) {
     try {
-      const res = await fetch(`/api/supervisor/tuning?command=${subcmd}`, {
+      const res = await this.apiFetch(`/api/supervisor/tuning?command=${subcmd}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ args: extraArgs }),
@@ -751,7 +1099,7 @@ directory = "${document.getElementById('cfg-capture-dir').value}"
 
   async fetchHistoricalLogs() {
     try {
-      const res = await fetch('/api/logs?limit=5000');
+      const res = await this.apiFetch('/api/logs?limit=5000');
       if (!res.ok) return;
       const history = await res.json();
       
@@ -775,7 +1123,7 @@ directory = "${document.getElementById('cfg-capture-dir').value}"
 
   connectLogsWebSocket() {
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const url = `${proto}//${location.host}/ws/logs`;
+    const url = `${proto}//${location.host}/ws/logs` + (this.token ? `?token=${encodeURIComponent(this.token)}` : '');
     this.logsWs = new WebSocket(url);
 
     this.logsWs.onmessage = (event) => {
@@ -868,7 +1216,7 @@ directory = "${document.getElementById('cfg-capture-dir').value}"
       this.termWs.close();
     }
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const url = `${proto}//${location.host}/ws/terminal`;
+    const url = `${proto}//${location.host}/ws/terminal` + (this.token ? `?token=${encodeURIComponent(this.token)}` : '');
     this.termWs = new WebSocket(url);
 
     const termGrid = document.getElementById('terminal-canvas-grid');
@@ -917,11 +1265,294 @@ directory = "${document.getElementById('cfg-capture-dir').value}"
     }
   }
 
+  // --- USER MANAGEMENT ---
+
+  async fetchUsers() {
+    try {
+      const res = await this.apiFetch('/api/users');
+      if (!res.ok) return;
+      this.usersList = await res.json();
+      this.renderUsers();
+    } catch (e) {
+      console.warn('Fetch users error:', e);
+    }
+  }
+
+  renderUsers() {
+    const tbody = document.getElementById('users-tbody');
+    const searchInp = document.getElementById('users-search-input');
+    const countLabel = document.getElementById('users-count-label');
+    if (!tbody) return;
+
+    const filter = searchInp ? searchInp.value.trim().toLowerCase() : '';
+    const filtered = this.usersList.filter(u => {
+      if (!filter) return true;
+      return u.nickname.toLowerCase().includes(filter) || u.id.toLowerCase().includes(filter);
+    });
+
+    if (countLabel) countLabel.textContent = `Total Users: ${this.usersList.length}`;
+    tbody.innerHTML = '';
+
+    if (filtered.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="5" class="empty-state">No users found</td></tr>';
+      return;
+    }
+
+    filtered.forEach(u => {
+      const tr = document.createElement('tr');
+      const isSelf = this.currentUser && this.currentUser.id === u.id;
+      
+      // Permissions tags
+      let permsBadges = '';
+      if (u.is_admin) {
+        permsBadges += '<span class="role-badge role-badge-admin">ADMIN</span>';
+      } else {
+        permsBadges += '<span class="role-badge role-badge-user">USER</span>';
+      }
+      (u.permissions || []).forEach(p => {
+        if (p !== 'admin') {
+          permsBadges += `<span class="role-badge role-badge-perm">${escapeHtml(p)}</span>`;
+        }
+      });
+
+      tr.innerHTML = `
+        <td><strong>${escapeHtml(u.nickname)}</strong> ${isSelf ? '<span style="color:var(--term-accent);font-size:10px;">(YOU)</span>' : ''}</td>
+        <td><code style="font-size:11px;">${u.id.slice(0, 16)}...</code></td>
+        <td>${permsBadges}</td>
+        <td style="text-align: center;">${u.has_password ? '✅ SET' : '❌ NONE'}</td>
+        <td style="text-align: center; white-space: nowrap;">
+          <button class="retro-btn btn-sm impersonate-btn" data-id="${u.id}" ${isSelf ? 'disabled' : ''} title="Impersonate User">🎭 Impersonate</button>
+          <button class="retro-btn btn-sm edit-perms-btn" data-id="${u.id}" title="Edit Permissions">🛡️ Perms</button>
+          <button class="retro-btn btn-sm reset-pass-btn" data-id="${u.id}" data-nick="${escapeHtml(u.nickname)}" title="Reset Password">🔑 Pass</button>
+          <button class="retro-btn btn-sm btn-danger delete-user-btn" data-id="${u.id}" data-nick="${escapeHtml(u.nickname)}" ${isSelf ? 'disabled' : ''} title="Delete User">🗑️</button>
+        </td>
+      `;
+      tbody.appendChild(tr);
+    });
+
+    // Attach event listeners
+    tbody.querySelectorAll('.impersonate-btn').forEach(btn => {
+      btn.addEventListener('click', () => this.impersonateUser(btn.dataset.id));
+    });
+    tbody.querySelectorAll('.edit-perms-btn').forEach(btn => {
+      btn.addEventListener('click', () => this.openEditPermissionsModal(btn.dataset.id));
+    });
+    tbody.querySelectorAll('.reset-pass-btn').forEach(btn => {
+      btn.addEventListener('click', () => this.openResetPasswordModal(btn.dataset.id, btn.dataset.nick));
+    });
+    tbody.querySelectorAll('.delete-user-btn').forEach(btn => {
+      btn.addEventListener('click', () => this.deleteUser(btn.dataset.id, btn.dataset.nick));
+    });
+  }
+
+  openCreateUserModal() {
+    const modal = document.getElementById('modal-create-user');
+    const err = document.getElementById('create-user-error');
+    if (err) err.style.display = 'none';
+    document.getElementById('create-username').value = '';
+    document.getElementById('create-password').value = '';
+
+    const list = document.getElementById('create-user-perms-list');
+    if (list) {
+      list.innerHTML = '';
+      this.allPermissions.forEach(p => {
+        const label = document.createElement('label');
+        label.className = 'perm-item-label';
+        const isChecked = ['heimdall.login', 'heimdall.overview', 'heimdall.terminal', 'read', 'write'].includes(p.id);
+        label.innerHTML = `
+          <input type="checkbox" value="${p.id}" ${isChecked ? 'checked' : ''}>
+          <span><strong>${escapeHtml(p.id)}</strong> (${escapeHtml(p.name)})</span>
+        `;
+        list.appendChild(label);
+      });
+    }
+
+    if (modal) modal.style.display = 'flex';
+  }
+
+  async submitCreateUser() {
+    const username = (document.getElementById('create-username').value || '').trim();
+    const password = document.getElementById('create-password').value || '';
+    const err = document.getElementById('create-user-error');
+
+    const showErr = (m) => {
+      if (err) { err.textContent = m; err.style.display = 'block'; }
+    };
+
+    if (!username || !password) {
+      showErr('Nickname and password are required.');
+      return;
+    }
+
+    const selectedPerms = [];
+    document.querySelectorAll('#create-user-perms-list input[type="checkbox"]:checked').forEach(cb => {
+      selectedPerms.push(cb.value);
+    });
+
+    try {
+      const res = await this.apiFetch('/api/users', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          username,
+          password,
+          permissions: selectedPerms,
+        }),
+      });
+      if (res.ok) {
+        alert(`User '${username}' created successfully!`);
+        const modal = document.getElementById('modal-create-user');
+        if (modal) modal.style.display = 'none';
+        this.fetchUsers();
+      } else {
+        showErr(await res.text());
+      }
+    } catch (e) {
+      showErr('Error creating user: ' + e);
+    }
+  }
+
+  openEditPermissionsModal(nodeId) {
+    const user = this.usersList.find(u => u.id === nodeId);
+    if (!user) return;
+    this.editingUserNodeId = nodeId;
+
+    document.getElementById('edit-perm-username').textContent = user.nickname;
+    document.getElementById('edit-perm-node-id').textContent = nodeId;
+    const err = document.getElementById('edit-perms-error');
+    if (err) err.style.display = 'none';
+
+    const list = document.getElementById('edit-perms-list');
+    if (list) {
+      list.innerHTML = '';
+      this.allPermissions.forEach(p => {
+        const isChecked = (user.permissions || []).includes(p.id) || (user.is_admin && p.id === 'admin');
+        const label = document.createElement('label');
+        label.className = 'perm-item-label';
+        label.innerHTML = `
+          <input type="checkbox" value="${p.id}" ${isChecked ? 'checked' : ''}>
+          <span><strong>${escapeHtml(p.id)}</strong> (${escapeHtml(p.name)})</span>
+        `;
+        list.appendChild(label);
+      });
+    }
+
+    const modal = document.getElementById('modal-edit-permissions');
+    if (modal) modal.style.display = 'flex';
+  }
+
+  async submitEditPermissions() {
+    if (!this.editingUserNodeId) return;
+    const selectedPerms = [];
+    document.querySelectorAll('#edit-perms-list input[type="checkbox"]:checked').forEach(cb => {
+      selectedPerms.push(cb.value);
+    });
+
+    try {
+      const res = await this.apiFetch(`/api/users/${this.editingUserNodeId}/permissions`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ permissions: selectedPerms }),
+      });
+      if (res.ok) {
+        alert('Permissions updated successfully!');
+        const modal = document.getElementById('modal-edit-permissions');
+        if (modal) modal.style.display = 'none';
+        this.fetchUsers();
+      } else {
+        alert('Failed to update permissions: ' + await res.text());
+      }
+    } catch (e) {
+      alert('Error updating permissions: ' + e);
+    }
+  }
+
+  openResetPasswordModal(nodeId, nickname) {
+    this.resettingUserNodeId = nodeId;
+    document.getElementById('reset-pass-username').textContent = nickname;
+    document.getElementById('input-reset-new-pass').value = '';
+    const err = document.getElementById('reset-pass-error');
+    if (err) err.style.display = 'none';
+
+    const modal = document.getElementById('modal-reset-password');
+    if (modal) modal.style.display = 'flex';
+  }
+
+  async submitResetPassword() {
+    if (!this.resettingUserNodeId) return;
+    const newPass = document.getElementById('input-reset-new-pass').value;
+    const err = document.getElementById('reset-pass-error');
+
+    if (!newPass) {
+      if (err) { err.textContent = 'Please enter a new password.'; err.style.display = 'block'; }
+      return;
+    }
+
+    try {
+      const res = await this.apiFetch(`/api/users/${this.resettingUserNodeId}/reset_password`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ new_password: newPass }),
+      });
+      if (res.ok) {
+        alert('Password reset successfully!');
+        const modal = document.getElementById('modal-reset-password');
+        if (modal) modal.style.display = 'none';
+        this.fetchUsers();
+      } else {
+        if (err) { err.textContent = await res.text(); err.style.display = 'block'; }
+      }
+    } catch (e) {
+      if (err) { err.textContent = 'Error resetting password: ' + e; err.style.display = 'block'; }
+    }
+  }
+
+  async impersonateUser(nodeId) {
+    if (!confirm('Impersonate this user? You will adopt their identity and permissions. You can return to your admin session at any time.')) {
+      return;
+    }
+    try {
+      const res = await this.apiFetch(`/api/users/${nodeId}/impersonate`, { method: 'POST' });
+      if (res.ok) {
+        const data = await res.json();
+        this.token = data.token;
+        localStorage.setItem('heimdall_token', this.token);
+        if (this.termWs) {
+          this.termWs.close();
+          this.connectTerminalWebSocket();
+        }
+        await this.checkAuthStatus();
+        this.fetchOverview();
+        if (this.hasPerm('heimdall.users')) this.fetchUsers();
+      } else {
+        alert('Impersonation failed: ' + await res.text());
+      }
+    } catch (e) {
+      alert('Error impersonating user: ' + e);
+    }
+  }
+
+  async deleteUser(nodeId, nickname) {
+    if (!confirm(`Delete user "${nickname}" (${nodeId.slice(0, 16)}...)? This cannot be undone.`)) {
+      return;
+    }
+    try {
+      const res = await this.apiFetch(`/api/users/${nodeId}`, { method: 'DELETE' });
+      if (res.ok) {
+        this.fetchUsers();
+      } else {
+        alert('Failed to delete user: ' + await res.text());
+      }
+    } catch (e) {
+      alert('Error deleting user: ' + e);
+    }
+  }
+
   // --- DATABASE MANAGER ---
 
   async fetchDatabase() {
     try {
-      const res = await fetch('/api/database/summary');
+      const res = await this.apiFetch('/api/database/summary');
       if (!res.ok) return;
       const data = await res.json();
 
@@ -986,7 +1617,7 @@ directory = "${document.getElementById('cfg-capture-dir').value}"
     });
 
     try {
-      const res = await fetch(`/api/database/table/${encodeURIComponent(namespace)}`);
+      const res = await this.apiFetch(`/api/database/table/${encodeURIComponent(namespace)}`);
       if (!res.ok) return;
       const records = await res.json();
 
@@ -1032,7 +1663,7 @@ directory = "${document.getElementById('cfg-capture-dir').value}"
     }
 
     try {
-      const res = await fetch(`/api/database/table/${encodeURIComponent(this.currentSelectedTable)}/key/${encodeURIComponent(key)}`, {
+      const res = await this.apiFetch(`/api/database/table/${encodeURIComponent(this.currentSelectedTable)}/key/${encodeURIComponent(key)}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ value: val }),
@@ -1052,7 +1683,7 @@ directory = "${document.getElementById('cfg-capture-dir').value}"
   async deleteKey(namespace, key) {
     if (!confirm(`Delete key "${key}" from table "${namespace}"?`)) return;
     try {
-      const res = await fetch(`/api/database/table/${encodeURIComponent(namespace)}/key/${encodeURIComponent(key)}`, {
+      const res = await this.apiFetch(`/api/database/table/${encodeURIComponent(namespace)}/key/${encodeURIComponent(key)}`, {
         method: 'DELETE',
       });
       if (res.ok) {
@@ -1067,7 +1698,7 @@ directory = "${document.getElementById('cfg-capture-dir').value}"
     if (!this.currentSelectedTable) return;
     if (!confirm(`Clear all records in table "${this.currentSelectedTable}"? This action cannot be undone.`)) return;
     try {
-      const res = await fetch(`/api/database/table/${encodeURIComponent(this.currentSelectedTable)}`, {
+      const res = await this.apiFetch(`/api/database/table/${encodeURIComponent(this.currentSelectedTable)}`, {
         method: 'DELETE',
       });
       if (res.ok) {

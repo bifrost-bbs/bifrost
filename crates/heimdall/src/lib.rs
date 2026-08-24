@@ -7,12 +7,13 @@ pub mod db_mgr;
 pub mod logs;
 pub mod stats;
 pub mod supervisor;
+pub mod user_mgr;
 pub mod web;
 pub mod web_client;
 
 use anyhow::Result;
 use app_mgr::AppManager;
-use auth::AuthConfig;
+use auth::{AuthConfig, SessionManager};
 use config_mgr::ConfigManager;
 use db_mgr::DatabaseManager;
 use logs::LogBuffer;
@@ -20,6 +21,7 @@ use stats::StatsManager;
 use supervisor::Supervisor;
 use std::path::PathBuf;
 use std::sync::Arc;
+use user_mgr::UserManager;
 use web::{AppState, create_router};
 
 #[derive(Debug, Clone)]
@@ -69,6 +71,8 @@ impl HeimdallServer {
         let app_mgr = Arc::new(AppManager::new(&config.apps_dir));
         let stats_mgr = Arc::new(StatsManager::new(&config.capture_dir));
         let db_mgr = Arc::new(DatabaseManager::new(&config.db_path));
+        let user_mgr = Arc::new(UserManager::new(&config.db_path));
+        let session_mgr = Arc::new(SessionManager::new());
 
         let app_state = AppState {
             supervisor,
@@ -76,6 +80,8 @@ impl HeimdallServer {
             app_mgr,
             stats_mgr,
             db_mgr,
+            user_mgr,
+            session_mgr,
             log_buffer,
             auth_config: config.auth.clone(),
             web_dir: config.web_dir.clone(),
