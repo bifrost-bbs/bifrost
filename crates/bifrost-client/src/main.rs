@@ -1815,11 +1815,22 @@ fn load_client_dictionary(node_id: &[u8; 32]) -> bifrost_compression::Compressio
 }
 
 fn get_client_asset_content(node_id: &[u8; 32], asset_id: u16) -> Option<String> {
-    let enabled_apps = vec![
+    let mut enabled_apps = vec![
         "messages".to_string(),
         "profile".to_string(),
         "admin".to_string(),
     ];
+    let apps_dir = find_workspace_path("apps");
+    if let Ok(entries) = std::fs::read_dir(&apps_dir) {
+        for entry in entries.flatten() {
+            if entry.path().is_dir() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if !name.starts_with('.') && !enabled_apps.contains(&name) {
+                    enabled_apps.push(name);
+                }
+            }
+        }
+    }
     let manifest_map = bifrost_bbs::load_app_manifests(&enabled_apps);
     if let Some((_, rel_path)) = manifest_map.get(&asset_id) {
         let full_path = find_workspace_path(rel_path);
@@ -2472,8 +2483,8 @@ mod tests {
 
         assert!(form.active, "Form should be active");
         assert_eq!(form.form_id, 10, "Form ID should be 10");
-        assert_eq!(form.fields.len(), 8, "All 8 buttons in main_nav should be populated");
-        assert_eq!(form.fields[0].id, "read_boards");
+        assert_eq!(form.fields.len(), 4, "All 4 buttons in main_nav should be populated");
+        assert_eq!(form.fields[0].id, "messages");
         assert_eq!(form.fields[0].val, "MessageBoards");
         assert_eq!(form.fields[0].key, Some('M'));
         assert!(form.fields[0].is_submit);
@@ -2513,7 +2524,7 @@ mod tests {
         interpret_bytecode(&server_node, &bytecode, &mut form, LayoutMode::Full, 0, 0, &tx);
 
         assert!(form.active);
-        assert_eq!(form.fields.len(), 8);
+        assert_eq!(form.fields.len(), 4);
         for f in &form.fields {
             // Every field must be strictly within the 1..25 virtual terminal canvas
             assert!(f.row <= 25, "Field row {} should be <= 25 inside virtual terminal", f.row);

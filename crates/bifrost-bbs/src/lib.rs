@@ -676,10 +676,12 @@ function menu.on_start(session)
             session.close()
         elseif registered_apps[action] then
             session.load_app(registered_apps[action])
-        elseif action == "read_boards" then
+        elseif action == "read_boards" or action == "messages" then
             session.load_app("messages")
-        elseif action == "door_game" then
-            session.load_app("minidungeon")
+        elseif action == "profile" then
+            session.load_app("profile")
+        elseif action == "admin" then
+            session.load_app("admin")
         else
             local matched = false
             for _, app_info in ipairs(apps) do
@@ -2522,6 +2524,10 @@ fn run_session_task(
                 }
                 let manifest_rel = format!("apps/{}/manifest.toml", app_id);
                 let manifest_path = find_workspace_path(&manifest_rel);
+                if !manifest_path.is_file() {
+                    continue;
+                }
+
                 let mut name = app_id.clone();
                 let mut description = String::new();
                 let mut admin_only = app_id == "admin";
