@@ -18,6 +18,14 @@ pub enum TransportError {
     ConnectionClosed,
     #[error("MTU exceeded: payload was {0} bytes, limit is {1}")]
     MtuExceeded(usize, usize),
+    #[error("Hop limit exceeded: current {0}, max allowed {1}")]
+    HopLimitExceeded(u8, u8),
+    #[error("Routing loop detected: {0}")]
+    RoutingLoopDetected(String),
+    #[error("Invalid relay frame: {0}")]
+    InvalidRelayFrame(String),
+    #[error("Authentication failed: {0}")]
+    AuthenticationFailed(String),
 }
 
 /// MeshCore packet representation
@@ -92,7 +100,8 @@ impl TransportStats {
     /// Records a successful send of `payload_bytes` bytes.
     pub fn record_send(&self, payload_bytes: usize) {
         self.packets_sent.fetch_add(1, Ordering::Relaxed);
-        self.bytes_sent.fetch_add(payload_bytes as u64, Ordering::Relaxed);
+        self.bytes_sent
+            .fetch_add(payload_bytes as u64, Ordering::Relaxed);
         if let Ok(mut ts) = self.packet_timestamps.lock() {
             ts.push((Instant::now(), true));
         }
@@ -101,7 +110,8 @@ impl TransportStats {
     /// Records a successful receive of `payload_bytes` bytes.
     pub fn record_receive(&self, payload_bytes: usize) {
         self.packets_received.fetch_add(1, Ordering::Relaxed);
-        self.bytes_received.fetch_add(payload_bytes as u64, Ordering::Relaxed);
+        self.bytes_received
+            .fetch_add(payload_bytes as u64, Ordering::Relaxed);
         if let Ok(mut ts) = self.packet_timestamps.lock() {
             ts.push((Instant::now(), false));
         }
@@ -109,14 +119,18 @@ impl TransportStats {
 
     /// Records raw and compressed byte counts for transmitted data.
     pub fn record_compression(&self, raw_bytes: usize, compressed_bytes: usize) {
-        self.raw_bytes_sent.fetch_add(raw_bytes as u64, Ordering::Relaxed);
-        self.compressed_bytes_sent.fetch_add(compressed_bytes as u64, Ordering::Relaxed);
+        self.raw_bytes_sent
+            .fetch_add(raw_bytes as u64, Ordering::Relaxed);
+        self.compressed_bytes_sent
+            .fetch_add(compressed_bytes as u64, Ordering::Relaxed);
     }
 
     /// Records raw and compressed byte counts for received data.
     pub fn record_decompression(&self, compressed_bytes: usize, raw_bytes: usize) {
-        self.compressed_bytes_received.fetch_add(compressed_bytes as u64, Ordering::Relaxed);
-        self.raw_bytes_received.fetch_add(raw_bytes as u64, Ordering::Relaxed);
+        self.compressed_bytes_received
+            .fetch_add(compressed_bytes as u64, Ordering::Relaxed);
+        self.raw_bytes_received
+            .fetch_add(raw_bytes as u64, Ordering::Relaxed);
     }
 
     /// Records a send error.
@@ -277,12 +291,24 @@ impl MockSocketTransport {
                             let broadcast_rx = broadcast_tx.subscribe();
                             let tx_in_inner = tx_in_clone.clone();
                             tokio::spawn(async move {
-                                let _ = handle_socket_connection_broadcast(socket, broadcast_rx, tx_in_inner).await;
-                                log::debug!("Mock Socket Broker connection handler for {} finished", peer_addr);
+                                let _ = handle_socket_connection_broadcast(
+                                    socket,
+                                    broadcast_rx,
+                                    tx_in_inner,
+                                )
+                                .await;
+                                log::debug!(
+                                    "Mock Socket Broker connection handler for {} finished",
+                                    peer_addr
+                                );
                             });
                         }
                         Err(e) => {
-                            log::error!("Mock Socket Broker accept error on {}: {:?}", addr_clone, e);
+                            log::error!(
+                                "Mock Socket Broker accept error on {}: {:?}",
+                                addr_clone,
+                                e
+                            );
                             break;
                         }
                     }
@@ -492,7 +518,10 @@ impl RadioTransport for MockSocketTransport {
         log::info!(
             "[RADIO TX] {} bytes -> node {:02x}{:02x}..{:02x}{:02x}",
             payload_len,
-            dst[0], dst[1], dst[30], dst[31],
+            dst[0],
+            dst[1],
+            dst[30],
+            dst[31],
         );
 
         Ok(())
@@ -505,7 +534,10 @@ impl RadioTransport for MockSocketTransport {
             log::info!(
                 "[RADIO RX] {} bytes <- node {:02x}{:02x}..{:02x}{:02x}",
                 packet.payload.len(),
-                packet.src_node[0], packet.src_node[1], packet.src_node[30], packet.src_node[31],
+                packet.src_node[0],
+                packet.src_node[1],
+                packet.src_node[30],
+                packet.src_node[31],
             );
             Ok(packet)
         } else {
@@ -558,7 +590,6 @@ pub fn crc32(data: &[u8]) -> u32 {
     }
     !crc
 }
-
 
 /// Represents a high-level application message that can be fragmented/reassembled.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -780,6 +811,245 @@ impl Default for SessionPayloadCache {
     }
 }
 
+pub const RELAY_FLAG_E2EE: u8 = 0x01;
+pub const RELAY_FLAG_COMPRESSED: u8 = 0x02;
+pub const RELAY_FLAG_ERROR: u8 = 0x04;
+pub const RELAY_FLAG_HEARTBEAT: u8 = 0x08;
+pub const RELAY_FLAG_DISCONNECT: u8 = 0x10;
+pub const RELAY_FLAG_HANDSHAKE: u8 = 0x20;
+
+/// Authenticated multi-hop relay frame for inter-BBS network traversal.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BifrostRelayFrame {
+    pub version: u8,
+    pub flags: u8,
+    pub session_id: [u8; 16],
+    pub origin_node: [u8; 32],
+    pub target_node: [u8; 32],
+    pub hop_count: u8,
+    pub max_hops: u8,
+    pub visited_hops: Vec<[u8; 32]>,
+    pub timestamp: u64,
+    pub sequence: u32,
+    pub payload: Vec<u8>,
+    pub auth_tag: [u8; 16],
+}
+
+impl BifrostRelayFrame {
+    pub fn new(
+        session_id: [u8; 16],
+        origin_node: [u8; 32],
+        target_node: [u8; 32],
+        payload: Vec<u8>,
+    ) -> Self {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        Self {
+            version: 1,
+            flags: 0,
+            session_id,
+            origin_node,
+            target_node,
+            hop_count: 0,
+            max_hops: 3,
+            visited_hops: Vec::new(),
+            timestamp: now,
+            sequence: 0,
+            payload,
+            auth_tag: [0; 16],
+        }
+    }
+
+    pub fn with_flags(mut self, flags: u8) -> Self {
+        self.flags = flags;
+        self
+    }
+
+    pub fn with_max_hops(mut self, max_hops: u8) -> Self {
+        self.max_hops = max_hops;
+        self
+    }
+
+    pub fn with_sequence(mut self, sequence: u32) -> Self {
+        self.sequence = sequence;
+        self
+    }
+
+    pub fn increment_hop(&mut self, current_node: &[u8; 32]) -> Result<(), TransportError> {
+        if self.visited_hops.contains(current_node) {
+            return Err(TransportError::RoutingLoopDetected(format!(
+                "Node {:02x}{:02x}..{:02x}{:02x} already in visited list",
+                current_node[0], current_node[1], current_node[30], current_node[31]
+            )));
+        }
+
+        if self.hop_count >= self.max_hops {
+            return Err(TransportError::HopLimitExceeded(
+                self.hop_count,
+                self.max_hops,
+            ));
+        }
+
+        self.visited_hops.push(*current_node);
+        self.hop_count += 1;
+        Ok(())
+    }
+
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let visited_len = self.visited_hops.len().min(255) as u8;
+        let mut buf = Vec::with_capacity(117 + (visited_len as usize * 32) + self.payload.len());
+        buf.push(self.version);
+        buf.push(self.flags);
+        buf.extend_from_slice(&self.session_id);
+        buf.extend_from_slice(&self.origin_node);
+        buf.extend_from_slice(&self.target_node);
+        buf.push(self.hop_count);
+        buf.push(self.max_hops);
+        buf.push(visited_len);
+        for hop in self.visited_hops.iter().take(visited_len as usize) {
+            buf.extend_from_slice(hop);
+        }
+        buf.extend_from_slice(&self.timestamp.to_be_bytes());
+        buf.extend_from_slice(&self.sequence.to_be_bytes());
+        buf.extend_from_slice(&self.auth_tag);
+        buf.extend_from_slice(&(self.payload.len() as u32).to_be_bytes());
+        buf.extend_from_slice(&self.payload);
+        buf
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, TransportError> {
+        if bytes.len() < 117 {
+            return Err(TransportError::InvalidRelayFrame(format!(
+                "Frame length {} is less than minimum header 117 bytes",
+                bytes.len()
+            )));
+        }
+
+        let version = bytes[0];
+        let flags = bytes[1];
+        let mut session_id = [0u8; 16];
+        session_id.copy_from_slice(&bytes[2..18]);
+
+        let mut origin_node = [0u8; 32];
+        origin_node.copy_from_slice(&bytes[18..50]);
+
+        let mut target_node = [0u8; 32];
+        target_node.copy_from_slice(&bytes[50..82]);
+
+        let hop_count = bytes[82];
+        let max_hops = bytes[83];
+        let visited_count = bytes[84] as usize;
+
+        let visited_end = 85 + visited_count * 32;
+        if bytes.len() < visited_end + 32 {
+            return Err(TransportError::InvalidRelayFrame(format!(
+                "Frame length {} is too short for {} visited hops",
+                bytes.len(),
+                visited_count
+            )));
+        }
+
+        let mut visited_hops = Vec::with_capacity(visited_count);
+        for i in 0..visited_count {
+            let start = 85 + i * 32;
+            let mut hop = [0u8; 32];
+            hop.copy_from_slice(&bytes[start..start + 32]);
+            visited_hops.push(hop);
+        }
+
+        let mut offset = visited_end;
+        let timestamp = u64::from_be_bytes(bytes[offset..offset + 8].try_into().unwrap());
+        offset += 8;
+
+        let sequence = u32::from_be_bytes(bytes[offset..offset + 4].try_into().unwrap());
+        offset += 4;
+
+        let mut auth_tag = [0u8; 16];
+        auth_tag.copy_from_slice(&bytes[offset..offset + 16]);
+        offset += 16;
+
+        let payload_len =
+            u32::from_be_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
+        offset += 4;
+
+        if bytes.len() < offset + payload_len {
+            return Err(TransportError::InvalidRelayFrame(format!(
+                "Payload specified as {} bytes but only {} remaining",
+                payload_len,
+                bytes.len() - offset
+            )));
+        }
+
+        let payload = bytes[offset..offset + payload_len].to_vec();
+
+        Ok(Self {
+            version,
+            flags,
+            session_id,
+            origin_node,
+            target_node,
+            hop_count,
+            max_hops,
+            visited_hops,
+            timestamp,
+            sequence,
+            payload,
+            auth_tag,
+        })
+    }
+
+    /// Computes a 16-byte message authentication tag using a shared key and frame contents.
+    pub fn compute_auth_tag(&self, key: &[u8]) -> [u8; 16] {
+        let mut tag = [0u8; 16];
+        // Mix key bytes
+        for (i, &k) in key.iter().enumerate() {
+            tag[i % 16] ^= k;
+        }
+        // Mix session_id
+        for (i, &s) in self.session_id.iter().enumerate() {
+            tag[i] ^= s;
+        }
+        // Mix nodes
+        for i in 0..16 {
+            tag[i] ^= self.origin_node[i] ^ self.origin_node[i + 16];
+            tag[i] ^= self.target_node[i] ^ self.target_node[i + 16];
+        }
+        // Mix timestamp, sequence, hop_count
+        let ts_bytes = self.timestamp.to_be_bytes();
+        let seq_bytes = self.sequence.to_be_bytes();
+        for i in 0..8 {
+            tag[i] ^= ts_bytes[i];
+        }
+        for i in 0..4 {
+            tag[8 + i] ^= seq_bytes[i];
+        }
+        tag[12] ^= self.hop_count;
+        tag[13] ^= self.max_hops;
+        tag[14] ^= self.flags;
+
+        // Mix payload CRC32
+        let payload_crc = crc32(&self.payload);
+        let crc_bytes = payload_crc.to_be_bytes();
+        for i in 0..4 {
+            tag[12 + i] ^= crc_bytes[i];
+        }
+
+        tag
+    }
+
+    pub fn sign_auth_tag(&mut self, key: &[u8]) {
+        self.auth_tag = self.compute_auth_tag(key);
+    }
+
+    pub fn verify_auth_tag(&self, key: &[u8]) -> bool {
+        let expected = self.compute_auth_tag(key);
+        self.auth_tag == expected
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -958,7 +1228,6 @@ mod tests {
         assert_eq!(crc32(data), 0xCBF43926);
     }
 
-
     #[test]
     fn test_message_fragmentation_and_reassembly() {
         let original_payload = vec![0x41; 300]; // 300 bytes of 'A'
@@ -1094,8 +1363,16 @@ mod tests {
 
         // With a 120-second window, same counts spread over 2 minutes
         let (send_ppm_2, recv_ppm_2) = stats.packets_per_minute_last(120);
-        assert!((send_ppm_2 - 3.0).abs() < 0.01, "send_ppm_2 was {}", send_ppm_2);
-        assert!((recv_ppm_2 - 1.5).abs() < 0.01, "recv_ppm_2 was {}", recv_ppm_2);
+        assert!(
+            (send_ppm_2 - 3.0).abs() < 0.01,
+            "send_ppm_2 was {}",
+            send_ppm_2
+        );
+        assert!(
+            (recv_ppm_2 - 1.5).abs() < 0.01,
+            "recv_ppm_2 was {}",
+            recv_ppm_2
+        );
     }
 
     #[test]
@@ -1144,5 +1421,108 @@ mod tests {
         assert_eq!(cache.len(), 3);
         assert_eq!(cache.get(0x1111), None);
         assert_eq!(cache.get(0x4444), Some(&payload4));
+    }
+
+    #[test]
+    fn test_bifrost_relay_frame_roundtrip() {
+        let session_id = [0xAA; 16];
+        let origin = [0x11; 32];
+        let target = [0x22; 32];
+        let payload = b"Hello from User U to BBS B via Relay A".to_vec();
+
+        let mut frame = BifrostRelayFrame::new(session_id, origin, target, payload.clone())
+            .with_flags(RELAY_FLAG_E2EE | RELAY_FLAG_COMPRESSED)
+            .with_max_hops(4)
+            .with_sequence(42);
+
+        let hop1 = [0x33; 32];
+        frame.increment_hop(&hop1).unwrap();
+
+        let key = b"shared_secret_123456";
+        frame.sign_auth_tag(key);
+        assert!(frame.verify_auth_tag(key));
+
+        let bytes = frame.to_bytes();
+        let decoded = BifrostRelayFrame::from_bytes(&bytes).unwrap();
+
+        assert_eq!(decoded.version, 1);
+        assert_eq!(decoded.flags, RELAY_FLAG_E2EE | RELAY_FLAG_COMPRESSED);
+        assert_eq!(decoded.session_id, session_id);
+        assert_eq!(decoded.origin_node, origin);
+        assert_eq!(decoded.target_node, target);
+        assert_eq!(decoded.hop_count, 1);
+        assert_eq!(decoded.max_hops, 4);
+        assert_eq!(decoded.visited_hops, vec![hop1]);
+        assert_eq!(decoded.sequence, 42);
+        assert_eq!(decoded.payload, payload);
+        assert_eq!(decoded.auth_tag, frame.auth_tag);
+        assert!(decoded.verify_auth_tag(key));
+    }
+
+    #[test]
+    fn test_bifrost_relay_frame_hop_increment_and_limit() {
+        let session_id = [0x01; 16];
+        let origin = [0xAA; 32];
+        let target = [0xBB; 32];
+        let mut frame =
+            BifrostRelayFrame::new(session_id, origin, target, vec![0x12, 0x34]).with_max_hops(2);
+
+        let node1 = [0x10; 32];
+        let node2 = [0x20; 32];
+        let node3 = [0x30; 32];
+
+        assert!(frame.increment_hop(&node1).is_ok());
+        assert_eq!(frame.hop_count, 1);
+
+        assert!(frame.increment_hop(&node2).is_ok());
+        assert_eq!(frame.hop_count, 2);
+
+        // 3rd hop exceeds max_hops (2)
+        let res = frame.increment_hop(&node3);
+        assert!(res.is_err());
+        match res.unwrap_err() {
+            TransportError::HopLimitExceeded(curr, max) => {
+                assert_eq!(curr, 2);
+                assert_eq!(max, 2);
+            }
+            _ => panic!("Expected HopLimitExceeded"),
+        }
+    }
+
+    #[test]
+    fn test_bifrost_relay_frame_routing_loop_detection() {
+        let session_id = [0x01; 16];
+        let origin = [0xAA; 32];
+        let target = [0xBB; 32];
+        let mut frame =
+            BifrostRelayFrame::new(session_id, origin, target, vec![0x00]).with_max_hops(5);
+
+        let node_a = [0x0A; 32];
+        let node_b = [0x0B; 32];
+
+        assert!(frame.increment_hop(&node_a).is_ok());
+        assert!(frame.increment_hop(&node_b).is_ok());
+
+        // Attempt to visit node_a again -> Loop detected!
+        let res = frame.increment_hop(&node_a);
+        assert!(res.is_err());
+        match res.unwrap_err() {
+            TransportError::RoutingLoopDetected(msg) => {
+                assert!(msg.contains("already in visited list"));
+            }
+            _ => panic!("Expected RoutingLoopDetected"),
+        }
+    }
+
+    #[test]
+    fn test_bifrost_relay_frame_invalid_bytes() {
+        let too_short = vec![0x01; 50];
+        assert!(BifrostRelayFrame::from_bytes(&too_short).is_err());
+
+        // Truncated payload
+        let frame = BifrostRelayFrame::new([0; 16], [0; 32], [0; 32], vec![1, 2, 3, 4, 5]);
+        let mut bytes = frame.to_bytes();
+        bytes.pop(); // Remove 1 byte from payload
+        assert!(BifrostRelayFrame::from_bytes(&bytes).is_err());
     }
 }

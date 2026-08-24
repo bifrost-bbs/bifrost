@@ -1,7 +1,7 @@
 //! Heimdall CLI Entrypoint.
 
 use anyhow::Result;
-use heimdall::{HeimdallConfig, HeimdallServer, find_workspace_root};
+use heimdall::{find_workspace_root, HeimdallConfig, HeimdallServer};
 use std::path::PathBuf;
 
 #[tokio::main]

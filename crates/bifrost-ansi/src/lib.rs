@@ -292,7 +292,12 @@ mod tests {
     #[test]
     fn test_substitute_template() {
         let tmpl = "Sector: {0} [{1},{2}] Turns: {3}";
-        let params = vec!["10".to_string(), "04".to_string(), "08".to_string(), "100".to_string()];
+        let params = vec![
+            "10".to_string(),
+            "04".to_string(),
+            "08".to_string(),
+            "100".to_string(),
+        ];
         let res = substitute_template(tmpl, &params);
         assert_eq!(res, "Sector: 10 [04,08] Turns: 100");
     }

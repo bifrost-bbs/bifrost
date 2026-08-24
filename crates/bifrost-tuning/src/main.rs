@@ -43,10 +43,14 @@ fn print_help() {
     println!("Commands:");
     println!("  analyze   Benchmark and compare compression algorithms on captured packets");
     println!("  train     Train a custom BBS domain dictionary from captured packets");
-    println!("  sweep     Run parameter grid search across Heatshrink window and lookahead settings");
+    println!(
+        "  sweep     Run parameter grid search across Heatshrink window and lookahead settings"
+    );
     println!();
     println!("Options for 'analyze':");
-    println!("  --dir <PATH>   Path to captured raw packets directory [default: captured_packets/raw]");
+    println!(
+        "  --dir <PATH>   Path to captured raw packets directory [default: captured_packets/raw]"
+    );
     println!();
     println!("Options for 'train':");
     println!("  --dir <PATH>      Path to captured raw packets directory [default: captured_packets/raw]");
@@ -54,7 +58,9 @@ fn print_help() {
     println!("  --tokens <NUM>    Maximum tokens to train (1..254) [default: 128]");
     println!();
     println!("Options for 'sweep':");
-    println!("  --dir <PATH>   Path to captured raw packets directory [default: captured_packets/raw]");
+    println!(
+        "  --dir <PATH>   Path to captured raw packets directory [default: captured_packets/raw]"
+    );
 }
 
 fn load_samples_from_dir(dir: &Path) -> Result<Vec<Vec<u8>>> {
@@ -112,8 +118,15 @@ fn run_analyze(args: &[String]) -> Result<()> {
     println!("================================================================================");
     println!(" BIFROST COMPRESSION BENCHMARK & ANALYSIS REPORT");
     println!("================================================================================");
-    println!(" Dataset:       {:?} ({} sample packets)", dir, samples.len());
-    println!(" Total Raw:     {} bytes (Min: {} B, Avg: {:.1} B, Max: {} B)", total_raw, min_raw, avg_raw, max_raw);
+    println!(
+        " Dataset:       {:?} ({} sample packets)",
+        dir,
+        samples.len()
+    );
+    println!(
+        " Total Raw:     {} bytes (Min: {} B, Avg: {:.1} B, Max: {} B)",
+        total_raw, min_raw, avg_raw, max_raw
+    );
     println!("--------------------------------------------------------------------------------");
 
     let sample_refs: Vec<&[u8]> = samples.iter().map(|v| v.as_slice()).collect();
@@ -122,55 +135,83 @@ fn run_analyze(args: &[String]) -> Result<()> {
     let trained_dict_254 = DictionaryTrainer::train_from_samples(&sample_refs, 254);
 
     let algorithms: Vec<(&str, Box<dyn Fn(&[u8]) -> (u8, Vec<u8>)>)> = vec![
-        ("1. Uncompressed (Raw Baseline)", Box::new(|data| (0x00, data.to_vec()))),
-        ("2. Heatshrink (W=8, L=4 - Default)", Box::new(|data| {
-            let hs = Heatshrink::new(8, 4).unwrap();
-            let comp = hs.compress(data).unwrap_or_else(|_| data.to_vec());
-            (0x02, comp)
-        })),
-        ("3. Heatshrink (W=6, L=4 - Small Window)", Box::new(|data| {
-            let hs = Heatshrink::new(6, 4).unwrap();
-            let comp = hs.compress(data).unwrap_or_else(|_| data.to_vec());
-            (0x02, comp)
-        })),
-        ("4. Heatshrink (W=7, L=4 - Tuned)", Box::new(|data| {
-            let hs = Heatshrink::new(7, 4).unwrap();
-            let comp = hs.compress(data).unwrap_or_else(|_| data.to_vec());
-            (0x02, comp)
-        })),
-        ("5. Static Domain Dictionary Only", Box::new(|data| {
-            (0x04, static_dict.compress(data))
-        })),
-        ("6. Static Dict + Heatshrink (W=8, L=4)", Box::new(|data| {
-            let dict_comp = static_dict.compress(data);
-            let hs = Heatshrink::new(8, 4).unwrap();
-            let comp = hs.compress(&dict_comp).unwrap_or(dict_comp);
-            (0x06, comp)
-        })),
-        ("7. Trained Dict (128 tokens) Only", Box::new(|data| {
-            (0x04, trained_dict_128.compress(data))
-        })),
-        ("8. Trained Dict (128 tokens) + Heatshrink", Box::new(|data| {
-            let dict_comp = trained_dict_128.compress(data);
-            let hs = Heatshrink::new(8, 4).unwrap();
-            let comp = hs.compress(&dict_comp).unwrap_or(dict_comp);
-            (0x06, comp)
-        })),
-        ("9. Trained Dict (254 tokens) + Heatshrink", Box::new(|data| {
-            let dict_comp = trained_dict_254.compress(data);
-            let hs = Heatshrink::new(8, 4).unwrap();
-            let comp = hs.compress(&dict_comp).unwrap_or(dict_comp);
-            (0x06, comp)
-        })),
-        ("10. Adaptive Pipeline (Static Dict + Guard)", Box::new(|data| {
-            compress_adaptive(data, Some(&static_dict), 8, 4)
-        })),
-        ("11. Adaptive Pipeline (Trained Dict + Guard)", Box::new(|data| {
-            compress_adaptive(data, Some(&trained_dict_128), 8, 4)
-        })),
+        (
+            "1. Uncompressed (Raw Baseline)",
+            Box::new(|data| (0x00, data.to_vec())),
+        ),
+        (
+            "2. Heatshrink (W=8, L=4 - Default)",
+            Box::new(|data| {
+                let hs = Heatshrink::new(8, 4).unwrap();
+                let comp = hs.compress(data).unwrap_or_else(|_| data.to_vec());
+                (0x02, comp)
+            }),
+        ),
+        (
+            "3. Heatshrink (W=6, L=4 - Small Window)",
+            Box::new(|data| {
+                let hs = Heatshrink::new(6, 4).unwrap();
+                let comp = hs.compress(data).unwrap_or_else(|_| data.to_vec());
+                (0x02, comp)
+            }),
+        ),
+        (
+            "4. Heatshrink (W=7, L=4 - Tuned)",
+            Box::new(|data| {
+                let hs = Heatshrink::new(7, 4).unwrap();
+                let comp = hs.compress(data).unwrap_or_else(|_| data.to_vec());
+                (0x02, comp)
+            }),
+        ),
+        (
+            "5. Static Domain Dictionary Only",
+            Box::new(|data| (0x04, static_dict.compress(data))),
+        ),
+        (
+            "6. Static Dict + Heatshrink (W=8, L=4)",
+            Box::new(|data| {
+                let dict_comp = static_dict.compress(data);
+                let hs = Heatshrink::new(8, 4).unwrap();
+                let comp = hs.compress(&dict_comp).unwrap_or(dict_comp);
+                (0x06, comp)
+            }),
+        ),
+        (
+            "7. Trained Dict (128 tokens) Only",
+            Box::new(|data| (0x04, trained_dict_128.compress(data))),
+        ),
+        (
+            "8. Trained Dict (128 tokens) + Heatshrink",
+            Box::new(|data| {
+                let dict_comp = trained_dict_128.compress(data);
+                let hs = Heatshrink::new(8, 4).unwrap();
+                let comp = hs.compress(&dict_comp).unwrap_or(dict_comp);
+                (0x06, comp)
+            }),
+        ),
+        (
+            "9. Trained Dict (254 tokens) + Heatshrink",
+            Box::new(|data| {
+                let dict_comp = trained_dict_254.compress(data);
+                let hs = Heatshrink::new(8, 4).unwrap();
+                let comp = hs.compress(&dict_comp).unwrap_or(dict_comp);
+                (0x06, comp)
+            }),
+        ),
+        (
+            "10. Adaptive Pipeline (Static Dict + Guard)",
+            Box::new(|data| compress_adaptive(data, Some(&static_dict), 8, 4)),
+        ),
+        (
+            "11. Adaptive Pipeline (Trained Dict + Guard)",
+            Box::new(|data| compress_adaptive(data, Some(&trained_dict_128), 8, 4)),
+        ),
     ];
 
-    println!("{:<44} | {:>9} | {:>7} | {:>9} | {:>8}", "Algorithm", "Out Bytes", "Ratio", "Savings %", "Avg Time");
+    println!(
+        "{:<44} | {:>9} | {:>7} | {:>9} | {:>8}",
+        "Algorithm", "Out Bytes", "Ratio", "Savings %", "Avg Time"
+    );
     println!("--------------------------------------------------------------------------------");
 
     for (name, func) in algorithms {
@@ -199,12 +240,7 @@ fn run_analyze(args: &[String]) -> Result<()> {
 
         println!(
             "{:<44} | {:>7} B | {:>6.2}x | {:>+8.2}% | {:>6.1}µs{}",
-            name,
-            total_out,
-            ratio,
-            savings_pct,
-            avg_time_us,
-            expansion_note
+            name, total_out, ratio, savings_pct, avg_time_us, expansion_note
         );
     }
     println!("================================================================================");
@@ -223,7 +259,10 @@ fn run_sweep(args: &[String]) -> Result<()> {
     println!("================================================================================");
     println!(" Testing window size W in [4..11] and lookahead L in [3..6]");
     println!("--------------------------------------------------------------------------------");
-    println!("{:<8} | {:<10} | {:>9} | {:>7} | {:>9} | {:>10}", "Window", "Lookahead", "Out Bytes", "Ratio", "Savings %", "Expanded");
+    println!(
+        "{:<8} | {:<10} | {:>9} | {:>7} | {:>9} | {:>10}",
+        "Window", "Lookahead", "Out Bytes", "Ratio", "Savings %", "Expanded"
+    );
     println!("--------------------------------------------------------------------------------");
 
     let mut best_config: Option<(u8, u8, usize, f64)> = None;
@@ -243,19 +282,18 @@ fn run_sweep(args: &[String]) -> Result<()> {
                 }
 
                 let ratio = total_out as f64 / total_raw as f64;
-                let savings_pct = ((total_raw as f64 - total_out as f64) / total_raw as f64) * 100.0;
+                let savings_pct =
+                    ((total_raw as f64 - total_out as f64) / total_raw as f64) * 100.0;
 
                 println!(
                     "W={:<5} | L={:<8} | {:>7} B | {:>6.2}x | {:>+8.2}% | {:>10}",
-                    w,
-                    l,
-                    total_out,
-                    ratio,
-                    savings_pct,
-                    expanded
+                    w, l, total_out, ratio, savings_pct, expanded
                 );
 
-                if best_config.as_ref().map_or(true, |(_, _, best_bytes, _)| total_out < *best_bytes) {
+                if best_config
+                    .as_ref()
+                    .map_or(true, |(_, _, best_bytes, _)| total_out < *best_bytes)
+                {
                     best_config = Some((w, l, total_out, savings_pct));
                 }
             }
@@ -263,7 +301,9 @@ fn run_sweep(args: &[String]) -> Result<()> {
     }
 
     if let Some((best_w, best_l, best_bytes, best_savings)) = best_config {
-        println!("--------------------------------------------------------------------------------");
+        println!(
+            "--------------------------------------------------------------------------------"
+        );
         println!(
             " OPTIMAL CONFIG: W={} ({}B window), L={} ({}B lookahead) -> {} bytes ({:+.2}% savings)",
             best_w,
@@ -273,7 +313,9 @@ fn run_sweep(args: &[String]) -> Result<()> {
             best_bytes,
             best_savings
         );
-        println!("================================================================================");
+        println!(
+            "================================================================================"
+        );
     }
 
     Ok(())
@@ -290,7 +332,11 @@ fn run_train(args: &[String]) -> Result<()> {
     let samples = load_samples_from_dir(&dir)?;
     let sample_refs: Vec<&[u8]> = samples.iter().map(|v| v.as_slice()).collect();
 
-    println!("Training custom domain dictionary from {} samples (target: {} tokens)...", samples.len(), token_count);
+    println!(
+        "Training custom domain dictionary from {} samples (target: {} tokens)...",
+        samples.len(),
+        token_count
+    );
     let dict = DictionaryTrainer::train_from_samples(&sample_refs, token_count);
     let bytes = dict.to_bytes();
 
@@ -300,7 +346,12 @@ fn run_train(args: &[String]) -> Result<()> {
     }
     fs::write(&out_path, &bytes)?;
 
-    println!("Saved dictionary artifact ({} bytes, CRC32: 0x{:08X}) to {:?}", bytes.len(), dict.crc32(), out_path);
+    println!(
+        "Saved dictionary artifact ({} bytes, CRC32: 0x{:08X}) to {:?}",
+        bytes.len(),
+        dict.crc32(),
+        out_path
+    );
     println!("Dictionary contains {} tokens:", dict.tokens().len());
     for (i, t) in dict.tokens().iter().enumerate().take(25) {
         let display_str = String::from_utf8_lossy(t);
@@ -319,7 +370,11 @@ mod tests {
 
     #[test]
     fn test_parse_arg() {
-        let args = vec!["--dir".to_string(), "foo/bar".to_string(), "--tokens=64".to_string()];
+        let args = vec![
+            "--dir".to_string(),
+            "foo/bar".to_string(),
+            "--tokens=64".to_string(),
+        ];
         assert_eq!(parse_arg(&args, "--dir"), Some("foo/bar".to_string()));
         assert_eq!(parse_arg(&args, "--tokens"), Some("64".to_string()));
         assert_eq!(parse_arg(&args, "--missing"), None);
@@ -364,7 +419,8 @@ mod tests {
         assert!(out_dict.exists(), "Trained dictionary file must be created");
 
         let dict_bytes = std::fs::read(&out_dict).unwrap();
-        let loaded = CompressionDictionary::from_bytes(&dict_bytes).expect("Should parse generated dictionary");
+        let loaded = CompressionDictionary::from_bytes(&dict_bytes)
+            .expect("Should parse generated dictionary");
         assert!(!loaded.tokens().is_empty());
 
         let _ = std::fs::remove_dir_all(&temp_dir);

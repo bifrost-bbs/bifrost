@@ -1,6 +1,6 @@
-use std::sync::{Arc, Mutex};
+use rusqlite::{params, Connection, OptionalExtension, Result as SqlResult};
 use std::path::{Path, PathBuf};
-use rusqlite::{Connection, Result as SqlResult, params, OptionalExtension};
+use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq)]
 pub struct DatabaseConfig {
@@ -73,15 +73,21 @@ impl DatabaseMetrics {
     }
 
     pub fn record_query(&self, duration_nanos: u64, is_write: bool) {
-        self.query_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.query_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if is_write {
-            self.write_queries.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.write_queries
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         } else {
-            self.read_queries.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.read_queries
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
-        self.total_query_nanos.fetch_add(duration_nanos, std::sync::atomic::Ordering::Relaxed);
+        self.total_query_nanos
+            .fetch_add(duration_nanos, std::sync::atomic::Ordering::Relaxed);
 
-        let mut cur_min = self.min_query_nanos.load(std::sync::atomic::Ordering::Relaxed);
+        let mut cur_min = self
+            .min_query_nanos
+            .load(std::sync::atomic::Ordering::Relaxed);
         while duration_nanos < cur_min {
             match self.min_query_nanos.compare_exchange_weak(
                 cur_min,
@@ -94,7 +100,9 @@ impl DatabaseMetrics {
             }
         }
 
-        let mut cur_max = self.max_query_nanos.load(std::sync::atomic::Ordering::Relaxed);
+        let mut cur_max = self
+            .max_query_nanos
+            .load(std::sync::atomic::Ordering::Relaxed);
         while duration_nanos > cur_max {
             match self.max_query_nanos.compare_exchange_weak(
                 cur_max,
@@ -120,10 +128,18 @@ impl DatabaseMetrics {
     pub fn compute_telemetry(&self, total_records: usize, db_size_bytes: u64) -> DbTelemetryStats {
         let count = self.query_count.load(std::sync::atomic::Ordering::Relaxed);
         let read = self.read_queries.load(std::sync::atomic::Ordering::Relaxed);
-        let write = self.write_queries.load(std::sync::atomic::Ordering::Relaxed);
-        let total_nanos = self.total_query_nanos.load(std::sync::atomic::Ordering::Relaxed);
-        let min_nanos = self.min_query_nanos.load(std::sync::atomic::Ordering::Relaxed);
-        let max_nanos = self.max_query_nanos.load(std::sync::atomic::Ordering::Relaxed);
+        let write = self
+            .write_queries
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let total_nanos = self
+            .total_query_nanos
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let min_nanos = self
+            .min_query_nanos
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let max_nanos = self
+            .max_query_nanos
+            .load(std::sync::atomic::Ordering::Relaxed);
 
         let elapsed_secs = self.started_at.elapsed().as_secs_f64().max(1.0);
         let queries_per_hour = (count as f64 / elapsed_secs) * 3600.0;
@@ -134,7 +150,11 @@ impl DatabaseMetrics {
             0.0
         };
 
-        let min_query_time_micros = if min_nanos == u64::MAX { 0 } else { min_nanos / 1000 };
+        let min_query_time_micros = if min_nanos == u64::MAX {
+            0
+        } else {
+            min_nanos / 1000
+        };
         let max_query_time_micros = max_nanos / 1000;
 
         let (byte_growth_per_day, record_growth_per_day) = {
@@ -240,8 +260,11 @@ impl DatabaseStore {
         let start = std::time::Instant::now();
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare("SELECT value FROM store WHERE namespace = ?1 AND key = ?2")?;
-        let res = stmt.query_row(params![namespace, key], |row| row.get(0)).optional()?;
-        self.metrics.record_query(start.elapsed().as_nanos() as u64, false);
+        let res = stmt
+            .query_row(params![namespace, key], |row| row.get(0))
+            .optional()?;
+        self.metrics
+            .record_query(start.elapsed().as_nanos() as u64, false);
         Ok(res)
     }
 
@@ -253,7 +276,8 @@ impl DatabaseStore {
              ON CONFLICT(namespace, key) DO UPDATE SET value = ?3",
             params![namespace, key, value],
         )?;
-        self.metrics.record_query(start.elapsed().as_nanos() as u64, true);
+        self.metrics
+            .record_query(start.elapsed().as_nanos() as u64, true);
         Ok(())
     }
 
@@ -271,7 +295,8 @@ impl DatabaseStore {
             }
         }
         tx.commit()?;
-        self.metrics.record_query(start.elapsed().as_nanos() as u64, true);
+        self.metrics
+            .record_query(start.elapsed().as_nanos() as u64, true);
         Ok(())
     }
 
@@ -282,7 +307,8 @@ impl DatabaseStore {
             "DELETE FROM store WHERE namespace = ?1 AND key = ?2",
             params![namespace, key],
         )?;
-        self.metrics.record_query(start.elapsed().as_nanos() as u64, true);
+        self.metrics
+            .record_query(start.elapsed().as_nanos() as u64, true);
         Ok(())
     }
 
@@ -297,7 +323,8 @@ impl DatabaseStore {
         for key in rows {
             keys.push(key?);
         }
-        self.metrics.record_query(start.elapsed().as_nanos() as u64, false);
+        self.metrics
+            .record_query(start.elapsed().as_nanos() as u64, false);
         Ok(keys)
     }
 
@@ -305,8 +332,12 @@ impl DatabaseStore {
         let start = std::time::Instant::now();
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare("SELECT 1 FROM store WHERE namespace = ?1 LIMIT 1")?;
-        let exists = stmt.query_row(params![namespace], |_| Ok(true)).optional()?.unwrap_or(false);
-        self.metrics.record_query(start.elapsed().as_nanos() as u64, false);
+        let exists = stmt
+            .query_row(params![namespace], |_| Ok(true))
+            .optional()?
+            .unwrap_or(false);
+        self.metrics
+            .record_query(start.elapsed().as_nanos() as u64, false);
         Ok(exists)
     }
 
@@ -325,20 +356,23 @@ impl DatabaseStore {
         for entry in rows {
             entries.push(entry?);
         }
-        self.metrics.record_query(start.elapsed().as_nanos() as u64, false);
+        self.metrics
+            .record_query(start.elapsed().as_nanos() as u64, false);
         Ok(entries)
     }
 
     pub fn namespaces(&self) -> SqlResult<Vec<String>> {
         let start = std::time::Instant::now();
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare("SELECT DISTINCT namespace FROM store ORDER BY namespace ASC")?;
+        let mut stmt =
+            conn.prepare("SELECT DISTINCT namespace FROM store ORDER BY namespace ASC")?;
         let rows = stmt.query_map([], |row| row.get(0))?;
         let mut ns = Vec::new();
         for n in rows {
             ns.push(n?);
         }
-        self.metrics.record_query(start.elapsed().as_nanos() as u64, false);
+        self.metrics
+            .record_query(start.elapsed().as_nanos() as u64, false);
         Ok(ns)
     }
 
@@ -346,7 +380,8 @@ impl DatabaseStore {
         let start = std::time::Instant::now();
         let conn = self.conn.lock().unwrap();
         let count = conn.execute("DELETE FROM store WHERE namespace = ?1", params![namespace])?;
-        self.metrics.record_query(start.elapsed().as_nanos() as u64, true);
+        self.metrics
+            .record_query(start.elapsed().as_nanos() as u64, true);
         Ok(count)
     }
 
@@ -355,7 +390,8 @@ impl DatabaseStore {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare("SELECT COUNT(*) FROM store WHERE namespace = ?1")?;
         let count: i64 = stmt.query_row(params![namespace], |row| row.get(0))?;
-        self.metrics.record_query(start.elapsed().as_nanos() as u64, false);
+        self.metrics
+            .record_query(start.elapsed().as_nanos() as u64, false);
         Ok(count as usize)
     }
 
@@ -364,7 +400,8 @@ impl DatabaseStore {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare("SELECT COUNT(*) FROM store")?;
         let count: i64 = stmt.query_row([], |row| row.get(0))?;
-        self.metrics.record_query(start.elapsed().as_nanos() as u64, false);
+        self.metrics
+            .record_query(start.elapsed().as_nanos() as u64, false);
         Ok(count as usize)
     }
 
@@ -375,7 +412,7 @@ impl DatabaseStore {
             "SELECT namespace, COUNT(*), SUM(LENGTH(key) + COALESCE(LENGTH(value), 0))
              FROM store
              GROUP BY namespace
-             ORDER BY namespace ASC"
+             ORDER BY namespace ASC",
         )?;
         let rows = stmt.query_map([], |row| {
             let ns: String = row.get(0)?;
@@ -391,7 +428,8 @@ impl DatabaseStore {
         for r in rows {
             list.push(r?);
         }
-        self.metrics.record_query(start.elapsed().as_nanos() as u64, false);
+        self.metrics
+            .record_query(start.elapsed().as_nanos() as u64, false);
         Ok(list)
     }
 
@@ -423,7 +461,8 @@ impl DatabaseStore {
         let conn = self.conn.lock().unwrap();
         conn.execute("DELETE FROM store", [])?;
         conn.execute("VACUUM", []).ok();
-        self.metrics.record_query(start.elapsed().as_nanos() as u64, true);
+        self.metrics
+            .record_query(start.elapsed().as_nanos() as u64, true);
         Ok(())
     }
 
@@ -538,10 +577,16 @@ mod tests {
         assert_eq!(db.get("users", "alice").unwrap(), None);
 
         db.set("users", "alice", "{\"score\": 100}").unwrap();
-        assert_eq!(db.get("users", "alice").unwrap(), Some("{\"score\": 100}".to_string()));
+        assert_eq!(
+            db.get("users", "alice").unwrap(),
+            Some("{\"score\": 100}".to_string())
+        );
 
         db.set("users", "alice", "{\"score\": 200}").unwrap();
-        assert_eq!(db.get("users", "alice").unwrap(), Some("{\"score\": 200}".to_string()));
+        assert_eq!(
+            db.get("users", "alice").unwrap(),
+            Some("{\"score\": 200}".to_string())
+        );
 
         db.remove("users", "alice").unwrap();
         assert_eq!(db.get("users", "alice").unwrap(), None);
@@ -569,7 +614,13 @@ mod tests {
         assert_eq!(db.total_records().unwrap(), 3);
 
         let all = db.get_all("players").unwrap();
-        assert_eq!(all, vec![("p1".to_string(), "val1".to_string()), ("p2".to_string(), "val2".to_string())]);
+        assert_eq!(
+            all,
+            vec![
+                ("p1".to_string(), "val1".to_string()),
+                ("p2".to_string(), "val2".to_string())
+            ]
+        );
 
         db.clear_namespace("players").unwrap();
         assert_eq!(db.count("players").unwrap(), 0);
@@ -578,7 +629,13 @@ mod tests {
 
     #[test]
     fn test_database_store_persistence_on_disk() {
-        let temp_dir = std::env::temp_dir().join(format!("bifrost_db_test_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let temp_dir = std::env::temp_dir().join(format!(
+            "bifrost_db_test_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         let db_path = temp_dir.join("test.db");
         std::fs::create_dir_all(&temp_dir).unwrap();
 
@@ -662,7 +719,10 @@ mod tests {
     fn test_database_store_reset_and_backup_restore() {
         let temp_dir = std::env::temp_dir().join(format!(
             "bifrost_db_backup_test_{}",
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ));
         let db_path = temp_dir.join("test.db");
         std::fs::create_dir_all(&temp_dir).unwrap();
@@ -683,7 +743,10 @@ mod tests {
         // Restore
         db.restore_from_bytes(&backup).unwrap();
         assert_eq!(db.total_records().unwrap(), 2);
-        assert_eq!(db.get("users", "admin").unwrap(), Some(r#"{"nickname":"Root"}"#.to_string()));
+        assert_eq!(
+            db.get("users", "admin").unwrap(),
+            Some(r#"{"nickname":"Root"}"#.to_string())
+        );
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }

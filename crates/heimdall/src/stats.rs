@@ -75,7 +75,11 @@ impl StatsManager {
         self.capture_dir.join("compression_log.csv")
     }
 
-    pub fn get_captured_packets(&self, limit: Option<usize>, offset: Option<usize>) -> (Vec<CapturedPacketRow>, usize) {
+    pub fn get_captured_packets(
+        &self,
+        limit: Option<usize>,
+        offset: Option<usize>,
+    ) -> (Vec<CapturedPacketRow>, usize) {
         let csv_path = self.get_capture_csv_path();
         if !csv_path.exists() {
             return (Vec::new(), 0);
@@ -133,11 +137,7 @@ impl StatsManager {
         let offset_val = offset.unwrap_or(0);
         let limit_val = limit.unwrap_or(100);
 
-        let paged = rows
-            .into_iter()
-            .skip(offset_val)
-            .take(limit_val)
-            .collect();
+        let paged = rows.into_iter().skip(offset_val).take(limit_val).collect();
 
         (paged, total)
     }
@@ -177,7 +177,8 @@ impl StatsManager {
             summary.avg_comp_bytes = summary.total_comp_bytes as f64 / rows.len() as f64;
             summary.avg_bytes_per_packet = summary.avg_comp_bytes;
             summary.unique_users_count = 1; // Baseline local/single user session if no user list
-            summary.avg_bytes_per_packet_per_user = summary.avg_bytes_per_packet / summary.unique_users_count as f64;
+            summary.avg_bytes_per_packet_per_user =
+                summary.avg_bytes_per_packet / summary.unique_users_count as f64;
             summary.avg_duration_us = total_duration as f64 / rows.len() as f64;
         }
 
@@ -200,7 +201,13 @@ mod tests {
 
     #[test]
     fn test_stats_manager_csv_parsing_and_summary() {
-        let temp_dir = std::env::temp_dir().join(format!("heimdall_stats_test_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let temp_dir = std::env::temp_dir().join(format!(
+            "heimdall_stats_test_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         std::fs::create_dir_all(&temp_dir).unwrap();
 
         let csv_content = r#"timestamp,seq,direction,category,opcode,flags,raw_bytes,compressed_bytes,savings_percent,algorithm,duration_us,raw_file,comp_file

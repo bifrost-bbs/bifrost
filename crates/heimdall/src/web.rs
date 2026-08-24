@@ -8,8 +8,8 @@ use crate::logs::{LogBuffer, LogQuery};
 use crate::stats::StatsManager;
 use crate::supervisor::Supervisor;
 use crate::user_mgr::{
-    UserManager, UserInfo, ALL_HEIMDALL_PERMISSIONS, PERM_ADMIN,
-    PERM_HEIMDALL_LOGIN, PERM_HEIMDALL_USERS,
+    UserInfo, UserManager, ALL_HEIMDALL_PERMISSIONS, PERM_ADMIN, PERM_HEIMDALL_LOGIN,
+    PERM_HEIMDALL_USERS,
 };
 use crate::web_client::handle_web_terminal_ws;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -18,6 +18,7 @@ use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
+use bifrost_bbs::BbsNetworkRegistryManager;
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -131,6 +132,18 @@ pub struct ToggleAppBody {
     pub enabled: bool,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct NetworkQuery {
+    pub refresh: Option<bool>,
+    pub q: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TestPingBody {
+    pub host: String,
+    pub port: u16,
+}
+
 #[derive(Debug, Serialize)]
 pub struct AuthStatusResponse {
     pub setup_required: bool,
@@ -161,14 +174,35 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/auth/login", post(login_handler))
         .route("/api/auth/logout", post(logout_handler))
         .route("/api/auth/me", get(get_me_handler))
-        .route("/api/auth/change_password", post(change_my_password_handler))
-        .route("/api/auth/stop_impersonating", post(stop_impersonating_handler))
+        .route(
+            "/api/auth/change_password",
+            post(change_my_password_handler),
+        )
+        .route(
+            "/api/auth/stop_impersonating",
+            post(stop_impersonating_handler),
+        )
         // User Management
-        .route("/api/users", get(list_users_handler).post(create_user_handler))
-        .route("/api/users/:node_id", get(get_user_handler).delete(delete_user_handler))
-        .route("/api/users/:node_id/permissions", put(update_user_permissions_handler))
-        .route("/api/users/:node_id/reset_password", post(reset_user_password_handler))
-        .route("/api/users/:node_id/impersonate", post(impersonate_user_handler))
+        .route(
+            "/api/users",
+            get(list_users_handler).post(create_user_handler),
+        )
+        .route(
+            "/api/users/:node_id",
+            get(get_user_handler).delete(delete_user_handler),
+        )
+        .route(
+            "/api/users/:node_id/permissions",
+            put(update_user_permissions_handler),
+        )
+        .route(
+            "/api/users/:node_id/reset_password",
+            post(reset_user_password_handler),
+        )
+        .route(
+            "/api/users/:node_id/impersonate",
+            post(impersonate_user_handler),
+        )
         // Supervisor
         .route("/api/supervisor/status", get(get_supervisor_status))
         .route("/api/supervisor/start_bbs", post(start_bbs_handler))
@@ -180,30 +214,60 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/logs", get(query_logs_handler))
         .route("/api/logs/clear", post(clear_logs_handler))
         // Config
-        .route("/api/config", get(get_config_handler).post(save_config_handler))
+        .route(
+            "/api/config",
+            get(get_config_handler).post(save_config_handler),
+        )
         // Apps & Catalog
         .route("/api/apps", get(list_apps_handler))
         .route("/api/apps/:app_id", get(get_app_detail_handler))
         .route("/api/apps/:app_id/toggle", post(toggle_app_handler))
         .route("/api/apps/:app_id/files", get(list_app_files_handler))
-        .route("/api/apps/:app_id/file_content", get(get_app_file_content_handler).post(save_app_file_content_handler))
-        .route("/api/apps/:app_id/files/:filename", post(save_app_file_handler))
+        .route(
+            "/api/apps/:app_id/file_content",
+            get(get_app_file_content_handler).post(save_app_file_content_handler),
+        )
+        .route(
+            "/api/apps/:app_id/files/:filename",
+            post(save_app_file_handler),
+        )
         .route("/api/catalog", get(get_catalog_handler))
         .route("/api/catalog/install", post(install_catalog_app_handler))
-        .route("/api/catalog/uninstall", post(uninstall_catalog_app_handler))
+        .route(
+            "/api/catalog/uninstall",
+            post(uninstall_catalog_app_handler),
+        )
         // Database
         .route("/api/database/summary", get(get_database_summary_handler))
         .route("/api/database/tables", get(list_database_tables_handler))
-        .route("/api/database/telemetry", get(get_database_telemetry_handler))
+        .route(
+            "/api/database/telemetry",
+            get(get_database_telemetry_handler),
+        )
         .route("/api/database/backup", get(backup_database_handler))
         .route("/api/database/restore", post(restore_database_handler))
         .route("/api/database/reset", post(reset_database_handler))
-        .route("/api/database/table/:namespace", get(get_database_table_handler).delete(clear_database_table_handler))
-        .route("/api/database/table/:namespace/key/:key", get(get_database_key_handler).post(set_database_key_handler).delete(delete_database_key_handler))
+        .route(
+            "/api/database/table/:namespace",
+            get(get_database_table_handler).delete(clear_database_table_handler),
+        )
+        .route(
+            "/api/database/table/:namespace/key/:key",
+            get(get_database_key_handler)
+                .post(set_database_key_handler)
+                .delete(delete_database_key_handler),
+        )
         // Telemetry
         .route("/api/telemetry/summary", get(get_telemetry_summary_handler))
         .route("/api/telemetry/captures", get(get_captures_handler))
-        .route("/api/telemetry/capture_summary", get(get_capture_summary_handler))
+        .route(
+            "/api/telemetry/capture_summary",
+            get(get_capture_summary_handler),
+        )
+        // Multi-BBS Network Registry
+        .route("/api/network", get(get_network_registry_handler))
+        .route("/api/network/sync", post(sync_network_registry_handler))
+        .route("/api/network/test", post(test_network_ping_handler))
         // WebSockets
         .route("/ws/logs", get(ws_logs_handler))
         .route("/ws/terminal", get(ws_terminal_handler));
@@ -221,12 +285,19 @@ pub fn create_router(state: AppState) -> Router {
 
 // --- AUTH HELPERS ---
 
-fn extract_session(state: &AppState, headers: &HeaderMap, query_tok: Option<&str>) -> Option<Session> {
+fn extract_session(
+    state: &AppState,
+    headers: &HeaderMap,
+    query_tok: Option<&str>,
+) -> Option<Session> {
     let tok = state.session_mgr.extract_token(headers, query_tok)?;
     state.session_mgr.get_session(&tok)
 }
 
-fn require_auth_session(state: &AppState, headers: &HeaderMap) -> Result<Session, (StatusCode, String)> {
+fn require_auth_session(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<Session, (StatusCode, String)> {
     if let Some(session) = extract_session(state, headers, None) {
         return Ok(session);
     }
@@ -235,7 +306,8 @@ fn require_auth_session(state: &AppState, headers: &HeaderMap) -> Result<Session
         return Ok(Session {
             token: "anon".to_string(),
             user_id: [0u8; 32],
-            user_id_hex: "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
+            user_id_hex: "0000000000000000000000000000000000000000000000000000000000000000"
+                .to_string(),
             username: "Admin (Open Mode)".to_string(),
             permissions: vec![PERM_ADMIN.to_string()],
             is_admin: true,
@@ -244,10 +316,17 @@ fn require_auth_session(state: &AppState, headers: &HeaderMap) -> Result<Session
             created_at: 0,
         });
     }
-    Err((StatusCode::UNAUTHORIZED, "Authentication required".to_string()))
+    Err((
+        StatusCode::UNAUTHORIZED,
+        "Authentication required".to_string(),
+    ))
 }
 
-fn require_perm(state: &AppState, headers: &HeaderMap, perm: &str) -> Result<Session, (StatusCode, String)> {
+fn require_perm(
+    state: &AppState,
+    headers: &HeaderMap,
+    perm: &str,
+) -> Result<Session, (StatusCode, String)> {
     let session = require_auth_session(state, headers)?;
     if !session.has_permission(perm) {
         return Err((
@@ -294,7 +373,10 @@ async fn setup_admin_handler(
         .is_setup_required()
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     if !setup_required {
-        return Err((StatusCode::BAD_REQUEST, "Setup has already been completed".to_string()));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Setup has already been completed".to_string(),
+        ));
     }
 
     let user_info = state
@@ -307,7 +389,10 @@ async fn setup_admin_handler(
     state.log_buffer.push(
         "heimdall",
         "INFO",
-        &format!("Initial administrator account '{}' registered", user_info.nickname),
+        &format!(
+            "Initial administrator account '{}' registered",
+            user_info.nickname
+        ),
     );
 
     Ok(Json(AuthResponse {
@@ -324,9 +409,17 @@ async fn login_handler(
         .user_mgr
         .authenticate(&payload.username, &payload.password)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .ok_or((StatusCode::UNAUTHORIZED, "Invalid nickname or password".to_string()))?;
+        .ok_or((
+            StatusCode::UNAUTHORIZED,
+            "Invalid nickname or password".to_string(),
+        ))?;
 
-    if !user_info.is_admin && !user_info.permissions.iter().any(|p| p == PERM_HEIMDALL_LOGIN || p == PERM_ADMIN) {
+    if !user_info.is_admin
+        && !user_info
+            .permissions
+            .iter()
+            .any(|p| p == PERM_HEIMDALL_LOGIN || p == PERM_ADMIN)
+    {
         return Err((
             StatusCode::FORBIDDEN,
             "Access Denied: You do not have permission to log into Heimdall".to_string(),
@@ -373,7 +466,11 @@ async fn change_my_password_handler(
     let session = require_auth_session(&state, &headers)?;
     state
         .user_mgr
-        .change_password(&session.user_id_hex, &payload.old_password, &payload.new_password)
+        .change_password(
+            &session.user_id_hex,
+            &payload.old_password,
+            &payload.new_password,
+        )
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     Ok(StatusCode::OK)
 }
@@ -383,12 +480,18 @@ async fn stop_impersonating_handler(
     headers: HeaderMap,
 ) -> Result<Json<Session>, (StatusCode, String)> {
     let session = require_auth_session(&state, &headers)?;
-    let imp = session.impersonating.ok_or((StatusCode::BAD_REQUEST, "Not currently impersonating".to_string()))?;
+    let imp = session.impersonating.ok_or((
+        StatusCode::BAD_REQUEST,
+        "Not currently impersonating".to_string(),
+    ))?;
     let admin_user = state
         .user_mgr
         .get_user(&imp.admin_id)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .ok_or((StatusCode::NOT_FOUND, "Original admin user not found".to_string()))?;
+        .ok_or((
+            StatusCode::NOT_FOUND,
+            "Original admin user not found".to_string(),
+        ))?;
 
     let restored = state
         .session_mgr
@@ -398,7 +501,10 @@ async fn stop_impersonating_handler(
     state.log_buffer.push(
         "heimdall",
         "INFO",
-        &format!("Admin '{}' returned from impersonation", admin_user.nickname),
+        &format!(
+            "Admin '{}' returned from impersonation",
+            admin_user.nickname
+        ),
     );
 
     Ok(Json(restored))
@@ -492,7 +598,10 @@ async fn impersonate_user_handler(
     state.log_buffer.push(
         "heimdall",
         "INFO",
-        &format!("Admin '{}' is now impersonating '{}'", session.username, target_user.nickname),
+        &format!(
+            "Admin '{}' is now impersonating '{}'",
+            session.username, target_user.nickname
+        ),
     );
 
     Ok(Json(updated))
@@ -518,11 +627,19 @@ async fn serve_index_html(State(state): State<AppState>) -> impl IntoResponse {
         let p = dir.join("index.html");
         if p.exists() {
             if let Ok(c) = std::fs::read_to_string(p) {
-                return ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], Html(c)).into_response();
+                return (
+                    [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+                    Html(c),
+                )
+                    .into_response();
             }
         }
     }
-    ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], Html(EMBEDDED_INDEX_HTML)).into_response()
+    (
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        Html(EMBEDDED_INDEX_HTML),
+    )
+        .into_response()
 }
 
 async fn serve_style_css(State(state): State<AppState>) -> impl IntoResponse {
@@ -534,7 +651,11 @@ async fn serve_style_css(State(state): State<AppState>) -> impl IntoResponse {
             }
         }
     }
-    ([(header::CONTENT_TYPE, "text/css; charset=utf-8")], EMBEDDED_STYLE_CSS).into_response()
+    (
+        [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
+        EMBEDDED_STYLE_CSS,
+    )
+        .into_response()
 }
 
 async fn serve_app_js(State(state): State<AppState>) -> impl IntoResponse {
@@ -542,11 +663,25 @@ async fn serve_app_js(State(state): State<AppState>) -> impl IntoResponse {
         let p = dir.join("app.js");
         if p.exists() {
             if let Ok(c) = std::fs::read_to_string(p) {
-                return ([(header::CONTENT_TYPE, "application/javascript; charset=utf-8")], c).into_response();
+                return (
+                    [(
+                        header::CONTENT_TYPE,
+                        "application/javascript; charset=utf-8",
+                    )],
+                    c,
+                )
+                    .into_response();
             }
         }
     }
-    ([(header::CONTENT_TYPE, "application/javascript; charset=utf-8")], EMBEDDED_APP_JS).into_response()
+    (
+        [(
+            header::CONTENT_TYPE,
+            "application/javascript; charset=utf-8",
+        )],
+        EMBEDDED_APP_JS,
+    )
+        .into_response()
 }
 
 // --- REST HANDLERS ---
@@ -556,8 +691,14 @@ async fn get_supervisor_status(State(state): State<AppState>) -> impl IntoRespon
     Json(list)
 }
 
-async fn start_bbs_handler(State(state): State<AppState>) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let cfg_path = state.config_mgr.get_config_path().to_string_lossy().to_string();
+async fn start_bbs_handler(
+    State(state): State<AppState>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let cfg_path = state
+        .config_mgr
+        .get_config_path()
+        .to_string_lossy()
+        .to_string();
     state
         .supervisor
         .start_bbs(Some(&cfg_path), Some("captured_packets"))
@@ -566,7 +707,9 @@ async fn start_bbs_handler(State(state): State<AppState>) -> Result<impl IntoRes
     Ok(Json(serde_json::json!({ "status": "started" })))
 }
 
-async fn stop_bbs_handler(State(state): State<AppState>) -> Result<impl IntoResponse, (StatusCode, String)> {
+async fn stop_bbs_handler(
+    State(state): State<AppState>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
     state
         .supervisor
         .stop_bbs()
@@ -575,8 +718,14 @@ async fn stop_bbs_handler(State(state): State<AppState>) -> Result<impl IntoResp
     Ok(Json(serde_json::json!({ "status": "stopped" })))
 }
 
-async fn restart_bbs_handler(State(state): State<AppState>) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let cfg_path = state.config_mgr.get_config_path().to_string_lossy().to_string();
+async fn restart_bbs_handler(
+    State(state): State<AppState>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let cfg_path = state
+        .config_mgr
+        .get_config_path()
+        .to_string_lossy()
+        .to_string();
     state
         .supervisor
         .restart_bbs(Some(&cfg_path), Some("captured_packets"))
@@ -596,7 +745,9 @@ async fn start_crawler_handler(
         .start_crawler(steps, delay)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    Ok(Json(serde_json::json!({ "status": "crawler_started", "steps": steps })))
+    Ok(Json(
+        serde_json::json!({ "status": "crawler_started", "steps": steps }),
+    ))
 }
 
 async fn run_tuning_handler(
@@ -612,7 +763,9 @@ async fn run_tuning_handler(
         .run_tuning(&q.command, &str_args)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    Ok(Json(serde_json::json!({ "status": "tuning_started", "command": q.command })))
+    Ok(Json(
+        serde_json::json!({ "status": "tuning_started", "command": q.command }),
+    ))
 }
 
 async fn query_logs_handler(
@@ -628,7 +781,9 @@ async fn clear_logs_handler(State(state): State<AppState>) -> impl IntoResponse 
     Json(serde_json::json!({ "status": "cleared" }))
 }
 
-async fn get_config_handler(State(state): State<AppState>) -> Result<impl IntoResponse, (StatusCode, String)> {
+async fn get_config_handler(
+    State(state): State<AppState>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
     let resp = state
         .config_mgr
         .get_response()
@@ -649,7 +804,9 @@ async fn save_config_handler(
 
 async fn list_apps_handler(State(state): State<AppState>) -> impl IntoResponse {
     let cfg = state.config_mgr.get_config();
-    let apps = state.app_mgr.list_apps(&cfg.apps.enabled, &cfg.apps.main_app);
+    let apps = state
+        .app_mgr
+        .list_apps(&cfg.apps.enabled, &cfg.apps.main_app);
     Json(apps)
 }
 
@@ -698,7 +855,9 @@ async fn save_app_file_content_handler(
         .app_mgr
         .save_app_file(&app_id, &q.path, &body)
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    Ok(Json(serde_json::json!({ "status": "saved", "path": q.path })))
+    Ok(Json(
+        serde_json::json!({ "status": "saved", "path": q.path }),
+    ))
 }
 
 async fn save_app_file_handler(
@@ -753,9 +912,10 @@ async fn get_catalog_handler(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     let cfg = state.config_mgr.get_config();
-    let statuses = state
-        .app_mgr
-        .get_catalog_status(&catalog, &cfg.apps.enabled, &cfg.apps.main_app);
+    let statuses =
+        state
+            .app_mgr
+            .get_catalog_status(&catalog, &cfg.apps.enabled, &cfg.apps.main_app);
     Ok(Json(serde_json::json!({
         "catalog_version": catalog.catalog_version,
         "updated_at": catalog.updated_at,
@@ -906,10 +1066,15 @@ async fn backup_database_handler(
     );
 
     let mut headers = axum::http::HeaderMap::new();
-    headers.insert(header::CONTENT_TYPE, "application/octet-stream".parse().unwrap());
+    headers.insert(
+        header::CONTENT_TYPE,
+        "application/octet-stream".parse().unwrap(),
+    );
     headers.insert(
         header::CONTENT_DISPOSITION,
-        format!("attachment; filename=\"{}\"", filename).parse().unwrap(),
+        format!("attachment; filename=\"{}\"", filename)
+            .parse()
+            .unwrap(),
     );
 
     Ok((headers, bytes))
@@ -926,7 +1091,9 @@ async fn restore_database_handler(
         .db_mgr
         .restore_db(&body)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    Ok(Json(serde_json::json!({ "status": "ok", "restored": true, "bytes": body.len() })))
+    Ok(Json(
+        serde_json::json!({ "status": "ok", "restored": true, "bytes": body.len() }),
+    ))
 }
 
 async fn reset_database_handler(
@@ -958,7 +1125,9 @@ async fn clear_database_table_handler(
         .db_mgr
         .clear_table(&namespace)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    Ok(Json(serde_json::json!({ "status": "ok", "cleared_records": count })))
+    Ok(Json(
+        serde_json::json!({ "status": "ok", "cleared_records": count }),
+    ))
 }
 
 async fn get_database_key_handler(
@@ -969,7 +1138,9 @@ async fn get_database_key_handler(
         .db_mgr
         .get_key(&namespace, &key)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    Ok(Json(serde_json::json!({ "namespace": namespace, "key": key, "value": val })))
+    Ok(Json(
+        serde_json::json!({ "namespace": namespace, "key": key, "value": val }),
+    ))
 }
 
 async fn set_database_key_handler(
@@ -981,7 +1152,9 @@ async fn set_database_key_handler(
         .db_mgr
         .set_key(&namespace, &key, &body.value)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    Ok(Json(serde_json::json!({ "status": "ok", "namespace": namespace, "key": key })))
+    Ok(Json(
+        serde_json::json!({ "status": "ok", "namespace": namespace, "key": key }),
+    ))
 }
 
 async fn delete_database_key_handler(
@@ -995,12 +1168,97 @@ async fn delete_database_key_handler(
     Ok(Json(serde_json::json!({ "status": "ok", "deleted": true })))
 }
 
+// --- MULTI-BBS NETWORK REGISTRY HANDLERS ---
+
+async fn get_network_registry_handler(
+    State(state): State<AppState>,
+    Query(q): Query<NetworkQuery>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let cfg = state.config_mgr.get_config();
+    let cache_path = bifrost_bbs::find_workspace_path(&cfg.network.registry_cache_file);
+    let reg_mgr = BbsNetworkRegistryManager::new(cache_path);
+
+    if q.refresh.unwrap_or(false) {
+        let _ = reg_mgr.sync_from_url(&cfg.network.registry_url);
+    }
+
+    let nodes = if let Some(query_str) = q.q {
+        reg_mgr.search(&query_str)
+    } else {
+        reg_mgr.get_nodes()
+    };
+
+    Ok(Json(serde_json::json!({
+        "network_enabled": cfg.network.enabled,
+        "max_hops": cfg.network.max_hops,
+        "allow_inbound_relay": cfg.network.allow_inbound_relay,
+        "registry_url": cfg.network.registry_url,
+        "total_nodes": nodes.len(),
+        "nodes": nodes,
+    })))
+}
+
+async fn sync_network_registry_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    require_perm(&state, &headers, PERM_ADMIN)?;
+    let cfg = state.config_mgr.get_config();
+    let cache_path = bifrost_bbs::find_workspace_path(&cfg.network.registry_cache_file);
+    let reg_mgr = BbsNetworkRegistryManager::new(cache_path);
+
+    let count = reg_mgr
+        .sync_from_url(&cfg.network.registry_url)
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Sync failed: {}", e),
+            )
+        })?;
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "synced_nodes": count,
+    })))
+}
+
+async fn test_network_ping_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<TestPingBody>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    require_perm(&state, &headers, PERM_ADMIN)?;
+
+    let addr = format!("{}:{}", body.host, body.port);
+    let start = std::time::Instant::now();
+    let timeout = std::time::Duration::from_millis(1500);
+
+    let result = tokio::time::timeout(timeout, tokio::net::TcpStream::connect(&addr)).await;
+    match result {
+        Ok(Ok(_)) => {
+            let latency_ms = start.elapsed().as_millis() as u64;
+            Ok(Json(serde_json::json!({
+                "reachable": true,
+                "latency_ms": latency_ms,
+                "endpoint": addr,
+            })))
+        }
+        Ok(Err(e)) => Ok(Json(serde_json::json!({
+            "reachable": false,
+            "error": e.to_string(),
+            "endpoint": addr,
+        }))),
+        Err(_) => Ok(Json(serde_json::json!({
+            "reachable": false,
+            "error": "Connection timed out (1500ms)".to_string(),
+            "endpoint": addr,
+        }))),
+    }
+}
+
 // --- WEBSOCKET HANDLERS ---
 
-async fn ws_logs_handler(
-    ws: WebSocketUpgrade,
-    State(state): State<AppState>,
-) -> Response {
+async fn ws_logs_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> Response {
     ws.on_upgrade(move |socket| handle_logs_ws(socket, state.log_buffer))
 }
 
@@ -1039,7 +1297,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_web_routes_and_static_fallback() {
-        let temp_dir = std::env::temp_dir().join(format!("heimdall_web_test_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let temp_dir = std::env::temp_dir().join(format!(
+            "heimdall_web_test_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         std::fs::create_dir_all(&temp_dir).unwrap();
 
         let log_buf = Arc::new(LogBuffer::default());
@@ -1074,12 +1338,18 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
 
         // Test GET /style.css
-        let req_css = Request::builder().uri("/style.css").body(Body::empty()).unwrap();
+        let req_css = Request::builder()
+            .uri("/style.css")
+            .body(Body::empty())
+            .unwrap();
         let resp_css = app.clone().oneshot(req_css).await.unwrap();
         assert_eq!(resp_css.status(), StatusCode::OK);
 
         // Test GET /api/auth/status
-        let req_auth_stat = Request::builder().uri("/api/auth/status").body(Body::empty()).unwrap();
+        let req_auth_stat = Request::builder()
+            .uri("/api/auth/status")
+            .body(Body::empty())
+            .unwrap();
         let resp_auth_stat = app.clone().oneshot(req_auth_stat).await.unwrap();
         assert_eq!(resp_auth_stat.status(), StatusCode::OK);
 
@@ -1087,7 +1357,8 @@ mod tests {
         let setup_body = serde_json::json!({
             "username": "AdminUser",
             "password": "AdminPassword123"
-        }).to_string();
+        })
+        .to_string();
         let req_setup = Request::builder()
             .method("POST")
             .uri("/api/auth/setup")
@@ -1096,12 +1367,17 @@ mod tests {
             .unwrap();
         let resp_setup = app.clone().oneshot(req_setup).await.unwrap();
         assert_eq!(resp_setup.status(), StatusCode::OK);
-        let body_bytes = axum::body::to_bytes(resp_setup.into_body(), usize::MAX).await.unwrap();
+        let body_bytes = axum::body::to_bytes(resp_setup.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let auth_res: AuthResponse = serde_json::from_slice(&body_bytes).unwrap();
         let token = auth_res.token;
 
         // Test GET /api/supervisor/status
-        let req_status = Request::builder().uri("/api/supervisor/status").body(Body::empty()).unwrap();
+        let req_status = Request::builder()
+            .uri("/api/supervisor/status")
+            .body(Body::empty())
+            .unwrap();
         let resp_status = app.clone().oneshot(req_status).await.unwrap();
         assert_eq!(resp_status.status(), StatusCode::OK);
 
@@ -1119,7 +1395,8 @@ mod tests {
             "username": "BobUser",
             "password": "BobPassword123",
             "permissions": [PERM_HEIMDALL_LOGIN, "heimdall.terminal"]
-        }).to_string();
+        })
+        .to_string();
         let req_create_u = Request::builder()
             .method("POST")
             .uri("/api/users")
@@ -1131,12 +1408,31 @@ mod tests {
         assert_eq!(resp_create_u.status(), StatusCode::OK);
 
         // Test GET /api/catalog
-        let req_catalog = Request::builder().uri("/api/catalog").body(Body::empty()).unwrap();
+        let req_catalog = Request::builder()
+            .uri("/api/catalog")
+            .body(Body::empty())
+            .unwrap();
         let resp_catalog = app.clone().oneshot(req_catalog).await.unwrap();
         assert_eq!(resp_catalog.status(), StatusCode::OK);
-        let cat_bytes = axum::body::to_bytes(resp_catalog.into_body(), usize::MAX).await.unwrap();
+        let cat_bytes = axum::body::to_bytes(resp_catalog.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let cat_val: serde_json::Value = serde_json::from_slice(&cat_bytes).unwrap();
         assert!(cat_val["apps"].as_array().unwrap().len() >= 4);
+
+        // Test GET /api/network
+        let req_network = Request::builder()
+            .uri("/api/network")
+            .body(Body::empty())
+            .unwrap();
+        let resp_network = app.clone().oneshot(req_network).await.unwrap();
+        assert_eq!(resp_network.status(), StatusCode::OK);
+        let net_bytes = axum::body::to_bytes(resp_network.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let net_val: serde_json::Value = serde_json::from_slice(&net_bytes).unwrap();
+        assert_eq!(net_val["network_enabled"], true);
+        assert!(net_val["nodes"].as_array().unwrap().len() >= 3);
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }

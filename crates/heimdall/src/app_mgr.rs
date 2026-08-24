@@ -484,9 +484,7 @@ impl AppManager {
 
         let fetched = match client {
             Ok(c) => match c.get(url).send().await {
-                Ok(resp) if resp.status().is_success() => {
-                    resp.json::<AppCatalogIndex>().await.ok()
-                }
+                Ok(resp) if resp.status().is_success() => resp.json::<AppCatalogIndex>().await.ok(),
                 _ => None,
             },
             _ => None,
@@ -547,11 +545,7 @@ impl AppManager {
     }
 
     /// Installs an app archive from tarball bytes.
-    pub fn install_app_from_tarball_bytes(
-        &self,
-        app_id: &str,
-        tarball_bytes: &[u8],
-    ) -> Result<()> {
+    pub fn install_app_from_tarball_bytes(&self, app_id: &str, tarball_bytes: &[u8]) -> Result<()> {
         Self::validate_app_id(app_id)?;
         if Self::is_builtin(app_id) {
             anyhow::bail!("Cannot overwrite core built-in application '{}'", app_id);

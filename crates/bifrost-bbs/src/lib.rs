@@ -13,7 +13,15 @@ use std::time::Instant;
 use tokio::sync::mpsc;
 
 pub mod db;
-pub use db::{DatabaseConfig, DatabaseStore, DbTelemetryStats, TableStats, default_database_config};
+pub use db::{
+    default_database_config, DatabaseConfig, DatabaseStore, DbTelemetryStats, TableStats,
+};
+
+pub mod network;
+pub use network::{
+    default_network_config, BbsCapabilities, BbsEndpoint, BbsLocation, BbsNetworkRegistryManager,
+    BbsNodeEntry, BbsRegistry, BbsSysop, NetworkConfig, EMBEDDED_NETWORK_HUB_LUA,
+};
 
 // Pull from sibling workspace crates
 use bifrost_transport::{
@@ -64,14 +72,18 @@ impl BbsStats {
 
     /// Records raw and compressed byte counts for transmitted data.
     pub fn record_compression(&self, raw_bytes: usize, compressed_bytes: usize) {
-        self.raw_bytes_sent.fetch_add(raw_bytes as u64, Ordering::Relaxed);
-        self.compressed_bytes_sent.fetch_add(compressed_bytes as u64, Ordering::Relaxed);
+        self.raw_bytes_sent
+            .fetch_add(raw_bytes as u64, Ordering::Relaxed);
+        self.compressed_bytes_sent
+            .fetch_add(compressed_bytes as u64, Ordering::Relaxed);
     }
 
     /// Records raw and compressed byte counts for received data.
     pub fn record_decompression(&self, compressed_bytes: usize, raw_bytes: usize) {
-        self.compressed_bytes_received.fetch_add(compressed_bytes as u64, Ordering::Relaxed);
-        self.raw_bytes_received.fetch_add(raw_bytes as u64, Ordering::Relaxed);
+        self.compressed_bytes_received
+            .fetch_add(compressed_bytes as u64, Ordering::Relaxed);
+        self.raw_bytes_received
+            .fetch_add(raw_bytes as u64, Ordering::Relaxed);
     }
 
     /// Total uncompressed raw bytes sent.
@@ -108,7 +120,10 @@ impl BbsStats {
 
     /// Returns the current number of active sessions.
     pub fn active_sessions(&self) -> usize {
-        *self.active_session_count.lock().unwrap_or_else(|e| e.into_inner())
+        *self
+            .active_session_count
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
     }
 }
 
@@ -251,6 +266,8 @@ pub struct AppConfig {
     pub packet_capture: PacketCaptureConfig,
     #[serde(default = "default_database_config")]
     pub database: DatabaseConfig,
+    #[serde(default = "default_network_config")]
+    pub network: NetworkConfig,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq)]
@@ -310,7 +327,10 @@ impl PacketRecorder {
             "timestamp,seq,direction,category,opcode,flags,raw_bytes,compressed_bytes,savings_percent,algorithm,duration_us,raw_file,comp_file"
         )?;
 
-        log::info!("Packet capture active, logging to {:?} (clean capture initialized)", base_dir);
+        log::info!(
+            "Packet capture active, logging to {:?} (clean capture initialized)",
+            base_dir
+        );
 
         Ok(Self {
             base_dir,
@@ -338,13 +358,23 @@ impl PacketRecorder {
             .unwrap_or_default()
             .as_secs_f64();
 
-        let raw_filename = format!("seq_{:06}_{}_{}.bin", seq, direction.to_lowercase(), category);
+        let raw_filename = format!(
+            "seq_{:06}_{}_{}.bin",
+            seq,
+            direction.to_lowercase(),
+            category
+        );
         let raw_path = self.raw_dir.join(&raw_filename);
         let _ = std::fs::write(&raw_path, raw);
         let raw_rel = format!("raw/{}", raw_filename);
 
         let (comp_bytes, savings_pct, comp_rel) = if let Some(comp) = compressed {
-            let comp_filename = format!("seq_{:06}_{}_{}.bin", seq, direction.to_lowercase(), category);
+            let comp_filename = format!(
+                "seq_{:06}_{}_{}.bin",
+                seq,
+                direction.to_lowercase(),
+                category
+            );
             let comp_path = self.comp_dir.join(&comp_filename);
             let _ = std::fs::write(&comp_path, comp);
             let raw_len = raw.len() as f64;
@@ -448,6 +478,7 @@ pub fn default_config() -> AppConfig {
         main_menu: default_main_menu_config(),
         packet_capture: default_packet_capture_config(),
         database: default_database_config(),
+        network: default_network_config(),
     }
 }
 
@@ -489,12 +520,7 @@ pub async fn run_bbs_with_capture(
     let mock_transport = if run_duration_secs.is_some() {
         MockSocketTransport::new(0.0, 10, 200)
     } else {
-        MockSocketTransport::new_server(
-            "127.0.0.1:8088".to_string(),
-            0.0,
-            10,
-            200,
-        )
+        MockSocketTransport::new_server("127.0.0.1:8088".to_string(), 0.0, 10, 200)
     };
     let transport_stats = mock_transport.stats.clone();
     let transport: Arc<dyn RadioTransport> = Arc::new(mock_transport);
@@ -653,6 +679,21 @@ function menu.on_start(session)
         end
     end
 
+    if type(session.is_network_enabled) == "function" and session.is_network_enabled() then
+        term.add_submit_button("network_hub", current_col, current_row)
+        if layout == "grid" then
+            items_in_col = items_in_col + 1
+            if items_in_col % 3 == 0 then
+                current_col = current_col + col_width
+                current_row = start_row
+            else
+                current_row = current_row + 2
+            end
+        else
+            current_row = current_row + 2
+        end
+    end
+
     if cfg.show_logout then
         term.add_submit_button("logout", current_col, current_row)
     end
@@ -661,6 +702,11 @@ function menu.on_start(session)
 
     session.await_input(10, function(submission)
         if type(submission) == "string" then
+            local s = submission:lower()
+            if s == "n" or s == "net" or s == "network" then
+                session.load_app("network_hub")
+                return
+            end
             menu.on_start(session)
             return
         end
@@ -674,6 +720,8 @@ function menu.on_start(session)
             term.print("Goodbye, " .. user.nickname .. "!\n")
             term.flush()
             session.close()
+        elseif action == "network_hub" then
+            session.load_app("network_hub")
         elseif registered_apps[action] then
             session.load_app(registered_apps[action])
         elseif action == "read_boards" or action == "messages" then
@@ -798,7 +846,13 @@ pub fn load_app_manifests(enabled_apps: &[String]) -> HashMap<u16, (String, Stri
     // Register active dictionary artifact as system asset 0x00DF if available on disk
     let dict_path = find_workspace_path("config/bbs_dict.bin");
     if dict_path.exists() {
-        map.insert(0x00DF, ("system/compression_dict".to_string(), "config/bbs_dict.bin".to_string()));
+        map.insert(
+            0x00DF,
+            (
+                "system/compression_dict".to_string(),
+                "config/bbs_dict.bin".to_string(),
+            ),
+        );
         log::debug!("Registered domain dictionary as public asset 0x00DF: 'config/bbs_dict.bin'");
     }
 
@@ -848,7 +902,8 @@ pub fn resolve_asset_id_and_content(
         // 5. Substring match fallback
         .or_else(|| {
             manifest_map.iter().find(|(_, (n, _))| {
-                n.to_ascii_uppercase().contains(&asset_name.to_ascii_uppercase())
+                n.to_ascii_uppercase()
+                    .contains(&asset_name.to_ascii_uppercase())
             })
         });
 
@@ -1123,7 +1178,8 @@ pub async fn start_server_with_stats(
     // Passive on-demand broadcasting is handled when a connected client requests a missing asset.
     if config.asset_broadcaster.enable_on_demand_broadcast {
         info!("On-demand public asset broadcasting enabled.");
-    }    let active_sessions = Arc::new(StdMutex::new(HashMap::<[u8; 32], Session>::new()));
+    }
+    let active_sessions = Arc::new(StdMutex::new(HashMap::<[u8; 32], Session>::new()));
     let db_path = find_workspace_path(&config.database.path);
     if let Some(parent) = db_path.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -1134,7 +1190,10 @@ pub async fn start_server_with_stats(
             store
         }
         Err(e) => {
-            warn!("Failed to open SQLite database at {:?}: {:?}. Falling back to in-memory database.", db_path, e);
+            warn!(
+                "Failed to open SQLite database at {:?}: {:?}. Falling back to in-memory database.",
+                db_path, e
+            );
             DatabaseStore::new_in_memory().expect("In-memory database should always initialize")
         }
     };
@@ -1249,7 +1308,11 @@ pub async fn start_server_with_stats(
                         }
 
                         if let Ok(merged_json) = serde_json::to_string(&existing_user) {
-                            log::info!("Processed advert packet for node {}: {}", node_hex, merged_json);
+                            log::info!(
+                                "Processed advert packet for node {}: {}",
+                                node_hex,
+                                merged_json
+                            );
                             let _ = db_store.set("users", &node_hex, &merged_json);
                         }
 
@@ -1287,14 +1350,19 @@ pub async fn start_server_with_stats(
                                 if let Some(session) = sessions.get(&src) {
                                     let elapsed = session.last_activity.lock().unwrap().elapsed();
                                     if is_handshake {
-                                        if elapsed < std::time::Duration::from_secs(SESSION_RESUME_TIMEOUT_SECS) {
+                                        if elapsed
+                                            < std::time::Duration::from_secs(
+                                                SESSION_RESUME_TIMEOUT_SECS,
+                                            )
+                                        {
                                             info!(
                                                 "Resuming existing session for node {:?} (idle for {}s < {}s timeout)",
                                                 src,
                                                 elapsed.as_secs(),
                                                 SESSION_RESUME_TIMEOUT_SECS
                                             );
-                                            *session.last_activity.lock().unwrap() = std::time::Instant::now();
+                                            *session.last_activity.lock().unwrap() =
+                                                std::time::Instant::now();
                                             Some(session.input_tx.clone())
                                         } else {
                                             info!(
@@ -1307,7 +1375,8 @@ pub async fn start_server_with_stats(
                                             None
                                         }
                                     } else {
-                                        *session.last_activity.lock().unwrap() = std::time::Instant::now();
+                                        *session.last_activity.lock().unwrap() =
+                                            std::time::Instant::now();
                                         Some(session.input_tx.clone())
                                     }
                                 } else {
@@ -1321,7 +1390,8 @@ pub async fn start_server_with_stats(
                                 // Boot new session
                                 info!("Booting new Lua session for node: {:?}", src);
                                 let (tx, rx) = mpsc::channel(100);
-                                let last_activity = Arc::new(StdMutex::new(std::time::Instant::now()));
+                                let last_activity =
+                                    Arc::new(StdMutex::new(std::time::Instant::now()));
                                 let session = Session {
                                     input_tx: tx.clone(),
                                     last_activity,
@@ -1338,6 +1408,7 @@ pub async fn start_server_with_stats(
                                 let asset_manifest_clone = asset_manifest_map.clone();
                                 let apps_config_clone = config.apps.clone();
                                 let main_menu_config_clone = config.main_menu.clone();
+                                let network_config_clone = config.network.clone();
                                 let bbs_stats_inner = bbs_stats_clone.clone();
                                 let transport_stats_inner = transport_stats.clone();
                                 let packet_recorder_inner = packet_recorder.clone();
@@ -1354,6 +1425,7 @@ pub async fn start_server_with_stats(
                                         asset_manifest_clone,
                                         apps_config_clone,
                                         main_menu_config_clone,
+                                        network_config_clone,
                                         bbs_stats_inner.clone(),
                                         transport_stats_inner,
                                         packet_recorder_inner,
@@ -1585,6 +1657,7 @@ fn run_session_task(
     asset_manifest: Arc<HashMap<u16, (String, String)>>,
     apps_config: AppsConfig,
     main_menu_config: MainMenuConfig,
+    network_config: NetworkConfig,
     bbs_stats: Arc<BbsStats>,
     transport_stats: Option<Arc<TransportStats>>,
     packet_recorder: Option<Arc<PacketRecorder>>,
@@ -1619,7 +1692,9 @@ fn run_session_task(
 
     // Accumulates output bytes for term.flush()
     let output_buf = Arc::new(StdMutex::new(Vec::new()));
-    let session_payload_cache = Arc::new(StdMutex::new(bifrost_transport::SessionPayloadCache::new(100)));
+    let session_payload_cache = Arc::new(StdMutex::new(
+        bifrost_transport::SessionPayloadCache::new(100),
+    ));
 
     // Setup sandboxed environment
     let globals = lua.globals();
@@ -1721,7 +1796,8 @@ fn run_session_task(
             buf.push(0xC5); // OP_RENDER_ASSET
 
             let current_app = active_app_for_asset.lock().unwrap().clone();
-            let (id, _) = resolve_asset_id_and_content(&asset_manifest_for_render, &current_app, &asset_name);
+            let (id, _) =
+                resolve_asset_id_and_content(&asset_manifest_for_render, &current_app, &asset_name);
             buf.extend_from_slice(&id.to_be_bytes());
             Ok(())
         })?,
@@ -1734,7 +1810,8 @@ fn run_session_task(
         "render_template",
         lua.create_function(move |_, (asset_name, params): (String, mlua::Value)| {
             let current_app = app_for_tmpl.lock().unwrap().clone();
-            let (id, _content) = resolve_asset_id_and_content(&manifest_for_tmpl, &current_app, &asset_name);
+            let (id, _content) =
+                resolve_asset_id_and_content(&manifest_for_tmpl, &current_app, &asset_name);
 
             let mut param_strings = Vec::new();
             match params {
@@ -1794,155 +1871,161 @@ fn run_session_task(
     let form_colors_menu = form_colors.clone();
     term.set(
         "render_menu",
-        lua.create_function(move |_, (asset_name, toggle_arg): (String, Option<mlua::Value>)| {
-            let current_app = app_for_menu.lock().unwrap().clone();
-            let (id, content_opt) = resolve_asset_id_and_content(&manifest_for_menu, &current_app, &asset_name);
+        lua.create_function(
+            move |_, (asset_name, toggle_arg): (String, Option<mlua::Value>)| {
+                let current_app = app_for_menu.lock().unwrap().clone();
+                let (id, content_opt) =
+                    resolve_asset_id_and_content(&manifest_for_menu, &current_app, &asset_name);
 
-            let menu_def = if let Some(content) = content_opt {
-                parse_menu_csv(&content)
-            } else {
-                MenuAssetDef {
-                    form_id: 1,
-                    field_fg: None,
-                    field_bg: None,
-                    submit_fg: None,
-                    submit_bg: None,
-                    align: None,
-                    buttons: Vec::new(),
-                }
-            };
+                let menu_def = if let Some(content) = content_opt {
+                    parse_menu_csv(&content)
+                } else {
+                    MenuAssetDef {
+                        form_id: 1,
+                        field_fg: None,
+                        field_bg: None,
+                        submit_fg: None,
+                        submit_bg: None,
+                        align: None,
+                        buttons: Vec::new(),
+                    }
+                };
 
-            let mut toggle_mask: u32 = 0;
-            match toggle_arg {
-                Some(mlua::Value::Integer(n)) => {
-                    toggle_mask = n as u32;
-                }
-                Some(mlua::Value::Table(tbl)) => {
-                    for (idx, btn) in menu_def.buttons.iter().enumerate() {
-                        if idx < 32 {
-                            let is_enabled = if let Ok(val) = tbl.get::<&str, mlua::Value>(&btn.tag) {
-                                match val {
-                                    mlua::Value::Boolean(b) => b,
-                                    mlua::Value::Nil => true,
-                                    _ => true,
+                let mut toggle_mask: u32 = 0;
+                match toggle_arg {
+                    Some(mlua::Value::Integer(n)) => {
+                        toggle_mask = n as u32;
+                    }
+                    Some(mlua::Value::Table(tbl)) => {
+                        for (idx, btn) in menu_def.buttons.iter().enumerate() {
+                            if idx < 32 {
+                                let is_enabled =
+                                    if let Ok(val) = tbl.get::<&str, mlua::Value>(&btn.tag) {
+                                        match val {
+                                            mlua::Value::Boolean(b) => b,
+                                            mlua::Value::Nil => true,
+                                            _ => true,
+                                        }
+                                    } else if let Ok(val) = tbl.get::<&str, mlua::Value>(&btn.id) {
+                                        match val {
+                                            mlua::Value::Boolean(b) => b,
+                                            mlua::Value::Nil => true,
+                                            _ => true,
+                                        }
+                                    } else {
+                                        true
+                                    };
+                                if is_enabled {
+                                    toggle_mask |= 1 << idx;
                                 }
-                            } else if let Ok(val) = tbl.get::<&str, mlua::Value>(&btn.id) {
-                                match val {
-                                    mlua::Value::Boolean(b) => b,
-                                    mlua::Value::Nil => true,
-                                    _ => true,
-                                }
-                            } else {
-                                true
-                            };
-                            if is_enabled {
+                            }
+                        }
+                    }
+                    _ => {
+                        for idx in 0..menu_def.buttons.len() {
+                            if idx < 32 {
                                 toggle_mask |= 1 << idx;
                             }
                         }
                     }
                 }
-                _ => {
-                    for idx in 0..menu_def.buttons.len() {
-                        if idx < 32 {
-                            toggle_mask |= 1 << idx;
-                        }
-                    }
-                }
-            }
 
-            let mut buf = out_buf_for_menu.lock().unwrap();
-            let f_fg = menu_def.field_fg.unwrap_or(form_colors_menu.field_fg);
-            let f_bg = menu_def.field_bg.unwrap_or(form_colors_menu.field_bg);
-            let s_fg = menu_def.submit_fg.unwrap_or(form_colors_menu.submit_fg);
-            let s_bg = menu_def.submit_bg.unwrap_or(form_colors_menu.submit_bg);
+                let mut buf = out_buf_for_menu.lock().unwrap();
+                let f_fg = menu_def.field_fg.unwrap_or(form_colors_menu.field_fg);
+                let f_bg = menu_def.field_bg.unwrap_or(form_colors_menu.field_bg);
+                let s_fg = menu_def.submit_fg.unwrap_or(form_colors_menu.submit_fg);
+                let s_bg = menu_def.submit_bg.unwrap_or(form_colors_menu.submit_bg);
 
-            buf.push(0xD0); // OP_FORM_START
-            buf.push(menu_def.form_id);
-            buf.push(f_fg);
-            buf.push(f_bg);
-            buf.push(s_fg);
-            buf.push(s_bg);
+                buf.push(0xD0); // OP_FORM_START
+                buf.push(menu_def.form_id);
+                buf.push(f_fg);
+                buf.push(f_bg);
+                buf.push(s_fg);
+                buf.push(s_bg);
 
-            buf.push(0xC8); // OP_RENDER_MENU
-            buf.extend_from_slice(&id.to_be_bytes());
-            buf.extend_from_slice(&toggle_mask.to_be_bytes());
-            Ok(())
-        })?,
+                buf.push(0xC8); // OP_RENDER_MENU
+                buf.extend_from_slice(&id.to_be_bytes());
+                buf.extend_from_slice(&toggle_mask.to_be_bytes());
+                Ok(())
+            },
+        )?,
     )?;
 
     let out_buf_for_table = output_buf.clone();
     term.set(
         "render_table",
-        lua.create_function(move |_, (start_col, start_row, config): (u8, u8, mlua::Table)| {
-            let mut buf = out_buf_for_table.lock().unwrap();
-            let headers: Vec<String> = config.get("headers").unwrap_or_default();
-            let widths: Vec<usize> = config.get("widths").unwrap_or_default();
-            let rows: Vec<Vec<String>> = config.get("rows").unwrap_or_default();
-            let h_fg: u8 = config.get("header_fg").unwrap_or(14);
-            let h_bg: u8 = config.get("header_bg").unwrap_or(0);
-            let r_fg: u8 = config.get("row_fg").unwrap_or(15);
-            let r_bg: u8 = config.get("row_bg").unwrap_or(0);
-            let divider: bool = config.get("divider").unwrap_or(true);
+        lua.create_function(
+            move |_, (start_col, start_row, config): (u8, u8, mlua::Table)| {
+                let mut buf = out_buf_for_table.lock().unwrap();
+                let headers: Vec<String> = config.get("headers").unwrap_or_default();
+                let widths: Vec<usize> = config.get("widths").unwrap_or_default();
+                let rows: Vec<Vec<String>> = config.get("rows").unwrap_or_default();
+                let h_fg: u8 = config.get("header_fg").unwrap_or(14);
+                let h_bg: u8 = config.get("header_bg").unwrap_or(0);
+                let r_fg: u8 = config.get("row_fg").unwrap_or(15);
+                let r_bg: u8 = config.get("row_bg").unwrap_or(0);
+                let divider: bool = config.get("divider").unwrap_or(true);
 
-            let mut cur_row = start_row;
-            if !headers.is_empty() {
-                buf.push(0xC3); // OP_CURSOR_ABS
-                buf.push(start_col);
-                buf.push(cur_row);
-                buf.push(0xC0); // OP_SET_COLOR
-                buf.push((h_bg << 4) | (h_fg & 0x0F));
+                let mut cur_row = start_row;
+                if !headers.is_empty() {
+                    buf.push(0xC3); // OP_CURSOR_ABS
+                    buf.push(start_col);
+                    buf.push(cur_row);
+                    buf.push(0xC0); // OP_SET_COLOR
+                    buf.push((h_bg << 4) | (h_fg & 0x0F));
 
-                let mut header_line = String::new();
-                for (idx, h) in headers.iter().enumerate() {
-                    let w = widths.get(idx).copied().unwrap_or(h.len() + 2);
-                    header_line.push_str(&format!("{:<width$}", h, width = w));
-                    if idx + 1 < headers.len() {
-                        header_line.push_str("  ");
+                    let mut header_line = String::new();
+                    for (idx, h) in headers.iter().enumerate() {
+                        let w = widths.get(idx).copied().unwrap_or(h.len() + 2);
+                        header_line.push_str(&format!("{:<width$}", h, width = w));
+                        if idx + 1 < headers.len() {
+                            header_line.push_str("  ");
+                        }
+                    }
+                    buf.extend_from_slice(header_line.as_bytes());
+                    cur_row += 1;
+
+                    if divider {
+                        buf.push(0xC3);
+                        buf.push(start_col);
+                        buf.push(cur_row);
+                        buf.push(0xC0);
+                        buf.push((h_bg << 4) | (h_fg & 0x0F));
+                        let mut div_line = String::new();
+                        for (idx, h) in headers.iter().enumerate() {
+                            let w = widths.get(idx).copied().unwrap_or(h.len() + 2);
+                            div_line.push_str(&"-".repeat(w));
+                            if idx + 1 < headers.len() {
+                                div_line.push_str("  ");
+                            }
+                        }
+                        buf.extend_from_slice(div_line.as_bytes());
+                        cur_row += 1;
                     }
                 }
-                buf.extend_from_slice(header_line.as_bytes());
-                cur_row += 1;
 
-                if divider {
+                for row in rows {
                     buf.push(0xC3);
                     buf.push(start_col);
                     buf.push(cur_row);
                     buf.push(0xC0);
-                    buf.push((h_bg << 4) | (h_fg & 0x0F));
-                    let mut div_line = String::new();
-                    for (idx, h) in headers.iter().enumerate() {
-                        let w = widths.get(idx).copied().unwrap_or(h.len() + 2);
-                        div_line.push_str(&"-".repeat(w));
-                        if idx + 1 < headers.len() {
-                            div_line.push_str("  ");
+                    buf.push((r_bg << 4) | (r_fg & 0x0F));
+
+                    let mut row_line = String::new();
+                    for (idx, cell) in row.iter().enumerate() {
+                        let w = widths.get(idx).copied().unwrap_or(cell.len() + 2);
+                        row_line.push_str(&format!("{:<width$}", cell, width = w));
+                        if idx + 1 < row.len() {
+                            row_line.push_str("  ");
                         }
                     }
-                    buf.extend_from_slice(div_line.as_bytes());
+                    buf.extend_from_slice(row_line.as_bytes());
                     cur_row += 1;
                 }
-            }
 
-            for row in rows {
-                buf.push(0xC3);
-                buf.push(start_col);
-                buf.push(cur_row);
-                buf.push(0xC0);
-                buf.push((r_bg << 4) | (r_fg & 0x0F));
-
-                let mut row_line = String::new();
-                for (idx, cell) in row.iter().enumerate() {
-                    let w = widths.get(idx).copied().unwrap_or(cell.len() + 2);
-                    row_line.push_str(&format!("{:<width$}", cell, width = w));
-                    if idx + 1 < row.len() {
-                        row_line.push_str("  ");
-                    }
-                }
-                buf.extend_from_slice(row_line.as_bytes());
-                cur_row += 1;
-            }
-
-            Ok(())
-        })?,
+                Ok(())
+            },
+        )?,
     )?;
 
     let out_buf = output_buf.clone();
@@ -2325,7 +2408,9 @@ fn run_session_task(
                 } else {
                     Err(format!("HTTP error: status {}", resp.status()))
                 }
-            }).join().unwrap_or(Err("Thread panicked".to_string()));
+            })
+            .join()
+            .unwrap_or(Err("Thread panicked".to_string()));
 
             match json_result {
                 Ok(json_val) => {
@@ -2448,19 +2533,29 @@ fn run_session_task(
     let main_app_name_clone = apps_config.main_app.clone();
     let active_app_clone = active_app.clone();
     let load_app = lua.create_function(move |lua, app_name: String| {
-        let is_main = app_name == "main_menu" || app_name == main_app_name_clone;
+        let is_main =
+            app_name == "main_menu" || app_name == "network_hub" || app_name == main_app_name_clone;
         if !is_main && !enabled_apps.contains(&app_name) {
-            log::error!("Application '{}' not found or not enabled in config", app_name);
+            log::error!(
+                "Application '{}' not found or not enabled in config",
+                app_name
+            );
             return Ok(());
         }
         let entry_file = format!("apps/{}/main.lua", app_name);
         let path = find_workspace_path(&entry_file);
         let code = if path.exists() {
             std::fs::read_to_string(&path)?
+        } else if app_name == "network_hub" {
+            EMBEDDED_NETWORK_HUB_LUA.to_string()
         } else if is_main {
             EMBEDDED_MAIN_MENU_LUA.to_string()
         } else {
-            log::error!("Application '{}' entry point not found at {:?}", app_name, path);
+            log::error!(
+                "Application '{}' entry point not found at {:?}",
+                app_name,
+                path
+            );
             return Ok(());
         };
 
@@ -2561,6 +2656,59 @@ fn run_session_task(
         })?,
     )?;
 
+    let net_cfg_enabled = network_config.enabled;
+    session.set(
+        "is_network_enabled",
+        lua.create_function(move |_, (): ()| Ok(net_cfg_enabled))?,
+    )?;
+
+    let registry_mgr = Arc::new(BbsNetworkRegistryManager::new(find_workspace_path(
+        &network_config.registry_cache_file,
+    )));
+
+    let reg_for_lua_nodes = registry_mgr.clone();
+    session.set(
+        "get_network_nodes",
+        lua.create_function(move |lua, query: Option<String>| {
+            let q = query.unwrap_or_default();
+            let nodes = reg_for_lua_nodes.search(&q);
+            let tbl = lua.create_table()?;
+            for (idx, node) in nodes.into_iter().enumerate() {
+                let node_tbl = lua.create_table()?;
+                node_tbl.set("node_id", node.node_id)?;
+                node_tbl.set("name", node.name)?;
+                node_tbl.set("callsign", node.callsign)?;
+                node_tbl.set("description", node.description)?;
+                node_tbl.set("region", node.location.region)?;
+                node_tbl.set("grid", node.location.grid)?;
+                node_tbl.set("lat", node.location.lat)?;
+                node_tbl.set("lon", node.location.lon)?;
+                node_tbl.set("contact", node.sysop.contact)?;
+                node_tbl.set("relay_enabled", node.capabilities.relay_enabled)?;
+                tbl.set(idx + 1, node_tbl)?;
+            }
+            Ok(tbl)
+        })?,
+    )?;
+
+    let reg_for_lua_relay = registry_mgr.clone();
+    session.set(
+        "start_relay_session",
+        lua.create_function(move |_, target_node_id: String| {
+            if let Some(target) = reg_for_lua_relay.find_by_id(&target_node_id) {
+                log::info!(
+                    "Initiating relay session to {:?} ({})",
+                    target.callsign,
+                    target.node_id
+                );
+                if target.capabilities.relay_enabled && !target.endpoints.is_empty() {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        })?,
+    )?;
+
     globals.set("session", session)?;
 
     // Start initial application specified in config (default: main_menu)
@@ -2585,7 +2733,11 @@ fn run_session_task(
         on_start.call::<_, ()>(lua.globals().get::<_, mlua::Table>("session")?)?;
         log::debug!("App '{}' on_start invoked successfully", main_app_name);
     } else {
-        log::error!("Main app '{}' entry point not found at {:?}", main_app_name, main_path);
+        log::error!(
+            "Main app '{}' entry point not found at {:?}",
+            main_app_name,
+            main_path
+        );
     }
 
     // Read loop using blocking receiver in standard thread context
@@ -2689,14 +2841,13 @@ fn run_session_task(
                 };
 
                 if let Some(code) = code_opt {
-                    if let Ok(app_table) =
-                        lua.load(&code).set_name(&current_app_name).eval::<mlua::Table>()
+                    if let Ok(app_table) = lua
+                        .load(&code)
+                        .set_name(&current_app_name)
+                        .eval::<mlua::Table>()
                     {
-                        let session_table =
-                            lua.globals().get::<_, mlua::Table>("session")?;
-                        if let Ok(on_resume) =
-                            app_table.get::<_, mlua::Function>("on_resume")
-                        {
+                        let session_table = lua.globals().get::<_, mlua::Table>("session")?;
+                        if let Ok(on_resume) = app_table.get::<_, mlua::Function>("on_resume") {
                             log::debug!("Invoking on_resume for '{}'...", current_app_name);
                             if let Err(e) = on_resume.call::<_, ()>(session_table) {
                                 log::error!(
@@ -2705,8 +2856,7 @@ fn run_session_task(
                                     e
                                 );
                             }
-                        } else if let Ok(on_start) =
-                            app_table.get::<_, mlua::Function>("on_start")
+                        } else if let Ok(on_start) = app_table.get::<_, mlua::Function>("on_start")
                         {
                             log::debug!(
                                 "Invoking on_start fallback on resume for '{}'...",
@@ -3044,8 +3194,13 @@ max_asset_broadcast_duty_cycle = 0.1
             if let Ok(Ok(packet)) = tokio::time::timeout(
                 tokio::time::Duration::from_millis(100),
                 client_transport.receive_packet(),
-            ).await {
-                if let Some(msg) = client_reassembler.process_packet([0; 32], &packet.payload).unwrap() {
+            )
+            .await
+            {
+                if let Some(msg) = client_reassembler
+                    .process_packet([0; 32], &packet.payload)
+                    .unwrap()
+                {
                     reg_msg = Some(msg);
                     break;
                 }
@@ -3055,7 +3210,8 @@ max_asset_broadcast_duty_cycle = 0.1
 
         // 2. Submit nickname
         let form_submit_json = r#"{"nickname":"TestClient","submit":"register"}"#;
-        let submit_msg = MeshBbsMessage::new(0x02, 0x02, 0x00, form_submit_json.as_bytes().to_vec());
+        let submit_msg =
+            MeshBbsMessage::new(0x02, 0x02, 0x00, form_submit_json.as_bytes().to_vec());
         let submit_payloads = submit_msg.to_fragments(200).unwrap();
         let packet = RadioPacket {
             is_broadcast: false,
@@ -3074,23 +3230,37 @@ max_asset_broadcast_duty_cycle = 0.1
             if let Ok(Ok(packet)) = tokio::time::timeout(
                 tokio::time::Duration::from_millis(100),
                 client_transport.receive_packet(),
-            ).await {
-                if let Some(msg) = client_reassembler.process_packet([0; 32], &packet.payload).unwrap() {
+            )
+            .await
+            {
+                if let Some(msg) = client_reassembler
+                    .process_packet([0; 32], &packet.payload)
+                    .unwrap()
+                {
                     main_menu_msg = Some(msg);
                     break;
                 }
             }
         }
         let msg = main_menu_msg.expect("Main menu frame expected");
-        println!("Main menu msg flags: {:02x}, len: {}", msg.flags, msg.payload.len());
+        println!(
+            "Main menu msg flags: {:02x}, len: {}",
+            msg.flags,
+            msg.payload.len()
+        );
 
         let dict = bifrost_compression::CompressionDictionary::standard_static();
         let decomp = if (msg.flags & 0x06) != 0 {
-            bifrost_ansi::decompress_bytecode_adaptive(msg.flags, &msg.payload, Some(&dict)).unwrap()
+            bifrost_ansi::decompress_bytecode_adaptive(msg.flags, &msg.payload, Some(&dict))
+                .unwrap()
         } else {
             msg.payload
         };
-        println!("Decompressed main menu payload (len {}): {:?}", decomp.len(), decomp);
+        println!(
+            "Decompressed main menu payload (len {}): {:?}",
+            decomp.len(),
+            decomp
+        );
 
         let _ = server_handle.abort();
     }
@@ -3314,12 +3484,9 @@ submit_bg = 5
                 .cloned()
                 .unwrap_or_else(|| msg.payload.clone())
         } else if (msg.flags & 0x06) != 0 {
-            let decomp = bifrost_ansi::decompress_bytecode_adaptive(
-                msg.flags,
-                &msg.payload,
-                Some(dict),
-            )
-            .unwrap_or_else(|_| msg.payload.clone());
+            let decomp =
+                bifrost_ansi::decompress_bytecode_adaptive(msg.flags, &msg.payload, Some(dict))
+                    .unwrap_or_else(|_| msg.payload.clone());
             let crc = bifrost_transport::crc32(&decomp);
             cache.insert(crc, decomp.clone());
             decomp
@@ -3356,8 +3523,12 @@ submit_bg = 5
     #[test]
     fn test_db_keys_pattern() {
         let db_store = DatabaseStore::new_in_memory().unwrap();
-        db_store.set("users", "node_a", r#"{"nickname":"Alice"}"#).unwrap();
-        db_store.set("users", "node_b", r#"{"nickname":"Bob"}"#).unwrap();
+        db_store
+            .set("users", "node_a", r#"{"nickname":"Alice"}"#)
+            .unwrap();
+        db_store
+            .set("users", "node_b", r#"{"nickname":"Bob"}"#)
+            .unwrap();
 
         let mut keys: Vec<String> = db_store.keys("users").unwrap();
         keys.sort();
@@ -3436,14 +3607,19 @@ max_asset_broadcast_duty_cycle = 0.15
     async fn test_advert_packet_processing() {
         let _ = env_logger::builder().is_test(true).try_init();
         let config = default_config();
-        let server_transport = Arc::new(MockSocketTransport::new_server("127.0.0.1:9097".to_string(), 0.0, 0, 200));
+        let server_transport = Arc::new(MockSocketTransport::new_server(
+            "127.0.0.1:9097".to_string(),
+            0.0,
+            0,
+            200,
+        ));
 
-        let server_handle = tokio::spawn(async move {
-            start_server(config, server_transport, Some(2)).await
-        });
+        let server_handle =
+            tokio::spawn(async move { start_server(config, server_transport, Some(2)).await });
 
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-        let client_transport = MockSocketTransport::new_client("127.0.0.1:9097".to_string(), 0.0, 0, 200);
+        let client_transport =
+            MockSocketTransport::new_client("127.0.0.1:9097".to_string(), 0.0, 0, 200);
 
         let client_key = [8u8; 32];
 
@@ -3493,9 +3669,17 @@ max_asset_broadcast_duty_cycle = 0.15
         let mut assembled_msg = None;
         let start_time = tokio::time::Instant::now();
         while start_time.elapsed() < tokio::time::Duration::from_millis(1500) {
-            match tokio::time::timeout(tokio::time::Duration::from_millis(100), client_transport.receive_packet()).await {
+            match tokio::time::timeout(
+                tokio::time::Duration::from_millis(100),
+                client_transport.receive_packet(),
+            )
+            .await
+            {
                 Ok(Ok(packet)) => {
-                    if let Some(msg) = client_reassembler.process_packet([0; 32], &packet.payload).unwrap() {
+                    if let Some(msg) = client_reassembler
+                        .process_packet([0; 32], &packet.payload)
+                        .unwrap()
+                    {
                         assembled_msg = Some(msg);
                         break;
                     }
@@ -3616,7 +3800,8 @@ max_asset_broadcast_duty_cycle = 0.15
         let hello_response =
             hello_msg.expect("Should receive Hello screen after nickname registration");
         assert_eq!(hello_response.opcode, 0x03);
-        let uncompressed_payload = decode_test_msg(&mut client_cache, &hello_response, &static_dict);
+        let uncompressed_payload =
+            decode_test_msg(&mut client_cache, &hello_response, &static_dict);
         let payload_str = String::from_utf8_lossy(&uncompressed_payload);
         assert!(
             payload_str.contains("ReconnectTestUser") || payload_str.contains("Hello"),
@@ -3630,12 +3815,18 @@ max_asset_broadcast_duty_cycle = 0.15
     #[test]
     fn test_asset_manifest_loading() {
         let manifest = load_app_manifests(&["minidungeon".to_string()]);
-        assert!(manifest.len() >= 3, "Manifest should contain global assets and minidungeon assets");
+        assert!(
+            manifest.len() >= 3,
+            "Manifest should contain global assets and minidungeon assets"
+        );
 
         let banner_entry = manifest
             .iter()
             .find(|(_, (name, _))| name == "assets/main_menu_banner" || name == "main_menu_banner");
-        assert!(banner_entry.is_some(), "assets/main_menu_banner must be registered");
+        assert!(
+            banner_entry.is_some(),
+            "assets/main_menu_banner must be registered"
+        );
         let (&banner_id, (banner_name, banner_path)) = banner_entry.unwrap();
         assert!(banner_name.contains("main_menu_banner"));
         assert_eq!(banner_path, "assets/main_menu_banner.ans");
@@ -3643,12 +3834,16 @@ max_asset_broadcast_duty_cycle = 0.15
         let border_entry = manifest
             .iter()
             .find(|(_, (name, _))| name == "assets/main_menu_border" || name == "main_menu_border");
-        assert!(border_entry.is_some(), "assets/main_menu_border must be registered");
+        assert!(
+            border_entry.is_some(),
+            "assets/main_menu_border must be registered"
+        );
         let (&border_id, _) = border_entry.unwrap();
         assert_ne!(banner_id, border_id, "Asset IDs must be unique");
 
         // Test global asset resolution
-        let (resolved_banner_id, _) = resolve_asset_id_and_content(&manifest, "messages", "main_menu_banner");
+        let (resolved_banner_id, _) =
+            resolve_asset_id_and_content(&manifest, "messages", "main_menu_banner");
         assert_eq!(resolved_banner_id, banner_id);
     }
 
@@ -3726,7 +3921,10 @@ max_asset_broadcast_duty_cycle = 0.15
             .await
             {
                 Ok(Ok(packet)) => {
-                    if packet.payload.len() >= 12 && packet.payload[0] == 0xBB && packet.payload[1] == 0x04 {
+                    if packet.payload.len() >= 12
+                        && packet.payload[0] == 0xBB
+                        && packet.payload[1] == 0x04
+                    {
                         let chunk_idx = packet.payload[3];
                         let total_chunks = packet.payload[4];
                         let asset_id = u16::from_be_bytes([packet.payload[5], packet.payload[6]]);
@@ -3741,7 +3939,8 @@ max_asset_broadcast_duty_cycle = 0.15
                         if asset_id == req_asset_id && packet.payload.len() >= 12 + payload_len {
                             expected_total_chunks = total_chunks;
                             expected_crc32 = master_crc;
-                            chunks_received.insert(chunk_idx, packet.payload[12..12 + payload_len].to_vec());
+                            chunks_received
+                                .insert(chunk_idx, packet.payload[12..12 + payload_len].to_vec());
 
                             if chunks_received.len() == total_chunks as usize {
                                 break;
@@ -3776,7 +3975,10 @@ max_asset_broadcast_duty_cycle = 0.15
 
         let banner_path = find_workspace_path("assets/main_menu_banner.ans");
         let expected_bytes = std::fs::read(banner_path).unwrap();
-        assert_eq!(assembled_bytes, expected_bytes, "Broadcast asset content does not match original file");
+        assert_eq!(
+            assembled_bytes, expected_bytes,
+            "Broadcast asset content does not match original file"
+        );
 
         let _ = server_handle.await;
     }
@@ -3908,18 +4110,31 @@ max_asset_broadcast_duty_cycle = 0.15
         lua.globals().set("db", db).unwrap();
 
         // 1. Two-arg set and get: db.set(table, key, val) and db.get(table, key)
-        lua.load(r#"db.set("users", "user1", { nickname = "Alice" })"#).exec().unwrap();
-        let nick: String = lua.load(r#"local u = db.get("users", "user1"); return u.nickname"#).eval().unwrap();
+        lua.load(r#"db.set("users", "user1", { nickname = "Alice" })"#)
+            .exec()
+            .unwrap();
+        let nick: String = lua
+            .load(r#"local u = db.get("users", "user1"); return u.nickname"#)
+            .eval()
+            .unwrap();
         assert_eq!(nick, "Alice");
 
         // 2. Single-key set and get: db.set(key, val) and db.get(key)
-        lua.load(r#"db.set("market_categories", { "General", "Radios" })"#).exec().unwrap();
-        let cat: String = lua.load(r#"local c = db.get("market_categories"); return c[2]"#).eval().unwrap();
+        lua.load(r#"db.set("market_categories", { "General", "Radios" })"#)
+            .exec()
+            .unwrap();
+        let cat: String = lua
+            .load(r#"local c = db.get("market_categories"); return c[2]"#)
+            .eval()
+            .unwrap();
         assert_eq!(cat, "Radios");
 
         // 3. Deletion with nil
         lua.load(r#"db.set("users", "user1", nil)"#).exec().unwrap();
-        let is_nil: bool = lua.load(r#"return db.get("users", "user1") == nil"#).eval().unwrap();
+        let is_nil: bool = lua
+            .load(r#"return db.get("users", "user1") == nil"#)
+            .eval()
+            .unwrap();
         assert!(is_nil);
     }
 
@@ -3995,14 +4210,19 @@ max_asset_broadcast_duty_cycle = 0.15
     async fn test_messages_session_navigation() {
         let _ = env_logger::builder().is_test(true).try_init();
         let config = default_config();
-        let server_transport = Arc::new(MockSocketTransport::new_server("127.0.0.1:9094".to_string(), 0.0, 0, 200));
+        let server_transport = Arc::new(MockSocketTransport::new_server(
+            "127.0.0.1:9094".to_string(),
+            0.0,
+            0,
+            200,
+        ));
 
-        let server_handle = tokio::spawn(async move {
-            start_server(config, server_transport, Some(4)).await
-        });
+        let server_handle =
+            tokio::spawn(async move { start_server(config, server_transport, Some(4)).await });
 
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-        let client_transport = MockSocketTransport::new_client("127.0.0.1:9094".to_string(), 0.0, 0, 200);
+        let client_transport =
+            MockSocketTransport::new_client("127.0.0.1:9094".to_string(), 0.0, 0, 200);
         let client_key = [9u8; 32];
         let mut client_cache = bifrost_transport::SessionPayloadCache::new(100);
         let static_dict = bifrost_compression::CompressionDictionary::standard_static();
@@ -4026,9 +4246,17 @@ max_asset_broadcast_duty_cycle = 0.15
         // 1. Receive register screen
         let start_time = tokio::time::Instant::now();
         while start_time.elapsed() < tokio::time::Duration::from_millis(1500) {
-            match tokio::time::timeout(tokio::time::Duration::from_millis(100), client_transport.receive_packet()).await {
+            match tokio::time::timeout(
+                tokio::time::Duration::from_millis(100),
+                client_transport.receive_packet(),
+            )
+            .await
+            {
                 Ok(Ok(packet)) => {
-                    if let Some(msg) = client_reassembler.process_packet([0; 32], &packet.payload).unwrap() {
+                    if let Some(msg) = client_reassembler
+                        .process_packet([0; 32], &packet.payload)
+                        .unwrap()
+                    {
                         let _ = decode_test_msg(&mut client_cache, &msg, &static_dict);
                         break;
                     }
@@ -4054,9 +4282,17 @@ max_asset_broadcast_duty_cycle = 0.15
         // Receive Main Menu screen
         let start_time = tokio::time::Instant::now();
         while start_time.elapsed() < tokio::time::Duration::from_millis(1500) {
-            match tokio::time::timeout(tokio::time::Duration::from_millis(100), client_transport.receive_packet()).await {
+            match tokio::time::timeout(
+                tokio::time::Duration::from_millis(100),
+                client_transport.receive_packet(),
+            )
+            .await
+            {
                 Ok(Ok(packet)) => {
-                    if let Some(msg) = client_reassembler.process_packet([0; 32], &packet.payload).unwrap() {
+                    if let Some(msg) = client_reassembler
+                        .process_packet([0; 32], &packet.payload)
+                        .unwrap()
+                    {
                         let _ = decode_test_msg(&mut client_cache, &msg, &static_dict);
                         break;
                     }
@@ -4083,9 +4319,17 @@ max_asset_broadcast_duty_cycle = 0.15
         let mut msg_screen = None;
         let start_time = tokio::time::Instant::now();
         while start_time.elapsed() < tokio::time::Duration::from_millis(1500) {
-            match tokio::time::timeout(tokio::time::Duration::from_millis(100), client_transport.receive_packet()).await {
+            match tokio::time::timeout(
+                tokio::time::Duration::from_millis(100),
+                client_transport.receive_packet(),
+            )
+            .await
+            {
                 Ok(Ok(packet)) => {
-                    if let Some(msg) = client_reassembler.process_packet([0; 32], &packet.payload).unwrap() {
+                    if let Some(msg) = client_reassembler
+                        .process_packet([0; 32], &packet.payload)
+                        .unwrap()
+                    {
                         msg_screen = Some(msg);
                         break;
                     }
@@ -4097,7 +4341,13 @@ max_asset_broadcast_duty_cycle = 0.15
         let resp = msg_screen.expect("Should receive Messages screen");
         let uncompressed_payload = decode_test_msg(&mut client_cache, &resp, &static_dict);
         let screen_text = String::from_utf8_lossy(&uncompressed_payload);
-        assert!(screen_text.contains("MESSAGES") || screen_text.contains("Messages") || screen_text.contains("General"), "Should contain MESSAGES header, got: {}", screen_text);
+        assert!(
+            screen_text.contains("MESSAGES")
+                || screen_text.contains("Messages")
+                || screen_text.contains("General"),
+            "Should contain MESSAGES header, got: {}",
+            screen_text
+        );
 
         // 5. Navigate back to Main Menu from Messages
         let back_menu_json = r#"{"submit":"main_menu"}"#;
@@ -4117,9 +4367,17 @@ max_asset_broadcast_duty_cycle = 0.15
         let mut main_return_screen = None;
         let start_time = tokio::time::Instant::now();
         while start_time.elapsed() < tokio::time::Duration::from_millis(1500) {
-            match tokio::time::timeout(tokio::time::Duration::from_millis(100), client_transport.receive_packet()).await {
+            match tokio::time::timeout(
+                tokio::time::Duration::from_millis(100),
+                client_transport.receive_packet(),
+            )
+            .await
+            {
                 Ok(Ok(packet)) => {
-                    if let Some(msg) = client_reassembler.process_packet([0; 32], &packet.payload).unwrap() {
+                    if let Some(msg) = client_reassembler
+                        .process_packet([0; 32], &packet.payload)
+                        .unwrap()
+                    {
                         main_return_screen = Some(msg);
                         break;
                     }
@@ -4127,10 +4385,15 @@ max_asset_broadcast_duty_cycle = 0.15
                 _ => {}
             }
         }
-        let main_resp = main_return_screen.expect("Should receive Main Menu screen when navigating back");
+        let main_resp =
+            main_return_screen.expect("Should receive Main Menu screen when navigating back");
         let main_payload = decode_test_msg(&mut client_cache, &main_resp, &static_dict);
         let main_text = String::from_utf8_lossy(&main_payload);
-        assert!(main_text.contains("Select options") || main_text.contains("messages"), "Should contain main menu options, got: {}", main_text);
+        assert!(
+            main_text.contains("Select options") || main_text.contains("messages"),
+            "Should contain main menu options, got: {}",
+            main_text
+        );
 
         let _ = server_handle.await;
     }
@@ -4139,14 +4402,19 @@ max_asset_broadcast_duty_cycle = 0.15
     async fn test_profile_session_navigation() {
         let _ = env_logger::builder().is_test(true).try_init();
         let config = default_config();
-        let server_transport = Arc::new(MockSocketTransport::new_server("127.0.0.1:9118".to_string(), 0.0, 0, 200));
+        let server_transport = Arc::new(MockSocketTransport::new_server(
+            "127.0.0.1:9118".to_string(),
+            0.0,
+            0,
+            200,
+        ));
 
-        let server_handle = tokio::spawn(async move {
-            start_server(config, server_transport, Some(4)).await
-        });
+        let server_handle =
+            tokio::spawn(async move { start_server(config, server_transport, Some(4)).await });
 
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-        let client_transport = MockSocketTransport::new_client("127.0.0.1:9118".to_string(), 0.0, 0, 200);
+        let client_transport =
+            MockSocketTransport::new_client("127.0.0.1:9118".to_string(), 0.0, 0, 200);
         let client_key = [11u8; 32];
         let mut client_cache = bifrost_transport::SessionPayloadCache::new(100);
         let static_dict = bifrost_compression::CompressionDictionary::standard_static();
@@ -4170,9 +4438,17 @@ max_asset_broadcast_duty_cycle = 0.15
         // 1. Receive register screen
         let start_time = tokio::time::Instant::now();
         while start_time.elapsed() < tokio::time::Duration::from_millis(1500) {
-            match tokio::time::timeout(tokio::time::Duration::from_millis(100), client_transport.receive_packet()).await {
+            match tokio::time::timeout(
+                tokio::time::Duration::from_millis(100),
+                client_transport.receive_packet(),
+            )
+            .await
+            {
                 Ok(Ok(packet)) => {
-                    if let Some(msg) = client_reassembler.process_packet([0; 32], &packet.payload).unwrap() {
+                    if let Some(msg) = client_reassembler
+                        .process_packet([0; 32], &packet.payload)
+                        .unwrap()
+                    {
                         let _ = decode_test_msg(&mut client_cache, &msg, &static_dict);
                         break;
                     }
@@ -4198,9 +4474,17 @@ max_asset_broadcast_duty_cycle = 0.15
         // Receive Main Menu screen
         let start_time = tokio::time::Instant::now();
         while start_time.elapsed() < tokio::time::Duration::from_millis(1500) {
-            match tokio::time::timeout(tokio::time::Duration::from_millis(100), client_transport.receive_packet()).await {
+            match tokio::time::timeout(
+                tokio::time::Duration::from_millis(100),
+                client_transport.receive_packet(),
+            )
+            .await
+            {
                 Ok(Ok(packet)) => {
-                    if let Some(msg) = client_reassembler.process_packet([0; 32], &packet.payload).unwrap() {
+                    if let Some(msg) = client_reassembler
+                        .process_packet([0; 32], &packet.payload)
+                        .unwrap()
+                    {
                         let _ = decode_test_msg(&mut client_cache, &msg, &static_dict);
                         break;
                     }
@@ -4211,7 +4495,8 @@ max_asset_broadcast_duty_cycle = 0.15
 
         // 3. Submit "profile" action from main menu
         let profile_select_json = r#"{"submit":"profile"}"#;
-        let profile_msg = MeshBbsMessage::new(0x02, 0x02, 0x00, profile_select_json.as_bytes().to_vec());
+        let profile_msg =
+            MeshBbsMessage::new(0x02, 0x02, 0x00, profile_select_json.as_bytes().to_vec());
         let profile_payloads = profile_msg.to_fragments(200).unwrap();
         let packet = RadioPacket {
             is_broadcast: false,
@@ -4227,9 +4512,17 @@ max_asset_broadcast_duty_cycle = 0.15
         let mut prof_screen = None;
         let start_time = tokio::time::Instant::now();
         while start_time.elapsed() < tokio::time::Duration::from_millis(1500) {
-            match tokio::time::timeout(tokio::time::Duration::from_millis(100), client_transport.receive_packet()).await {
+            match tokio::time::timeout(
+                tokio::time::Duration::from_millis(100),
+                client_transport.receive_packet(),
+            )
+            .await
+            {
                 Ok(Ok(packet)) => {
-                    if let Some(msg) = client_reassembler.process_packet([0; 32], &packet.payload).unwrap() {
+                    if let Some(msg) = client_reassembler
+                        .process_packet([0; 32], &packet.payload)
+                        .unwrap()
+                    {
                         prof_screen = Some(msg);
                         break;
                     }
@@ -4241,7 +4534,13 @@ max_asset_broadcast_duty_cycle = 0.15
         let resp = prof_screen.expect("Should receive Profile screen");
         let uncompressed_payload = decode_test_msg(&mut client_cache, &resp, &static_dict);
         let screen_text = String::from_utf8_lossy(&uncompressed_payload);
-        assert!(screen_text.contains("PROFILE") || screen_text.contains("Profile") || screen_text.contains("ProfBob"), "Should contain PROFILE header, got: {}", screen_text);
+        assert!(
+            screen_text.contains("PROFILE")
+                || screen_text.contains("Profile")
+                || screen_text.contains("ProfBob"),
+            "Should contain PROFILE header, got: {}",
+            screen_text
+        );
 
         // 5. Navigate back to Main Menu from Profile by canceling
         let cancel_json = r#"{"submit":"cancel"}"#;
@@ -4261,9 +4560,17 @@ max_asset_broadcast_duty_cycle = 0.15
         let mut main_return_screen = None;
         let start_time = tokio::time::Instant::now();
         while start_time.elapsed() < tokio::time::Duration::from_millis(1500) {
-            match tokio::time::timeout(tokio::time::Duration::from_millis(100), client_transport.receive_packet()).await {
+            match tokio::time::timeout(
+                tokio::time::Duration::from_millis(100),
+                client_transport.receive_packet(),
+            )
+            .await
+            {
                 Ok(Ok(packet)) => {
-                    if let Some(msg) = client_reassembler.process_packet([0; 32], &packet.payload).unwrap() {
+                    if let Some(msg) = client_reassembler
+                        .process_packet([0; 32], &packet.payload)
+                        .unwrap()
+                    {
                         main_return_screen = Some(msg);
                         break;
                     }
@@ -4271,10 +4578,15 @@ max_asset_broadcast_duty_cycle = 0.15
                 _ => {}
             }
         }
-        let main_resp = main_return_screen.expect("Should receive Main Menu screen when canceling profile");
+        let main_resp =
+            main_return_screen.expect("Should receive Main Menu screen when canceling profile");
         let main_payload = decode_test_msg(&mut client_cache, &main_resp, &static_dict);
         let main_text = String::from_utf8_lossy(&main_payload);
-        assert!(main_text.contains("Select options") || main_text.contains("messages"), "Should contain main menu options, got: {}", main_text);
+        assert!(
+            main_text.contains("Select options") || main_text.contains("messages"),
+            "Should contain main menu options, got: {}",
+            main_text
+        );
 
         let _ = server_handle.await;
     }
@@ -4314,13 +4626,23 @@ max_asset_broadcast_duty_cycle = 0.15
         // Node name
         packet_bytes.extend_from_slice(b"MeshGateway-Alpha");
 
-        let (parsed_node, metadata) = parse_meshcore_advert(&packet_bytes, [0; 32]).expect("Should parse valid framed advert");
+        let (parsed_node, metadata) = parse_meshcore_advert(&packet_bytes, [0; 32])
+            .expect("Should parse valid framed advert");
         assert_eq!(parsed_node, node_key);
-        assert_eq!(metadata.get("node_name").and_then(|v| v.as_str()), Some("MeshGateway-Alpha"));
-        assert_eq!(metadata.get("node_type").and_then(|v| v.as_str()), Some("chat_node"));
+        assert_eq!(
+            metadata.get("node_name").and_then(|v| v.as_str()),
+            Some("MeshGateway-Alpha")
+        );
+        assert_eq!(
+            metadata.get("node_type").and_then(|v| v.as_str()),
+            Some("chat_node")
+        );
         assert_eq!(metadata.get("feature1").and_then(|v| v.as_u64()), Some(100));
         assert_eq!(metadata.get("feature2").and_then(|v| v.as_u64()), Some(200));
-        assert_eq!(metadata.get("advert_timestamp").and_then(|v| v.as_u64()), Some(1700000000));
+        assert_eq!(
+            metadata.get("advert_timestamp").and_then(|v| v.as_u64()),
+            Some(1700000000)
+        );
         let lat = metadata.get("latitude").and_then(|v| v.as_f64()).unwrap();
         assert!((lat - 37.7749).abs() < 0.0001);
     }
@@ -4346,10 +4668,17 @@ max_asset_broadcast_duty_cycle = 0.15
         packet_bytes.push(0x82);
         packet_bytes.extend_from_slice(b"HilltopRepeater");
 
-        let (parsed_node, metadata) = parse_meshcore_advert(&packet_bytes, [0; 32]).expect("Should parse transport direct advert");
+        let (parsed_node, metadata) = parse_meshcore_advert(&packet_bytes, [0; 32])
+            .expect("Should parse transport direct advert");
         assert_eq!(parsed_node, node_key);
-        assert_eq!(metadata.get("node_name").and_then(|v| v.as_str()), Some("HilltopRepeater"));
-        assert_eq!(metadata.get("node_type").and_then(|v| v.as_str()), Some("repeater"));
+        assert_eq!(
+            metadata.get("node_name").and_then(|v| v.as_str()),
+            Some("HilltopRepeater")
+        );
+        assert_eq!(
+            metadata.get("node_type").and_then(|v| v.as_str()),
+            Some("repeater")
+        );
     }
 
     #[test]
@@ -4429,7 +4758,13 @@ max_asset_broadcast_duty_cycle = 0.15
 
     #[test]
     fn test_packet_recorder_record_and_csv_generation() {
-        let temp_dir = std::env::temp_dir().join(format!("bifrost_capture_test_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let temp_dir = std::env::temp_dir().join(format!(
+            "bifrost_capture_test_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         let dir_str = temp_dir.to_str().unwrap();
 
         let recorder = PacketRecorder::new(dir_str).expect("Failed to initialize PacketRecorder");
@@ -4448,16 +4783,7 @@ max_asset_broadcast_duty_cycle = 0.15
             120,
         );
 
-        recorder.record_compression(
-            "RX",
-            "client_input",
-            0x02,
-            0x00,
-            b"n",
-            None,
-            "none",
-            0,
-        );
+        recorder.record_compression("RX", "client_input", 0x02, 0x00, b"n", None, "none", 0);
 
         // Verify CSV file exists and has rows
         let csv_path = recorder.base_dir.join("compression_log.csv");
@@ -4481,12 +4807,27 @@ max_asset_broadcast_duty_cycle = 0.15
 
     #[test]
     fn test_packet_recorder_overwrites_previous_capture() {
-        let temp_dir = std::env::temp_dir().join(format!("bifrost_overwrite_test_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let temp_dir = std::env::temp_dir().join(format!(
+            "bifrost_overwrite_test_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         let dir_str = temp_dir.to_str().unwrap();
 
         // 1. Initial capture
         let rec1 = PacketRecorder::new(dir_str).unwrap();
-        rec1.record_compression("TX", "screen_delta", 0x03, 0x02, b"OldData", None, "none", 10);
+        rec1.record_compression(
+            "TX",
+            "screen_delta",
+            0x03,
+            0x02,
+            b"OldData",
+            None,
+            "none",
+            10,
+        );
         let old_file = rec1.raw_dir.join("seq_000001_tx_screen_delta.bin");
         assert!(old_file.exists());
         drop(rec1);
@@ -4496,11 +4837,21 @@ max_asset_broadcast_duty_cycle = 0.15
         rec2.record_compression("TX", "main_menu", 0x03, 0x02, b"NewData", None, "none", 10);
         let new_file = rec2.raw_dir.join("seq_000001_tx_main_menu.bin");
         assert!(new_file.exists());
-        assert!(!old_file.exists(), "Old capture files should have been removed");
+        assert!(
+            !old_file.exists(),
+            "Old capture files should have been removed"
+        );
 
-        let csv_content = std::fs::read_to_string(rec2.base_dir.join("compression_log.csv")).unwrap();
-        assert!(!csv_content.contains("screen_delta"), "Old CSV records should not remain");
-        assert!(csv_content.contains("main_menu"), "New CSV records should be present");
+        let csv_content =
+            std::fs::read_to_string(rec2.base_dir.join("compression_log.csv")).unwrap();
+        assert!(
+            !csv_content.contains("screen_delta"),
+            "Old CSV records should not remain"
+        );
+        assert!(
+            csv_content.contains("main_menu"),
+            "New CSV records should be present"
+        );
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
@@ -4508,21 +4859,32 @@ max_asset_broadcast_duty_cycle = 0.15
     #[tokio::test]
     async fn test_packet_capture_server_integration() {
         let _ = env_logger::builder().is_test(true).try_init();
-        let temp_dir = std::env::temp_dir().join(format!("bifrost_live_capture_test_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let temp_dir = std::env::temp_dir().join(format!(
+            "bifrost_live_capture_test_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         let dir_str = temp_dir.to_str().unwrap().to_string();
 
         let mut config = default_config();
         config.packet_capture.enabled = true;
         config.packet_capture.directory = dir_str.clone();
 
-        let server_transport = Arc::new(MockSocketTransport::new_server("127.0.0.1:9099".to_string(), 0.0, 0, 200));
+        let server_transport = Arc::new(MockSocketTransport::new_server(
+            "127.0.0.1:9099".to_string(),
+            0.0,
+            0,
+            200,
+        ));
 
-        let server_handle = tokio::spawn(async move {
-            start_server(config, server_transport, Some(2)).await
-        });
+        let server_handle =
+            tokio::spawn(async move { start_server(config, server_transport, Some(2)).await });
 
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-        let client_transport = MockSocketTransport::new_client("127.0.0.1:9099".to_string(), 0.0, 0, 200);
+        let client_transport =
+            MockSocketTransport::new_client("127.0.0.1:9099".to_string(), 0.0, 0, 200);
 
         let client_node = [0x55; 32];
         let handshake_msg = MeshBbsMessage::new(0x03, 0x01, 0x00, Vec::new());
@@ -4546,7 +4908,12 @@ max_asset_broadcast_duty_cycle = 0.15
         // Wait for response
         let start = tokio::time::Instant::now();
         while start.elapsed() < tokio::time::Duration::from_millis(1500) {
-            match tokio::time::timeout(tokio::time::Duration::from_millis(100), client_transport.receive_packet()).await {
+            match tokio::time::timeout(
+                tokio::time::Duration::from_millis(100),
+                client_transport.receive_packet(),
+            )
+            .await
+            {
                 Ok(Ok(pkt)) => {
                     if !pkt.payload.is_empty() {
                         break;
@@ -4593,12 +4960,14 @@ max_asset_broadcast_duty_cycle = 0.15
 
         // 2. Compress message with trained dictionary
         let original_msg = b"[TEST_CUSTOM_HEADER] Welcome to Mesh Node 55";
-        let (flags, compressed) = bifrost_compression::compress_adaptive(original_msg, Some(&dict), 8, 4);
+        let (flags, compressed) =
+            bifrost_compression::compress_adaptive(original_msg, Some(&dict), 8, 4);
         assert!(compressed.len() < original_msg.len());
 
         // 3. Decompress using same dictionary
-        let decompressed = bifrost_compression::decompress_adaptive(flags, &compressed, Some(&dict), 8, 4)
-            .expect("Decompression should succeed");
+        let decompressed =
+            bifrost_compression::decompress_adaptive(flags, &compressed, Some(&dict), 8, 4)
+                .expect("Decompression should succeed");
         assert_eq!(original_msg.to_vec(), decompressed);
 
         // 4. Verify node cache directory isolation
@@ -4608,8 +4977,10 @@ max_asset_broadcast_duty_cycle = 0.15
         let dict_file = temp_cache_dir.join("dict.bin");
         std::fs::write(&dict_file, &dict_bytes).unwrap();
 
-        let loaded_dict = bifrost_compression::CompressionDictionary::from_bytes(&std::fs::read(&dict_file).unwrap())
-            .expect("Should load node dictionary from cache");
+        let loaded_dict = bifrost_compression::CompressionDictionary::from_bytes(
+            &std::fs::read(&dict_file).unwrap(),
+        )
+        .expect("Should load node dictionary from cache");
         assert_eq!(loaded_dict.crc32(), dict_crc);
 
         let _ = std::fs::remove_dir_all(&temp_cache_dir);
@@ -4621,7 +4992,8 @@ max_asset_broadcast_duty_cycle = 0.15
         let mut server_cache = bifrost_transport::SessionPayloadCache::new(100);
         let mut client_cache = bifrost_transport::SessionPayloadCache::new(100);
 
-        let screen_payload = b"[MENU] Main Menu (1) Messages (2) Marketplace (3) Dungeon (4) Profile (5) Logout";
+        let screen_payload =
+            b"[MENU] Main Menu (1) Messages (2) Marketplace (3) Dungeon (4) Profile (5) Logout";
         let crc = bifrost_transport::crc32(screen_payload);
 
         // 2. First transmission: not yet in server cache -> full payload sent with compression/raw
@@ -4646,7 +5018,9 @@ max_asset_broadcast_duty_cycle = 0.15
             hash_ref_payload[2],
             hash_ref_payload[3],
         ]);
-        let resolved = client_cache.get(received_crc).expect("Should hit client session cache");
+        let resolved = client_cache
+            .get(received_crc)
+            .expect("Should hit client session cache");
         assert_eq!(resolved, screen_payload);
 
         // 4. Test NACK recovery if client had a cache miss (e.g. cache eviction)
@@ -4664,7 +5038,9 @@ max_asset_broadcast_duty_cycle = 0.15
             nack_msg.payload[2],
             nack_msg.payload[3],
         ]);
-        let retransmitted = server_cache.get(nack_crc).expect("Server cache should hold uncompressed payload");
+        let retransmitted = server_cache
+            .get(nack_crc)
+            .expect("Server cache should hold uncompressed payload");
         assert_eq!(retransmitted, screen_payload);
     }
 
@@ -4691,7 +5067,8 @@ max_asset_broadcast_duty_cycle = 0.15
             let mut sessions = active_sessions.lock().unwrap();
             if let Some(s) = sessions.get(&node_id) {
                 let el = s.last_activity.lock().unwrap().elapsed();
-                if is_handshake && el < std::time::Duration::from_secs(SESSION_RESUME_TIMEOUT_SECS) {
+                if is_handshake && el < std::time::Duration::from_secs(SESSION_RESUME_TIMEOUT_SECS)
+                {
                     *s.last_activity.lock().unwrap() = std::time::Instant::now();
                     Some(s.input_tx.clone())
                 } else {
@@ -4719,7 +5096,8 @@ max_asset_broadcast_duty_cycle = 0.15
             let mut sessions = active_sessions.lock().unwrap();
             if let Some(s) = sessions.get(&node_id) {
                 let el = s.last_activity.lock().unwrap().elapsed();
-                if is_handshake && el < std::time::Duration::from_secs(SESSION_RESUME_TIMEOUT_SECS) {
+                if is_handshake && el < std::time::Duration::from_secs(SESSION_RESUME_TIMEOUT_SECS)
+                {
                     Some(s.input_tx.clone())
                 } else {
                     sessions.remove(&node_id);
@@ -4733,8 +5111,177 @@ max_asset_broadcast_duty_cycle = 0.15
         assert!(tx_opt_expired.is_none(), "Expired session should be purged");
         assert!(active_sessions.lock().unwrap().get(&node_id).is_none());
     }
+
+    #[tokio::test]
+    async fn test_network_hub_session_navigation() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let config = default_config();
+        let server_transport = Arc::new(MockSocketTransport::new_server(
+            "127.0.0.1:9098".to_string(),
+            0.0,
+            0,
+            200,
+        ));
+
+        let server_handle =
+            tokio::spawn(async move { start_server(config, server_transport, Some(4)).await });
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        let client_transport =
+            MockSocketTransport::new_client("127.0.0.1:9098".to_string(), 0.0, 0, 200);
+        let client_key = [15u8; 32];
+        let mut client_cache = bifrost_transport::SessionPayloadCache::new(100);
+        let static_dict = bifrost_compression::CompressionDictionary::standard_static();
+
+        // 1. Send Handshake
+        let handshake_msg = MeshBbsMessage::new(0x03, 0x01, 0x00, Vec::new());
+        let handshake_payloads = handshake_msg.to_fragments(200).unwrap();
+        let packet = RadioPacket {
+            is_broadcast: false,
+            src_node: client_key,
+            dst_node: [0; 32],
+            payload: handshake_payloads[0].clone(),
+            signal_rssi: -50,
+            signal_snr: 10,
+        };
+        client_transport.send_packet(packet).await.unwrap();
+
+        let mut client_reassembler = MessageReassembler::new();
+
+        // Drain registration screen
+        let start_time = tokio::time::Instant::now();
+        while start_time.elapsed() < tokio::time::Duration::from_millis(1500) {
+            if let Ok(Ok(packet)) = tokio::time::timeout(
+                tokio::time::Duration::from_millis(100),
+                client_transport.receive_packet(),
+            )
+            .await
+            {
+                if let Some(msg) = client_reassembler
+                    .process_packet([0; 32], &packet.payload)
+                    .unwrap()
+                {
+                    let _ = decode_test_msg(&mut client_cache, &msg, &static_dict);
+                    break;
+                }
+            }
+        }
+
+        // 2. Set Nickname "NetUser"
+        let register_json = r#"{"nickname":"NetUser","submit":"register"}"#;
+        let register_msg = MeshBbsMessage::new(0x02, 0x02, 0x00, register_json.as_bytes().to_vec());
+        let register_payloads = register_msg.to_fragments(200).unwrap();
+        let packet = RadioPacket {
+            is_broadcast: false,
+            src_node: client_key,
+            dst_node: [0; 32],
+            payload: register_payloads[0].clone(),
+            signal_rssi: -50,
+            signal_snr: 10,
+        };
+        client_transport.send_packet(packet).await.unwrap();
+
+        // Drain main menu
+        let start_time = tokio::time::Instant::now();
+        while start_time.elapsed() < tokio::time::Duration::from_millis(1500) {
+            if let Ok(Ok(packet)) = tokio::time::timeout(
+                tokio::time::Duration::from_millis(100),
+                client_transport.receive_packet(),
+            )
+            .await
+            {
+                if let Some(msg) = client_reassembler
+                    .process_packet([0; 32], &packet.payload)
+                    .unwrap()
+                {
+                    let _ = decode_test_msg(&mut client_cache, &msg, &static_dict);
+                    break;
+                }
+            }
+        }
+
+        // 3. Navigate into Network Hub ("network_hub")
+        let net_json = r#"{"submit":"network_hub"}"#;
+        let net_msg = MeshBbsMessage::new(0x02, 0x02, 0x00, net_json.as_bytes().to_vec());
+        let net_payloads = net_msg.to_fragments(200).unwrap();
+        let packet = RadioPacket {
+            is_broadcast: false,
+            src_node: client_key,
+            dst_node: [0; 32],
+            payload: net_payloads[0].clone(),
+            signal_rssi: -50,
+            signal_snr: 10,
+        };
+        client_transport.send_packet(packet).await.unwrap();
+
+        let mut received_net_hub = false;
+        let start_time = tokio::time::Instant::now();
+        while start_time.elapsed() < tokio::time::Duration::from_millis(1500) {
+            if let Ok(Ok(packet)) = tokio::time::timeout(
+                tokio::time::Duration::from_millis(100),
+                client_transport.receive_packet(),
+            )
+            .await
+            {
+                if let Some(msg) = client_reassembler
+                    .process_packet([0; 32], &packet.payload)
+                    .unwrap()
+                {
+                    let decoded = decode_test_msg(&mut client_cache, &msg, &static_dict);
+                    let decoded_str = String::from_utf8_lossy(&decoded);
+                    if decoded_str.contains("BIFROST MULTI-BBS NETWORK HUB") {
+                        received_net_hub = true;
+                        break;
+                    }
+                }
+            }
+        }
+        assert!(
+            received_net_hub,
+            "Should receive Network Hub screen from BBS"
+        );
+
+        // 4. Return to main menu from Network Hub
+        let return_json = r#"{"submit":"main_menu"}"#;
+        let return_msg = MeshBbsMessage::new(0x02, 0x02, 0x00, return_json.as_bytes().to_vec());
+        let return_payloads = return_msg.to_fragments(200).unwrap();
+        let packet = RadioPacket {
+            is_broadcast: false,
+            src_node: client_key,
+            dst_node: [0; 32],
+            payload: return_payloads[0].clone(),
+            signal_rssi: -50,
+            signal_snr: 10,
+        };
+        client_transport.send_packet(packet).await.unwrap();
+
+        let mut returned_to_main = false;
+        let start_time = tokio::time::Instant::now();
+        while start_time.elapsed() < tokio::time::Duration::from_millis(1500) {
+            if let Ok(Ok(packet)) = tokio::time::timeout(
+                tokio::time::Duration::from_millis(100),
+                client_transport.receive_packet(),
+            )
+            .await
+            {
+                if let Some(msg) = client_reassembler
+                    .process_packet([0; 32], &packet.payload)
+                    .unwrap()
+                {
+                    let decoded = decode_test_msg(&mut client_cache, &msg, &static_dict);
+                    let decoded_str = String::from_utf8_lossy(&decoded);
+                    if decoded_str.contains("BIFROST MESHBBS") || decoded_str.contains("NetUser") {
+                        returned_to_main = true;
+                        break;
+                    }
+                }
+            }
+        }
+        assert!(
+            returned_to_main,
+            "Should return to dynamic main menu from Network Hub"
+        );
+
+        let _ = server_handle.await;
+    }
 }
-
-
-
-

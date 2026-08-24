@@ -83,6 +83,9 @@
     <button class="nav-tab" data-tab="store" id="tab-btn-store" aria-controls="tab-store" aria-selected="false">
       <span class="tab-key">[0]</span> APP STORE
     </button>
+    <button class="nav-tab" data-tab="network" id="tab-btn-network" aria-controls="tab-network" aria-selected="false">
+      <span class="tab-key">[N]</span> NETWORK
+    </button>
   </nav>
 
   <!-- Impersonation Alert Banner -->
@@ -718,6 +721,62 @@
         </div>
         <div class="store-grid" id="store-grid" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 15px; padding: 15px;">
           <!-- Dynamically populated from /api/catalog -->
+        </div>
+      </div>
+    </section>
+
+    <!-- Multi-BBS Network Tab -->
+    <section id="tab-network" class="tab-pane" role="tabpanel" aria-labelledby="tab-btn-network">
+      <div class="retro-panel">
+        <div class="panel-header" style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
+          <div>
+            <span class="panel-title">══ BIFROST MULTI-BBS NETWORK PEERING &amp; DIRECTORY ══</span>
+            <span class="text-muted" style="margin-left: 10px; font-size: 11px;" id="network-status-badge">GLOBAL MESH REGISTRY</span>
+          </div>
+          <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
+            <input type="text" id="network-search-input" class="retro-input" placeholder="Search BBS callsign, name, region..." style="width: 260px;">
+            <button id="btn-refresh-network" class="retro-btn btn-sm">↻ SYNC REGISTRY</button>
+          </div>
+        </div>
+
+        <!-- Network Summary Cards -->
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; padding: 15px; border-bottom: 1px solid var(--border-color, #333);">
+          <div class="stat-card" style="background: rgba(0,0,0,0.3); padding: 12px; border: 1px solid #444; border-radius: 4px;">
+            <div style="font-size: 11px; color: #888;">RELAY STATUS</div>
+            <div style="font-size: 18px; font-weight: bold; color: #55ff55;" id="net-card-status">ACTIVE</div>
+          </div>
+          <div class="stat-card" style="background: rgba(0,0,0,0.3); padding: 12px; border: 1px solid #444; border-radius: 4px;">
+            <div style="font-size: 11px; color: #888;">VERIFIED NODES</div>
+            <div style="font-size: 18px; font-weight: bold; color: #55ffff;" id="net-card-total-nodes">0</div>
+          </div>
+          <div class="stat-card" style="background: rgba(0,0,0,0.3); padding: 12px; border: 1px solid #444; border-radius: 4px;">
+            <div style="font-size: 11px; color: #888;">MAX RELAY HOPS</div>
+            <div style="font-size: 18px; font-weight: bold; color: #ffff55;" id="net-card-max-hops">3 Hops</div>
+          </div>
+          <div class="stat-card" style="background: rgba(0,0,0,0.3); padding: 12px; border: 1px solid #444; border-radius: 4px;">
+            <div style="font-size: 11px; color: #888;">INBOUND RELAYS</div>
+            <div style="font-size: 18px; font-weight: bold; color: #ff55ff;" id="net-card-inbound-status">ALLOWED</div>
+          </div>
+        </div>
+
+        <!-- Node Directory Table -->
+        <div style="padding: 15px; overflow-x: auto;">
+          <table class="retro-table" style="width: 100%; border-collapse: collapse; font-size: 12px;">
+            <thead>
+              <tr style="background: rgba(255,255,255,0.05); text-align: left;">
+                <th style="padding: 8px;">CALLSIGN</th>
+                <th style="padding: 8px;">BBS NAME</th>
+                <th style="padding: 8px;">REGION / GRID</th>
+                <th style="padding: 8px;">ENDPOINTS</th>
+                <th style="padding: 8px;">SUPPORTED APPS</th>
+                <th style="padding: 8px;">SYSOP CONTACT</th>
+                <th style="padding: 8px; text-align: right;">ACTIONS</th>
+              </tr>
+            </thead>
+            <tbody id="network-nodes-tbody">
+              <!-- Dynamically populated -->
+            </tbody>
+          </table>
         </div>
       </div>
     </section>

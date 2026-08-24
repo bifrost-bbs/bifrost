@@ -43,7 +43,9 @@ impl LogBuffer {
     }
 
     pub fn push(&self, source: &str, level: &str, message: &str) -> LogEntry {
-        let id = self.next_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let id = self
+            .next_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let timestamp = chrono_now_iso();
         let entry = LogEntry {
             id,
@@ -84,17 +86,24 @@ impl LogBuffer {
                 }
             }
             if let Some(ref lvl) = query.level {
-                if !lvl.is_empty() && !lvl.eq_ignore_ascii_case("ALL") && !e.level.eq_ignore_ascii_case(lvl) {
+                if !lvl.is_empty()
+                    && !lvl.eq_ignore_ascii_case("ALL")
+                    && !e.level.eq_ignore_ascii_case(lvl)
+                {
                     return false;
                 }
             }
             if let Some(ref src) = query.source {
-                if !src.is_empty() && !src.eq_ignore_ascii_case("ALL") && !e.source.eq_ignore_ascii_case(src) {
+                if !src.is_empty()
+                    && !src.eq_ignore_ascii_case("ALL")
+                    && !e.source.eq_ignore_ascii_case(src)
+                {
                     return false;
                 }
             }
             if let Some(ref search) = query.search {
-                if !search.is_empty() && !e.message.to_lowercase().contains(&search.to_lowercase()) {
+                if !search.is_empty() && !e.message.to_lowercase().contains(&search.to_lowercase())
+                {
                     return false;
                 }
             }
@@ -136,7 +145,7 @@ fn chrono_now_iso() -> String {
         .unwrap_or_default();
     let secs = now.as_secs();
     let millis = now.subsec_millis();
-    
+
     // Format UTC ISO-8601 YYYY-MM-DDTHH:MM:SS.mmmZ
     let days = secs / 86400;
     let rem_secs = secs % 86400;
@@ -203,7 +212,11 @@ fn parse_log_line(default_source: &str, line: &str) -> (String, String, String) 
         "INFO"
     };
 
-    (level.to_string(), default_source.to_string(), line.to_string())
+    (
+        level.to_string(),
+        default_source.to_string(),
+        line.to_string(),
+    )
 }
 
 #[cfg(test)]
@@ -265,7 +278,10 @@ mod tests {
 
     #[test]
     fn test_parse_log_line() {
-        let (lvl, src, msg) = parse_log_line("default", "[2026-08-18T12:00:00Z INFO bifrost_bbs] Server started on port 8088");
+        let (lvl, src, msg) = parse_log_line(
+            "default",
+            "[2026-08-18T12:00:00Z INFO bifrost_bbs] Server started on port 8088",
+        );
         assert_eq!(lvl, "INFO");
         assert_eq!(src, "bifrost_bbs");
         assert_eq!(msg, "Server started on port 8088");

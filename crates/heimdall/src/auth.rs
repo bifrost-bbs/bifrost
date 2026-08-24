@@ -113,13 +113,21 @@ impl SessionManager {
             None => anyhow::bail!("Session not found"),
         };
 
-        if !current_session.is_admin && !current_session.has_permission(crate::user_mgr::PERM_HEIMDALL_USERS) {
+        if !current_session.is_admin
+            && !current_session.has_permission(crate::user_mgr::PERM_HEIMDALL_USERS)
+        {
             anyhow::bail!("Only administrators can impersonate users");
         }
 
-        let admin_id = current_session.impersonating.as_ref().map(|i| i.admin_id.clone())
+        let admin_id = current_session
+            .impersonating
+            .as_ref()
+            .map(|i| i.admin_id.clone())
             .unwrap_or_else(|| current_session.user_id_hex.clone());
-        let admin_username = current_session.impersonating.as_ref().map(|i| i.admin_username.clone())
+        let admin_username = current_session
+            .impersonating
+            .as_ref()
+            .map(|i| i.admin_username.clone())
             .unwrap_or_else(|| current_session.username.clone());
 
         let target_id = hex_to_node_id(&target_user.id).unwrap_or([0u8; 32]);
@@ -137,7 +145,11 @@ impl SessionManager {
         Ok(current_session.clone())
     }
 
-    pub fn stop_impersonating(&self, token: &str, original_admin_user: &UserInfo) -> anyhow::Result<Session> {
+    pub fn stop_impersonating(
+        &self,
+        token: &str,
+        original_admin_user: &UserInfo,
+    ) -> anyhow::Result<Session> {
         let mut lock = self.sessions.lock().unwrap();
         let current_session = match lock.get_mut(token) {
             Some(s) => s,
@@ -247,7 +259,10 @@ mod tests {
             id: "2102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20".to_string(),
             nickname: "UserBob".to_string(),
             has_password: true,
-            permissions: vec![PERM_HEIMDALL_LOGIN.to_string(), "heimdall.terminal".to_string()],
+            permissions: vec![
+                PERM_HEIMDALL_LOGIN.to_string(),
+                "heimdall.terminal".to_string(),
+            ],
             is_admin: false,
             created_at: 1000,
             updated_at: 1000,
@@ -261,7 +276,10 @@ mod tests {
         // Impersonation
         let imp_session = mgr.impersonate(&session.token, &user2).unwrap();
         assert_eq!(imp_session.username, "UserBob");
-        assert_eq!(imp_session.impersonating.as_ref().unwrap().admin_username, "TestAdmin");
+        assert_eq!(
+            imp_session.impersonating.as_ref().unwrap().admin_username,
+            "TestAdmin"
+        );
         assert!(!imp_session.has_permission("heimdall.users"));
 
         // Stop impersonation

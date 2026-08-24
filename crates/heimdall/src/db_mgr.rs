@@ -199,8 +199,10 @@ pub(crate) mod tests {
         assert_eq!(summary_empty.total_tables, 0);
 
         // Set keys in two tables
-        mgr.set_key("users", "node1", r#"{"nickname":"Alpha"}"#).unwrap();
-        mgr.set_key("users", "node2", r#"{"nickname":"Beta"}"#).unwrap();
+        mgr.set_key("users", "node1", r#"{"nickname":"Alpha"}"#)
+            .unwrap();
+        mgr.set_key("users", "node2", r#"{"nickname":"Beta"}"#)
+            .unwrap();
         mgr.set_key("minidungeon", "hero", r#"{"hp":50}"#).unwrap();
 
         let summary = mgr.summary().unwrap();

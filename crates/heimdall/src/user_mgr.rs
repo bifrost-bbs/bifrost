@@ -26,17 +26,61 @@ pub const PERM_HEIMDALL_SUPERVISOR: &str = "heimdall.supervisor";
 
 /// List of all available Heimdall permissions for UI assignment.
 pub const ALL_HEIMDALL_PERMISSIONS: &[(&str, &str, &str)] = &[
-    (PERM_HEIMDALL_LOGIN, "Login Access", "Allows authenticating into Heimdall Web UI and API"),
-    (PERM_HEIMDALL_OVERVIEW, "Overview Dashboard", "View system overview and health cards"),
-    (PERM_HEIMDALL_TERMINAL, "Web Terminal", "Access the interactive CP437 ANSI Web Terminal"),
-    (PERM_HEIMDALL_LOGS, "System Logs", "View and stream realtime supervisor and BBS logs"),
-    (PERM_HEIMDALL_APPS, "App Catalog & Editor", "View, test, and edit Lua BBS applications"),
-    (PERM_HEIMDALL_CONFIG, "Configuration", "View and modify supervisor and BBS settings"),
-    (PERM_HEIMDALL_TELEMETRY, "Telemetry & Captures", "Inspect airtime, packet telemetry, and captures"),
-    (PERM_HEIMDALL_TUNING, "Tuning & Crawler", "Execute compression training and automated crawlers"),
-    (PERM_HEIMDALL_DATABASE, "Database Management", "Inspect, query, backup, restore, and reset SQLite DB"),
-    (PERM_HEIMDALL_USERS, "User & Role Management", "Manage accounts, permissions, password resets, and impersonation"),
-    (PERM_HEIMDALL_SUPERVISOR, "Supervisor Commands", "Start, stop, and restart BBS and crawler services"),
+    (
+        PERM_HEIMDALL_LOGIN,
+        "Login Access",
+        "Allows authenticating into Heimdall Web UI and API",
+    ),
+    (
+        PERM_HEIMDALL_OVERVIEW,
+        "Overview Dashboard",
+        "View system overview and health cards",
+    ),
+    (
+        PERM_HEIMDALL_TERMINAL,
+        "Web Terminal",
+        "Access the interactive CP437 ANSI Web Terminal",
+    ),
+    (
+        PERM_HEIMDALL_LOGS,
+        "System Logs",
+        "View and stream realtime supervisor and BBS logs",
+    ),
+    (
+        PERM_HEIMDALL_APPS,
+        "App Catalog & Editor",
+        "View, test, and edit Lua BBS applications",
+    ),
+    (
+        PERM_HEIMDALL_CONFIG,
+        "Configuration",
+        "View and modify supervisor and BBS settings",
+    ),
+    (
+        PERM_HEIMDALL_TELEMETRY,
+        "Telemetry & Captures",
+        "Inspect airtime, packet telemetry, and captures",
+    ),
+    (
+        PERM_HEIMDALL_TUNING,
+        "Tuning & Crawler",
+        "Execute compression training and automated crawlers",
+    ),
+    (
+        PERM_HEIMDALL_DATABASE,
+        "Database Management",
+        "Inspect, query, backup, restore, and reset SQLite DB",
+    ),
+    (
+        PERM_HEIMDALL_USERS,
+        "User & Role Management",
+        "Manage accounts, permissions, password resets, and impersonation",
+    ),
+    (
+        PERM_HEIMDALL_SUPERVISOR,
+        "Supervisor Commands",
+        "Start, stop, and restart BBS and crawler services",
+    ),
 ];
 
 /// User record as stored in the `users` SQLite namespace.
@@ -86,18 +130,27 @@ impl UserManager {
     /// Helper to parse user data in various formats (JSON struct, JSON object, plain string).
     fn parse_user_record(&self, raw: &str) -> (String, Option<String>, u64, u64) {
         if let Ok(rec) = serde_json::from_str::<UserRecord>(raw) {
-            return (rec.nickname, rec.password_hash, rec.created_at, rec.updated_at);
+            return (
+                rec.nickname,
+                rec.password_hash,
+                rec.created_at,
+                rec.updated_at,
+            );
         }
         if let Ok(val) = serde_json::from_str::<serde_json::Value>(raw) {
             if let Some(obj) = val.as_object() {
-                let nick = obj.get("nickname")
+                let nick = obj
+                    .get("nickname")
                     .or_else(|| obj.get("username"))
                     .or_else(|| obj.get("callsign"))
                     .or_else(|| obj.get("name"))
                     .and_then(|v| v.as_str())
                     .unwrap_or("Unknown")
                     .to_string();
-                let pass = obj.get("password_hash").and_then(|v| v.as_str()).map(|s| s.to_string());
+                let pass = obj
+                    .get("password_hash")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
                 let created = obj.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0);
                 let updated = obj.get("updated_at").and_then(|v| v.as_u64()).unwrap_or(0);
                 return (nick, pass, created, updated);
@@ -126,7 +179,10 @@ impl UserManager {
             let (_, password_hash, _, _) = self.parse_user_record(&json_str);
             if password_hash.is_some() {
                 let perms = self.get_user_permissions_internal(&store, &node_id_hex);
-                if perms.iter().any(|p| p == PERM_ADMIN || p == PERM_HEIMDALL_LOGIN) {
+                if perms
+                    .iter()
+                    .any(|p| p == PERM_ADMIN || p == PERM_HEIMDALL_LOGIN)
+                {
                     return Ok(false);
                 }
             }
@@ -135,7 +191,11 @@ impl UserManager {
     }
 
     /// Helper to get permissions for a node hex from `permissions` namespace.
-    fn get_user_permissions_internal(&self, store: &DatabaseStore, node_id_hex: &str) -> Vec<String> {
+    fn get_user_permissions_internal(
+        &self,
+        store: &DatabaseStore,
+        node_id_hex: &str,
+    ) -> Vec<String> {
         if let Ok(Some(json_str)) = store.get("permissions", node_id_hex) {
             if let Ok(perms) = serde_json::from_str::<Vec<String>>(&json_str) {
                 return perms;
@@ -434,7 +494,7 @@ impl UserManager {
     /// Delete user and their permissions.
     pub fn delete_user(&self, node_id_hex: &str) -> Result<()> {
         let store = self.get_store()?;
-        
+
         // Count total admins to ensure we don't delete the last admin
         let mut admin_count = 0;
         for (id, _) in store.get_all("users").unwrap_or_default() {
@@ -464,7 +524,7 @@ pub fn hash_password(password: &str) -> String {
         *b = rand_byte();
     }
     let salt_hex = hex_encode(&salt);
-    
+
     let mut hasher = Sha256::new();
     hasher.update(salt_hex.as_bytes());
     hasher.update(password.as_bytes());
@@ -550,7 +610,9 @@ mod tests {
         assert!(user_mgr.is_setup_required().unwrap());
 
         // Setup initial admin
-        let admin = user_mgr.setup_initial_admin("Commander", "admin123").unwrap();
+        let admin = user_mgr
+            .setup_initial_admin("Commander", "admin123")
+            .unwrap();
         assert_eq!(admin.nickname, "Commander");
         assert!(admin.is_admin);
         assert!(admin.permissions.contains(&PERM_ADMIN.to_string()));
@@ -565,14 +627,20 @@ mod tests {
         assert_eq!(authed.nickname, "Commander");
 
         // Fail auth
-        assert!(user_mgr.authenticate("commander", "wrong").unwrap().is_none());
+        assert!(user_mgr
+            .authenticate("commander", "wrong")
+            .unwrap()
+            .is_none());
 
         // Create second user
         let user2 = user_mgr
             .create_user(
                 "TraderBob",
                 "bobpass",
-                vec![PERM_HEIMDALL_LOGIN.to_string(), PERM_HEIMDALL_TERMINAL.to_string()],
+                vec![
+                    PERM_HEIMDALL_LOGIN.to_string(),
+                    PERM_HEIMDALL_TERMINAL.to_string(),
+                ],
             )
             .unwrap();
         assert_eq!(user2.nickname, "TraderBob");
@@ -594,14 +662,22 @@ mod tests {
             )
             .unwrap();
         let u2_updated = user_mgr.get_user(&user2.id).unwrap().unwrap();
-        assert!(u2_updated.permissions.contains(&PERM_HEIMDALL_OVERVIEW.to_string()));
+        assert!(u2_updated
+            .permissions
+            .contains(&PERM_HEIMDALL_OVERVIEW.to_string()));
 
         // Change password
         user_mgr
             .change_password(&user2.id, "bobpass", "newbobpass")
             .unwrap();
-        assert!(user_mgr.authenticate("TraderBob", "bobpass").unwrap().is_none());
-        assert!(user_mgr.authenticate("TraderBob", "newbobpass").unwrap().is_some());
+        assert!(user_mgr
+            .authenticate("TraderBob", "bobpass")
+            .unwrap()
+            .is_none());
+        assert!(user_mgr
+            .authenticate("TraderBob", "newbobpass")
+            .unwrap()
+            .is_some());
 
         // Delete user
         user_mgr.delete_user(&user2.id).unwrap();

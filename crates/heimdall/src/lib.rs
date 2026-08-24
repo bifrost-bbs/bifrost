@@ -18,11 +18,11 @@ use config_mgr::ConfigManager;
 use db_mgr::DatabaseManager;
 use logs::LogBuffer;
 use stats::StatsManager;
-use supervisor::Supervisor;
 use std::path::PathBuf;
 use std::sync::Arc;
+use supervisor::Supervisor;
 use user_mgr::UserManager;
-use web::{AppState, create_router};
+use web::{create_router, AppState};
 
 #[derive(Debug, Clone)]
 pub struct HeimdallConfig {
@@ -98,15 +98,22 @@ impl HeimdallServer {
         log::info!("║  HEIMDALL SUPERVISOR RUNNING ON http://{}  ║", addr);
         log::info!("╚════════════════════════════════════════════════════════════╝");
 
-        self.app_state
-            .log_buffer
-            .push("heimdall", "INFO", &format!("Heimdall Web Supervisor active on http://{}", addr));
+        self.app_state.log_buffer.push(
+            "heimdall",
+            "INFO",
+            &format!("Heimdall Web Supervisor active on http://{}", addr),
+        );
 
         // Auto-start BBS daemon if enabled
         if self.config.auto_start_bbs {
             let cfg_str = self.config.config_path.to_string_lossy().to_string();
             let cap_str = self.config.capture_dir.to_string_lossy().to_string();
-            if let Err(e) = self.app_state.supervisor.start_bbs(Some(&cfg_str), Some(&cap_str)).await {
+            if let Err(e) = self
+                .app_state
+                .supervisor
+                .start_bbs(Some(&cfg_str), Some(&cap_str))
+                .await
+            {
                 log::warn!("Auto-start BBS error: {}", e);
             }
         }

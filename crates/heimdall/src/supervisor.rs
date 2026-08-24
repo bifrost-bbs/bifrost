@@ -1,7 +1,7 @@
 //! Master process supervisor for managing bifrost-bbs, bifrost-client, crawler, and tuning binaries.
 
-use anyhow::{Context, Result};
 use crate::logs::LogBuffer;
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -99,7 +99,7 @@ impl Supervisor {
 
     async fn get_process_info(&self, proc_lock: &Arc<RwLock<ManagedProcess>>) -> ProcessInfo {
         let mut proc = proc_lock.write().await;
-        
+
         // Check if child has exited
         if let Some(ref mut child) = proc.child {
             match child.try_wait() {
@@ -137,7 +137,11 @@ impl Supervisor {
         }
     }
 
-    pub async fn start_bbs(&self, config_path: Option<&str>, capture_dir: Option<&str>) -> Result<()> {
+    pub async fn start_bbs(
+        &self,
+        config_path: Option<&str>,
+        capture_dir: Option<&str>,
+    ) -> Result<()> {
         let mut proc = self.bbs_process.write().await;
         if proc.state == ProcessState::Running && proc.child.is_some() {
             log::info!("bifrost-bbs is already running");
@@ -145,7 +149,8 @@ impl Supervisor {
         }
 
         proc.state = ProcessState::Starting;
-        self.log_buffer.push("heimdall", "INFO", "Starting bifrost-bbs daemon...");
+        self.log_buffer
+            .push("heimdall", "INFO", "Starting bifrost-bbs daemon...");
 
         let bin_path = self.find_or_build_binary("bifrost-bbs").await?;
         let cfg_file = config_path.unwrap_or("config.toml");
@@ -159,10 +164,16 @@ impl Supervisor {
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
 
-        let mut child = cmd.spawn().with_context(|| format!("Failed to spawn {:?}", bin_path))?;
-        
+        let mut child = cmd
+            .spawn()
+            .with_context(|| format!("Failed to spawn {:?}", bin_path))?;
+
         let pid = child.id().unwrap_or(0);
-        self.log_buffer.push("heimdall", "INFO", &format!("bifrost-bbs spawned (PID: {})", pid));
+        self.log_buffer.push(
+            "heimdall",
+            "INFO",
+            &format!("bifrost-bbs spawned (PID: {})", pid),
+        );
 
         // Pipe stdout to log buffer
         if let Some(stdout) = child.stdout.take() {
@@ -197,17 +208,23 @@ impl Supervisor {
     pub async fn stop_bbs(&self) -> Result<()> {
         let mut proc = self.bbs_process.write().await;
         if let Some(mut child) = proc.child.take() {
-            self.log_buffer.push("heimdall", "INFO", "Stopping bifrost-bbs daemon...");
+            self.log_buffer
+                .push("heimdall", "INFO", "Stopping bifrost-bbs daemon...");
             let _ = child.kill().await;
             let _ = child.wait().await;
-            self.log_buffer.push("heimdall", "INFO", "bifrost-bbs stopped.");
+            self.log_buffer
+                .push("heimdall", "INFO", "bifrost-bbs stopped.");
         }
         proc.state = ProcessState::Stopped;
         proc.started_at = None;
         Ok(())
     }
 
-    pub async fn restart_bbs(&self, config_path: Option<&str>, capture_dir: Option<&str>) -> Result<()> {
+    pub async fn restart_bbs(
+        &self,
+        config_path: Option<&str>,
+        capture_dir: Option<&str>,
+    ) -> Result<()> {
         self.stop_bbs().await?;
         tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
         {
@@ -224,7 +241,14 @@ impl Supervisor {
             let _ = existing.kill().await;
         }
 
-        self.log_buffer.push("heimdall", "INFO", &format!("Launching automated crawler (steps: {}, delay: {}ms)...", steps, delay_ms));
+        self.log_buffer.push(
+            "heimdall",
+            "INFO",
+            &format!(
+                "Launching automated crawler (steps: {}, delay: {}ms)...",
+                steps, delay_ms
+            ),
+        );
 
         let bin_path = self.find_or_build_binary("bifrost-client").await?;
         let mut cmd = Command::new(&bin_path);
@@ -236,7 +260,9 @@ impl Supervisor {
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
 
-        let mut child = cmd.spawn().with_context(|| format!("Failed to spawn {:?}", bin_path))?;
+        let mut child = cmd
+            .spawn()
+            .with_context(|| format!("Failed to spawn {:?}", bin_path))?;
 
         if let Some(stdout) = child.stdout.take() {
             let log_buf = self.log_buffer.clone();
@@ -271,7 +297,11 @@ impl Supervisor {
             let _ = existing.kill().await;
         }
 
-        self.log_buffer.push("heimdall", "INFO", &format!("Running bifrost-tuning {} {:?}...", subcmd, extra_args));
+        self.log_buffer.push(
+            "heimdall",
+            "INFO",
+            &format!("Running bifrost-tuning {} {:?}...", subcmd, extra_args),
+        );
 
         let bin_path = self.find_or_build_binary("bifrost-tuning").await?;
         let mut cmd = Command::new(&bin_path);
@@ -283,7 +313,9 @@ impl Supervisor {
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
 
-        let mut child = cmd.spawn().with_context(|| format!("Failed to spawn {:?}", bin_path))?;
+        let mut child = cmd
+            .spawn()
+            .with_context(|| format!("Failed to spawn {:?}", bin_path))?;
 
         if let Some(stdout) = child.stdout.take() {
             let log_buf = self.log_buffer.clone();
@@ -335,7 +367,11 @@ impl Supervisor {
         }
 
         // Try compiling if missing
-        self.log_buffer.push("heimdall", "INFO", &format!("Binary {} not found. Compiling via cargo...", bin_name));
+        self.log_buffer.push(
+            "heimdall",
+            "INFO",
+            &format!("Binary {} not found. Compiling via cargo...", bin_name),
+        );
         let status = Command::new("cargo")
             .current_dir(&self.workspace_root)
             .args(["build", "--bin", bin_name])

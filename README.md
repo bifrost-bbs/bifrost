@@ -24,6 +24,12 @@ Bifrost is a next-generation Bulletin Board System (MeshBBS) and compression run
 *   **🏪 Decentralized App Catalog & Heimdall App Store:**
     *   Standalone apps live in independent GitHub repositories under the **`bifrost-bbs`** organization (`app-minidungeon`, `app-marketplace`, `app-weather`, `app-voidtrader`).
     *   Central verified catalog registry (`bifrost-bbs/app-catalog`) enables one-click installation, version updates, enabling/disabling, and removal via the Heimdall App Store.
+*   **🌐 Multi-BBS Network & Relaying ("Bifrost Net"):**
+    *   Federates local LoRa RF mesh communities across global internet backhauls (TCP/TLS).
+    *   **Cryptographic Relay Framing (`BifrostRelayFrame`):** Authenticated end-to-end packet traversal preserving user Ed25519 node identities across intermediate transit hubs.
+    *   **Central Network Registry:** Central verified node directory ([`bifrost-bbs/bbs-network-registry`](https://github.com/bifrost-bbs/bbs-network-registry)) with automated CI validation.
+    *   **Multi-Hop Routing & Loop Detection:** Up to $N$ hops (`max_hops`) with cryptographic auth tags and active loop prevention.
+    *   **Terminal & Web Hubs:** Built-in dynamic terminal navigation app (`[N] Network BBSs`) and Heimdall NOC peering dashboard with real-time latency ping testing.
 *   **🛠️ Sandboxed Lua Application Engine:**
     *   Core apps (`messages`, `profile`, `admin`) and modular door games run within sandboxed `mlua` (Lua 5.4) instances with strict memory (512 KB) and instruction limits.
 *   **🛡️ Regulatory QoS & Airtime Regulator:**
@@ -44,6 +50,7 @@ The project is managed as a Rust Cargo Workspace:
 ├── AGENTS.md                        # AI coding assistant guidelines
 ├── docs/
 │   ├── Lua_App_Development_Guide.md     # Lua application developer tutorial & API reference
+│   ├── Multi_BBS_Network_Guide.md       # Multi-BBS network, relaying, and peering guide
 │   ├── MeshBBS_MeshANSI_Requirements_Specification.md  # Protocol & architecture spec
 │   └── PRD.md                       # Product Requirements Document
 ├── apps/                            # Core Built-in BBS Applications
