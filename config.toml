@@ -46,7 +46,6 @@ admin_nodes = [
 main_app = "main_menu"
 # List of enabled applications to load and register
 enabled = [
-    "main_menu",
     "messages",
     "profile",
     "minidungeon",

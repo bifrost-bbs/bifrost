@@ -1816,7 +1816,6 @@ fn load_client_dictionary(node_id: &[u8; 32]) -> bifrost_compression::Compressio
 
 fn get_client_asset_content(node_id: &[u8; 32], asset_id: u16) -> Option<String> {
     let enabled_apps = vec![
-        "main_menu".to_string(),
         "messages".to_string(),
         "profile".to_string(),
         "minidungeon".to_string(),
@@ -2491,7 +2490,6 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
 
         let enabled_apps = vec![
-            "main_menu".to_string(),
             "messages".to_string(),
             "profile".to_string(),
             "minidungeon".to_string(),

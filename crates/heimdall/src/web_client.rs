@@ -932,7 +932,6 @@ pub fn get_asset_content_by_id(asset_id: u16) -> Option<(String, String)> {
 
     // 2. Canonical dynamic asset registry matching BBS server allocation exactly
     let enabled_apps = vec![
-        "main_menu".to_string(),
         "messages".to_string(),
         "profile".to_string(),
         "minidungeon".to_string(),

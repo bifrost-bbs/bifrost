@@ -139,7 +139,6 @@ fn default_main_app() -> String {
 
 fn default_enabled_apps() -> Vec<String> {
     vec![
-        "main_menu".to_string(),
         "messages".to_string(),
         "profile".to_string(),
         "minidungeon".to_string(),
@@ -708,13 +707,54 @@ end
 return menu
 "#;
 
-/// Loads the static public asset manifests for all enabled apps.
+/// Loads the static public asset manifests for all enabled apps as well as global assets.
 /// Dynamically assigns unique 16-bit AssetIDs to prevent conflicts.
 /// Maps AssetID -> (CanonicalNamespacedName, ResolvedRelativePath).
 pub fn load_app_manifests(enabled_apps: &[String]) -> HashMap<u16, (String, String)> {
     let mut map = HashMap::new();
     let mut next_dynamic_id: u16 = 0x0101;
 
+    // 1. Scan global top-level assets directory (e.g. "assets/")
+    let global_assets_dir = find_workspace_path("assets");
+    if global_assets_dir.is_dir() {
+        if let Ok(entries) = std::fs::read_dir(&global_assets_dir) {
+            let mut entries_vec: Vec<_> = entries.flatten().collect();
+            entries_vec.sort_by_key(|e| e.path());
+            for entry in entries_vec {
+                let path = entry.path();
+                if path.is_file() {
+                    let file_name = path
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string();
+                    let asset_stem = path
+                        .file_stem()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string();
+
+                    while map.contains_key(&next_dynamic_id) {
+                        next_dynamic_id = next_dynamic_id.wrapping_add(1);
+                    }
+                    let id = next_dynamic_id;
+                    next_dynamic_id = next_dynamic_id.wrapping_add(1);
+
+                    let asset_rel_path = format!("assets/{}", file_name);
+                    let namespaced_name = format!("assets/{}", asset_stem);
+                    log::debug!(
+                        "Registered global asset 0x{:04X}: '{}' -> '{}'",
+                        id,
+                        namespaced_name,
+                        asset_rel_path
+                    );
+                    map.insert(id, (namespaced_name, asset_rel_path));
+                }
+            }
+        }
+    }
+
+    // 2. Scan per-app manifests
     for app_id in enabled_apps {
         let manifest_rel = format!("apps/{}/manifest.toml", app_id);
         let manifest_path = find_workspace_path(&manifest_rel);
@@ -777,6 +817,7 @@ pub fn resolve_asset_id_and_content(
 ) -> (u16, Option<String>) {
     let normalized_target = asset_name.replace("::", "/").replace(':', "/");
     let relative_target = format!("{}/{}", current_app, normalized_target);
+    let assets_target = format!("assets/{}", normalized_target);
 
     // 1. Exact match with current app namespace (e.g. "voidtrader/combat_menu")
     let matched = manifest_map
@@ -792,14 +833,21 @@ pub fn resolve_asset_id_and_content(
                 n_norm == normalized_target
             })
         })
-        // 3. Suffix match (e.g. ".../combat_menu")
+        // 3. Exact match with global assets namespace (e.g. "assets/main_menu_banner")
+        .or_else(|| {
+            manifest_map.iter().find(|(_, (n, _))| {
+                let n_norm = n.replace("::", "/").replace(':', "/");
+                n_norm == assets_target
+            })
+        })
+        // 4. Suffix match (e.g. ".../combat_menu" or ".../main_menu_banner")
         .or_else(|| {
             manifest_map.iter().find(|(_, (n, _))| {
                 let n_norm = n.replace("::", "/").replace(':', "/");
                 n_norm.ends_with(&format!("/{}", normalized_target))
             })
         })
-        // 4. Substring match fallback
+        // 5. Substring match fallback
         .or_else(|| {
             manifest_map.iter().find(|(_, (n, _))| {
                 n.to_ascii_uppercase().contains(&asset_name.to_ascii_uppercase())
@@ -3577,16 +3625,16 @@ max_asset_broadcast_duty_cycle = 0.15
 
     #[test]
     fn test_asset_manifest_loading() {
-        let manifest = load_app_manifests(&["main_menu".to_string(), "minidungeon".to_string()]);
-        assert!(manifest.len() >= 3, "Manifest should contain at least the 3 app assets");
+        let manifest = load_app_manifests(&["minidungeon".to_string()]);
+        assert!(manifest.len() >= 3, "Manifest should contain global assets and minidungeon assets");
 
         let banner_entry = manifest
             .iter()
-            .find(|(_, (name, _))| name == "main_menu/main_menu_banner");
-        assert!(banner_entry.is_some(), "main_menu/main_menu_banner must be registered");
+            .find(|(_, (name, _))| name == "assets/main_menu_banner" || name == "main_menu_banner");
+        assert!(banner_entry.is_some(), "assets/main_menu_banner must be registered");
         let (&banner_id, (banner_name, banner_path)) = banner_entry.unwrap();
-        assert_eq!(banner_name, "main_menu/main_menu_banner");
-        assert_eq!(banner_path, "apps/main_menu/assets/main_menu_banner.ans");
+        assert!(banner_name.contains("main_menu_banner"));
+        assert_eq!(banner_path, "assets/main_menu_banner.ans");
 
         let dungeon_entry = manifest
             .iter()
@@ -3618,8 +3666,8 @@ max_asset_broadcast_duty_cycle = 0.15
         let manifest = load_app_manifests(&config.apps.enabled);
         let (&req_asset_id, (_, _)) = manifest
             .iter()
-            .find(|(_, (n, _))| n == "main_menu/main_menu_banner")
-            .expect("main_menu/main_menu_banner must exist in manifest");
+            .find(|(_, (n, _))| n == "assets/main_menu_banner" || n == "main_menu_banner")
+            .expect("main_menu_banner must exist in manifest");
 
         let server_transport = Arc::new(MockSocketTransport::new_server(
             "127.0.0.1:9098".to_string(),
@@ -3714,7 +3762,7 @@ max_asset_broadcast_duty_cycle = 0.15
 
         assert!(
             expected_total_chunks > 0,
-            "Did not receive any broadcast asset chunks for 0x0103"
+            "Did not receive any broadcast asset chunks for asset"
         );
         assert_eq!(
             chunks_received.len(),
@@ -3733,7 +3781,7 @@ max_asset_broadcast_duty_cycle = 0.15
             "CRC32 mismatch on assembled broadcast asset"
         );
 
-        let banner_path = find_workspace_path("apps/main_menu/assets/main_menu_banner.ans");
+        let banner_path = find_workspace_path("assets/main_menu_banner.ans");
         let expected_bytes = std::fs::read(banner_path).unwrap();
         assert_eq!(assembled_bytes, expected_bytes, "Broadcast asset content does not match original file");
 
@@ -4461,7 +4509,6 @@ max_asset_broadcast_duty_cycle = 0.15
     #[test]
     fn test_all_app_manifests_valid() {
         let enabled = vec![
-            "main_menu".to_string(),
             "messages".to_string(),
             "profile".to_string(),
             "minidungeon".to_string(),
@@ -4471,12 +4518,11 @@ max_asset_broadcast_duty_cycle = 0.15
             "voidtrader".to_string(),
         ];
         let manifest_map = load_app_manifests(&enabled);
-        assert!(manifest_map.contains_key(&0x0101)); // main menu banner
-        assert!(manifest_map.contains_key(&0x0102)); // main menu border
-        assert!(manifest_map.contains_key(&0x0103)); // dungeon banner
-        assert!(manifest_map.contains_key(&0x0104)); // voidtrader banner
+        assert!(manifest_map.contains_key(&0x0101)); // global assets/main_menu_banner
+        assert!(manifest_map.contains_key(&0x0102)); // global assets/main_menu_border
+        assert!(manifest_map.contains_key(&0x0103)); // global assets/main_nav
 
-        // Verify each main.lua exists
+        // Verify each enabled app's main.lua exists
         for app_id in &enabled {
             let entry = format!("apps/{}/main.lua", app_id);
             let path = find_workspace_path(&entry);
