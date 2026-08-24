@@ -257,7 +257,6 @@ class HeimdallApp {
 
     on('btn-refresh-captures', 'click', () => this.fetchCaptures());
   }
-  }
 
   switchTab(tabId) {
     this.activeTab = tabId;
