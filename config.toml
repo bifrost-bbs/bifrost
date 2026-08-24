@@ -56,6 +56,20 @@ enabled = [
     "voidtrader",
 ]
 
+[main_menu]
+# Background/Banner asset rendered above the menu (empty string to disable)
+banner_asset = "main_menu_banner"
+# Main menu header title and ANSI styling (0-15 color codes)
+title = "=== BIFROST MESHBBS ==="
+header_fg = 14
+header_bg = 0
+# Menu layout mode: "grid" (multi-column) or "list" (single-column)
+layout = "grid"
+start_col = 2
+start_row = 10
+col_width = 16
+show_logout = true
+
 [packet_capture]
 # Enable capturing all in/out raw and compressed packets with CSV metrics logging
 enabled = false

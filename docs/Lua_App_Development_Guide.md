@@ -330,6 +330,8 @@ The `session` global table manages client identity, user inputs, permissions, sc
 | `session.exec_app(app_name)` | `(app_name: string)` | `nil` | Alias for `session.load_app`. |
 | `session.permissions()` | `()` | `table` | Returns an array of string permissions assigned to the current node. |
 | `session.has_permission(perm)` | `(perm: string)` | `boolean` | Checks if the user holds a specific capability (`"admin"`, `"read"`, `"write"`, etc.). |
+| `session.get_apps()` | `()` | `table` | Returns array of enabled application descriptors (`id`, `name`, `description`, `admin_only`, `hotkey`). |
+| `session.get_menu_config()` | `()` | `table` | Returns the server's `[main_menu]` configuration from `config.toml` (`banner_asset`, `title`, `header_fg`, `layout`, etc.). |
 | `session.include(filename)` | `(filename: string)` | `any` | Loads and executes a Lua file within the active app directory. |
 | `session.time()` | `()` | `integer` | Returns current Unix timestamp in seconds. |
 | `session.date_str()` | `()` | `string` | Returns a day identifier (e.g. `"day-20690"`) useful for daily reset mechanics. |

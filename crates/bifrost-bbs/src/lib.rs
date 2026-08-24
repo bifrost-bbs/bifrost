@@ -165,6 +165,78 @@ fn default_apps_config() -> AppsConfig {
     }
 }
 
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq)]
+pub struct MainMenuConfig {
+    #[serde(default = "default_menu_banner")]
+    pub banner_asset: Option<String>,
+    #[serde(default = "default_menu_title")]
+    pub title: String,
+    #[serde(default = "default_menu_header_fg")]
+    pub header_fg: u8,
+    #[serde(default = "default_menu_header_bg")]
+    pub header_bg: u8,
+    #[serde(default = "default_menu_layout")]
+    pub layout: String,
+    #[serde(default = "default_menu_start_col")]
+    pub start_col: u8,
+    #[serde(default = "default_menu_start_row")]
+    pub start_row: u8,
+    #[serde(default = "default_menu_col_width")]
+    pub col_width: u8,
+    #[serde(default = "default_true")]
+    pub show_logout: bool,
+}
+
+fn default_menu_banner() -> Option<String> {
+    Some("main_menu_banner".to_string())
+}
+
+fn default_menu_title() -> String {
+    "=== BIFROST MESHBBS ===".to_string()
+}
+
+fn default_menu_header_fg() -> u8 {
+    14
+}
+
+fn default_menu_header_bg() -> u8 {
+    0
+}
+
+fn default_menu_layout() -> String {
+    "grid".to_string()
+}
+
+fn default_menu_start_col() -> u8 {
+    2
+}
+
+fn default_menu_start_row() -> u8 {
+    10
+}
+
+fn default_menu_col_width() -> u8 {
+    16
+}
+
+fn default_true() -> bool {
+    true
+}
+
+pub fn default_main_menu_config() -> MainMenuConfig {
+    MainMenuConfig {
+        banner_asset: default_menu_banner(),
+        title: default_menu_title(),
+        header_fg: default_menu_header_fg(),
+        header_bg: default_menu_header_bg(),
+        layout: default_menu_layout(),
+        start_col: default_menu_start_col(),
+        start_row: default_menu_start_row(),
+        col_width: default_menu_col_width(),
+        show_logout: default_true(),
+    }
+}
+
 /// Bifrost BBS Server Configuration Loaded from config.toml
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq)]
 pub struct AppConfig {
@@ -178,6 +250,8 @@ pub struct AppConfig {
     pub admin_nodes: Vec<String>,
     #[serde(default = "default_apps_config")]
     pub apps: AppsConfig,
+    #[serde(default = "default_main_menu_config")]
+    pub main_menu: MainMenuConfig,
     #[serde(default = "default_packet_capture_config")]
     pub packet_capture: PacketCaptureConfig,
     #[serde(default = "default_database_config")]
@@ -376,6 +450,7 @@ pub fn default_config() -> AppConfig {
         },
         admin_nodes: Vec::new(),
         apps: default_apps_config(),
+        main_menu: default_main_menu_config(),
         packet_capture: default_packet_capture_config(),
         database: default_database_config(),
     }
@@ -442,6 +517,10 @@ pub struct AppMetadata {
     pub version: Option<String>,
     pub repository: Option<String>,
     pub entry_point: Option<String>,
+    #[serde(default)]
+    pub admin_only: Option<bool>,
+    #[serde(default)]
+    pub hotkey: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -1042,6 +1121,7 @@ pub async fn start_server_with_stats(
                                 let admin_nodes_config = config.admin_nodes.clone();
                                 let asset_manifest_clone = asset_manifest_map.clone();
                                 let apps_config_clone = config.apps.clone();
+                                let main_menu_config_clone = config.main_menu.clone();
                                 let bbs_stats_inner = bbs_stats_clone.clone();
                                 let transport_stats_inner = transport_stats.clone();
                                 let packet_recorder_inner = packet_recorder.clone();
@@ -1057,6 +1137,7 @@ pub async fn start_server_with_stats(
                                         admin_nodes_config,
                                         asset_manifest_clone,
                                         apps_config_clone,
+                                        main_menu_config_clone,
                                         bbs_stats_inner.clone(),
                                         transport_stats_inner,
                                         packet_recorder_inner,
@@ -1287,6 +1368,7 @@ fn run_session_task(
     admin_nodes: Vec<String>,
     asset_manifest: Arc<HashMap<u16, (String, String)>>,
     apps_config: AppsConfig,
+    main_menu_config: MainMenuConfig,
     bbs_stats: Arc<BbsStats>,
     transport_stats: Option<Arc<TransportStats>>,
     packet_recorder: Option<Arc<PacketRecorder>>,
@@ -2189,6 +2271,64 @@ fn run_session_task(
                 .as_secs();
             let days = secs / 86400;
             Ok(format!("day-{}", days))
+        })?,
+    )?;
+
+    let main_menu_cfg_clone = main_menu_config.clone();
+    session.set(
+        "get_menu_config",
+        lua.create_function(move |lua, (): ()| {
+            let tbl = lua.create_table()?;
+            tbl.set("banner_asset", main_menu_cfg_clone.banner_asset.clone())?;
+            tbl.set("title", main_menu_cfg_clone.title.clone())?;
+            tbl.set("header_fg", main_menu_cfg_clone.header_fg)?;
+            tbl.set("header_bg", main_menu_cfg_clone.header_bg)?;
+            tbl.set("layout", main_menu_cfg_clone.layout.clone())?;
+            tbl.set("start_col", main_menu_cfg_clone.start_col)?;
+            tbl.set("start_row", main_menu_cfg_clone.start_row)?;
+            tbl.set("col_width", main_menu_cfg_clone.col_width)?;
+            tbl.set("show_logout", main_menu_cfg_clone.show_logout)?;
+            Ok(tbl)
+        })?,
+    )?;
+
+    let enabled_apps_for_get = apps_config.enabled.clone();
+    session.set(
+        "get_apps",
+        lua.create_function(move |lua, (): ()| {
+            let tbl = lua.create_table()?;
+            let mut idx = 1;
+            for app_id in &enabled_apps_for_get {
+                if app_id == "main_menu" {
+                    continue;
+                }
+                let manifest_rel = format!("apps/{}/manifest.toml", app_id);
+                let manifest_path = find_workspace_path(&manifest_rel);
+                let mut name = app_id.clone();
+                let mut description = String::new();
+                let mut admin_only = app_id == "admin";
+                let mut hotkey = None;
+
+                if let Ok(contents) = std::fs::read_to_string(&manifest_path) {
+                    if let Ok(app_manifest) = toml::from_str::<AppManifest>(&contents) {
+                        name = app_manifest.app.name;
+                        description = app_manifest.app.description.unwrap_or_default();
+                        admin_only = app_manifest.app.admin_only.unwrap_or(app_id == "admin");
+                        hotkey = app_manifest.app.hotkey;
+                    }
+                }
+
+                let app_tbl = lua.create_table()?;
+                app_tbl.set("id", app_id.clone())?;
+                app_tbl.set("name", name)?;
+                app_tbl.set("description", description)?;
+                app_tbl.set("admin_only", admin_only)?;
+                app_tbl.set("hotkey", hotkey)?;
+
+                tbl.set(idx, app_tbl)?;
+                idx += 1;
+            }
+            Ok(tbl)
         })?,
     )?;
 

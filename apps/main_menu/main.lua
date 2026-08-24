@@ -1,4 +1,4 @@
--- Bifrost BBS Main Menu Application using Declarative Forms & Menu Assets
+-- Bifrost BBS Config-Driven Dynamic Main Menu
 local menu = {}
 
 function menu.on_start(session)
@@ -6,9 +6,24 @@ function menu.on_start(session)
     local user = db.get("users", user_id)
 
     term.clear()
-    term.render_asset("main_menu_banner")
+    local cfg = session.get_menu_config() or {
+        banner_asset = "main_menu_banner",
+        title = "=== BIFROST MESHBBS ===",
+        header_fg = 14,
+        header_bg = 0,
+        layout = "grid",
+        start_col = 2,
+        start_row = 10,
+        col_width = 16,
+        show_logout = true
+    }
+
+    if cfg.banner_asset and cfg.banner_asset ~= "" then
+        term.render_asset(cfg.banner_asset)
+    end
+
     term.move_to(2, 6)
-    term.set_color(7, 0) -- White on Black
+    term.set_color(cfg.header_fg or 14, cfg.header_bg or 0)
 
     if not user or not user.nickname then
         local default_nick = "Operator"
@@ -37,65 +52,101 @@ function menu.on_start(session)
             log.info("New user registered nickname: " .. nick)
             menu.on_start(session)
         end)
-    else
-        term.print("Hello, " .. user.nickname .. "!\n")
-        term.print("Select options using Tab/Arrows or Hotkeys:\n\n")
-
-        local is_admin = session.has_permission("admin")
-        log.info("Session admin check: " .. tostring(is_admin))
-
-        -- Render navigation menu using cached Menu Asset
-        term.render_menu("main_nav", {
-            read_boards = true,
-            door_game = true,
-            voidtrader = true,
-            marketplace = true,
-            weather = true,
-            profile = true,
-            admin = is_admin,
-            logout = true
-        })
-        term.flush_form()
-
-        session.await_input(10, function(submission)
-            if type(submission) == "string" then
-                menu.on_start(session)
-                return
-            end
-
-            local action = submission.submit
-            log.info("Main menu selected action: " .. tostring(action))
-
-            if action == "read_boards" then
-                session.load_app("messages")
-            elseif action == "marketplace" then
-                session.load_app("marketplace")
-            elseif action == "door_game" then
-                session.load_app("minidungeon")
-            elseif action == "voidtrader" then
-                session.load_app("voidtrader")
-            elseif action == "profile" then
-                session.load_app("profile")
-            elseif action == "weather" then
-                session.load_app("weather")
-            elseif action == "admin" then
-                if session.has_permission("admin") then
-                    session.load_app("admin")
-                else
-                    log.warn("Access denied: User " .. user.nickname .. " requested admin app without permission.")
-                    menu.on_start(session)
-                end
-            elseif action == "logout" then
-                log.info("User logged out: " .. user.nickname)
-                term.clear()
-                term.print("Goodbye, " .. user.nickname .. "!\n")
-                term.flush()
-                session.close()
-            else
-                menu.on_start(session)
-            end
-        end)
+        return
     end
+
+    term.print("Hello, " .. user.nickname .. "!\n")
+    term.set_color(7, 0)
+    term.print("Select options using Tab/Arrows or Hotkeys:\n\n")
+
+    local is_admin = session.has_permission("admin")
+    local apps = session.get_apps() or {}
+
+    term.define_form(10)
+
+    local start_col = cfg.start_col or 2
+    local start_row = cfg.start_row or 10
+    local col_width = cfg.col_width or 16
+    local layout = cfg.layout or "grid"
+
+    local current_row = start_row
+    local current_col = start_col
+    local items_in_col = 0
+    local registered_apps = {}
+
+    for _, app_info in ipairs(apps) do
+        local can_show = true
+        if app_info.admin_only and not is_admin then
+            can_show = false
+        end
+
+        if can_show then
+            local button_id = app_info.id
+            registered_apps[button_id] = app_info.id
+
+            term.add_submit_button(button_id, current_col, current_row)
+
+            if layout == "grid" then
+                items_in_col = items_in_col + 1
+                if items_in_col % 3 == 0 then
+                    current_col = current_col + col_width
+                    current_row = start_row
+                else
+                    current_row = current_row + 2
+                end
+            else
+                current_row = current_row + 2
+            end
+        end
+    end
+
+    if cfg.show_logout then
+        term.add_submit_button("logout", current_col, current_row)
+    end
+
+    term.flush_form()
+
+    session.await_input(10, function(submission)
+        if type(submission) == "string" then
+            menu.on_start(session)
+            return
+        end
+
+        local action = submission.submit
+        log.info("Main menu selected action: " .. tostring(action))
+
+        if action == "logout" then
+            log.info("User logged out: " .. user.nickname)
+            term.clear()
+            term.print("Goodbye, " .. user.nickname .. "!\n")
+            term.flush()
+            session.close()
+        elseif registered_apps[action] then
+            session.load_app(registered_apps[action])
+        -- Support backward compatibility with legacy button action names
+        elseif action == "read_boards" then
+            session.load_app("messages")
+        elseif action == "door_game" then
+            session.load_app("minidungeon")
+        else
+            -- Direct app name lookup
+            local matched = false
+            for _, app_info in ipairs(apps) do
+                if app_info.id == action then
+                    session.load_app(app_info.id)
+                    matched = true
+                    break
+                end
+            end
+            if not matched then
+                menu.on_start(session)
+            end
+        end
+    end)
+end
+
+function menu.on_resume(session)
+    menu.on_start(session)
 end
 
 return menu
