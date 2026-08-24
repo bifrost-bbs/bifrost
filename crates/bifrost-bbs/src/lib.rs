@@ -520,6 +520,8 @@ pub struct AppMetadata {
     #[serde(default)]
     pub admin_only: Option<bool>,
     #[serde(default)]
+    pub required_permission: Option<String>,
+    #[serde(default)]
     pub hotkey: Option<String>,
 }
 
@@ -537,6 +539,174 @@ pub struct AppManifest {
     #[serde(default)]
     pub assets: Vec<AppAssetEntry>,
 }
+
+pub const EMBEDDED_MAIN_MENU_LUA: &str = r#"
+local menu = {}
+
+function menu.on_start(session)
+    local user_id = session.node_id()
+    local user = db.get("users", user_id)
+
+    term.clear()
+    local cfg = nil
+    if type(session.get_menu_config) == "function" then
+        cfg = session.get_menu_config()
+    end
+    if not cfg then
+        cfg = {
+            banner_asset = "main_menu_banner",
+            title = "=== BIFROST MESHBBS ===",
+            header_fg = 14,
+            header_bg = 0,
+            layout = "grid",
+            start_col = 2,
+            start_row = 10,
+            col_width = 16,
+            show_logout = true
+        }
+    end
+
+    if cfg.banner_asset and cfg.banner_asset ~= "" then
+        term.render_asset(cfg.banner_asset)
+    end
+
+    term.move_to(2, 6)
+    term.set_color(cfg.header_fg or 14, cfg.header_bg or 0)
+
+    if not user or not user.nickname then
+        local default_nick = "Operator"
+        if user and user.node_name then
+            default_nick = user.node_name
+        end
+
+        -- Force register nickname on very first connection
+        term.print("Welcome to Bifrost! Please set a nickname:\n")
+        term.define_form(1)
+        term.print("  Your Nickname: ")
+        term.add_input_field("nickname", 18, 8, 15, default_nick)
+        term.print("\n")
+        term.add_submit_button("register", 2, 10)
+        term.flush_form()
+
+        session.await_input(1, function(submission)
+            if type(submission) == "string" then
+                menu.on_start(session)
+                return
+            end
+            local nick = submission.nickname or default_nick
+            local updated_user = user or {}
+            updated_user.nickname = nick
+            db.set("users", user_id, updated_user)
+            log.info("New user registered nickname: " .. nick)
+            menu.on_start(session)
+        end)
+        return
+    end
+
+    term.print("Hello, " .. user.nickname .. "!\n")
+    term.set_color(7, 0)
+    term.print("Select options using Tab/Arrows or Hotkeys:\n\n")
+
+    local is_admin = session.has_permission("admin")
+    local apps = nil
+    if type(session.get_apps) == "function" then
+        apps = session.get_apps()
+    end
+    if not apps or #apps == 0 then
+        apps = {}
+    end
+
+    term.define_form(10)
+
+    local start_col = cfg.start_col or 2
+    local start_row = cfg.start_row or 10
+    local col_width = cfg.col_width or 16
+    local layout = cfg.layout or "grid"
+
+    local current_row = start_row
+    local current_col = start_col
+    local items_in_col = 0
+    local registered_apps = {}
+
+    for _, app_info in ipairs(apps) do
+        local can_show = true
+        if app_info.admin_only and not is_admin then
+            can_show = false
+        elseif app_info.required_permission and app_info.required_permission ~= "" then
+            if not is_admin and not session.has_permission(app_info.required_permission) then
+                can_show = false
+            end
+        end
+
+        if can_show then
+            local button_id = app_info.id
+            registered_apps[button_id] = app_info.id
+
+            term.add_submit_button(button_id, current_col, current_row)
+
+            if layout == "grid" then
+                items_in_col = items_in_col + 1
+                if items_in_col % 3 == 0 then
+                    current_col = current_col + col_width
+                    current_row = start_row
+                else
+                    current_row = current_row + 2
+                end
+            else
+                current_row = current_row + 2
+            end
+        end
+    end
+
+    if cfg.show_logout then
+        term.add_submit_button("logout", current_col, current_row)
+    end
+
+    term.flush_form()
+
+    session.await_input(10, function(submission)
+        if type(submission) == "string" then
+            menu.on_start(session)
+            return
+        end
+
+        local action = submission.submit
+        log.info("Main menu selected action: " .. tostring(action))
+
+        if action == "logout" then
+            log.info("User logged out: " .. user.nickname)
+            term.clear()
+            term.print("Goodbye, " .. user.nickname .. "!\n")
+            term.flush()
+            session.close()
+        elseif registered_apps[action] then
+            session.load_app(registered_apps[action])
+        elseif action == "read_boards" then
+            session.load_app("messages")
+        elseif action == "door_game" then
+            session.load_app("minidungeon")
+        else
+            local matched = false
+            for _, app_info in ipairs(apps) do
+                if app_info.id == action then
+                    session.load_app(app_info.id)
+                    matched = true
+                    break
+                end
+            end
+            if not matched then
+                menu.on_start(session)
+            end
+        end
+    end)
+end
+
+function menu.on_resume(session)
+    menu.on_start(session)
+end
+
+return menu
+"#;
 
 /// Loads the static public asset manifests for all enabled apps.
 /// Dynamically assigns unique 16-bit AssetIDs to prevent conflicts.
@@ -2237,15 +2407,19 @@ fn run_session_task(
         }
         let entry_file = format!("apps/{}/main.lua", app_name);
         let path = find_workspace_path(&entry_file);
-        if path.exists() {
-            *active_app_clone.lock().unwrap() = app_name.clone();
-            let code = std::fs::read_to_string(&path)?;
-            let app: mlua::Table = lua.load(&code).set_name(&app_name).eval()?;
-            let on_start: mlua::Function = app.get("on_start")?;
-            on_start.call::<_, ()>(lua.globals().get::<_, mlua::Table>("session")?)?;
+        let code = if path.exists() {
+            std::fs::read_to_string(&path)?
+        } else if app_name == "main_menu" {
+            EMBEDDED_MAIN_MENU_LUA.to_string()
         } else {
             log::error!("Application '{}' entry point not found at {:?}", app_name, path);
-        }
+            return Ok(());
+        };
+
+        *active_app_clone.lock().unwrap() = app_name.clone();
+        let app: mlua::Table = lua.load(&code).set_name(&app_name).eval()?;
+        let on_start: mlua::Function = app.get("on_start")?;
+        on_start.call::<_, ()>(lua.globals().get::<_, mlua::Table>("session")?)?;
         Ok(())
     })?;
     session.set("load_app", load_app.clone())?;
@@ -2307,6 +2481,7 @@ fn run_session_task(
                 let mut name = app_id.clone();
                 let mut description = String::new();
                 let mut admin_only = app_id == "admin";
+                let mut required_permission = None;
                 let mut hotkey = None;
 
                 if let Ok(contents) = std::fs::read_to_string(&manifest_path) {
@@ -2314,6 +2489,7 @@ fn run_session_task(
                         name = app_manifest.app.name;
                         description = app_manifest.app.description.unwrap_or_default();
                         admin_only = app_manifest.app.admin_only.unwrap_or(app_id == "admin");
+                        required_permission = app_manifest.app.required_permission;
                         hotkey = app_manifest.app.hotkey;
                     }
                 }
@@ -2323,6 +2499,7 @@ fn run_session_task(
                 app_tbl.set("name", name)?;
                 app_tbl.set("description", description)?;
                 app_tbl.set("admin_only", admin_only)?;
+                app_tbl.set("required_permission", required_permission)?;
                 app_tbl.set("hotkey", hotkey)?;
 
                 tbl.set(idx, app_tbl)?;
@@ -2339,8 +2516,15 @@ fn run_session_task(
     log::debug!("Loading initial app '{}'...", main_app_name);
     let main_entry_file = format!("apps/{}/main.lua", main_app_name);
     let main_path = find_workspace_path(&main_entry_file);
-    if main_path.exists() {
-        let main_code = std::fs::read_to_string(&main_path)?;
+    let main_code_opt = if main_path.exists() {
+        std::fs::read_to_string(&main_path).ok()
+    } else if main_app_name == "main_menu" {
+        Some(EMBEDDED_MAIN_MENU_LUA.to_string())
+    } else {
+        None
+    };
+
+    if let Some(main_code) = main_code_opt {
         log::debug!("Evaluating app '{}' code...", main_app_name);
         let app: mlua::Table = lua.load(&main_code).set_name(&main_app_name).eval()?;
         log::debug!("App '{}' code evaluated successfully", main_app_name);
@@ -2444,38 +2628,44 @@ fn run_session_task(
                 );
                 let entry_file = format!("apps/{}/main.lua", current_app_name);
                 let path = find_workspace_path(&entry_file);
-                if path.exists() {
-                    if let Ok(code) = std::fs::read_to_string(&path) {
-                        if let Ok(app_table) =
-                            lua.load(&code).set_name(&current_app_name).eval::<mlua::Table>()
+                let code_opt = if path.exists() {
+                    std::fs::read_to_string(&path).ok()
+                } else if current_app_name == "main_menu" {
+                    Some(EMBEDDED_MAIN_MENU_LUA.to_string())
+                } else {
+                    None
+                };
+
+                if let Some(code) = code_opt {
+                    if let Ok(app_table) =
+                        lua.load(&code).set_name(&current_app_name).eval::<mlua::Table>()
+                    {
+                        let session_table =
+                            lua.globals().get::<_, mlua::Table>("session")?;
+                        if let Ok(on_resume) =
+                            app_table.get::<_, mlua::Function>("on_resume")
                         {
-                            let session_table =
-                                lua.globals().get::<_, mlua::Table>("session")?;
-                            if let Ok(on_resume) =
-                                app_table.get::<_, mlua::Function>("on_resume")
-                            {
-                                log::debug!("Invoking on_resume for '{}'...", current_app_name);
-                                if let Err(e) = on_resume.call::<_, ()>(session_table) {
-                                    log::error!(
-                                        "Error in on_resume for '{}': {:?}",
-                                        current_app_name,
-                                        e
-                                    );
-                                }
-                            } else if let Ok(on_start) =
-                                app_table.get::<_, mlua::Function>("on_start")
-                            {
-                                log::debug!(
-                                    "Invoking on_start fallback on resume for '{}'...",
-                                    current_app_name
+                            log::debug!("Invoking on_resume for '{}'...", current_app_name);
+                            if let Err(e) = on_resume.call::<_, ()>(session_table) {
+                                log::error!(
+                                    "Error in on_resume for '{}': {:?}",
+                                    current_app_name,
+                                    e
                                 );
-                                if let Err(e) = on_start.call::<_, ()>(session_table) {
-                                    log::error!(
-                                        "Error in on_start on resume for '{}': {:?}",
-                                        current_app_name,
-                                        e
-                                    );
-                                }
+                            }
+                        } else if let Ok(on_start) =
+                            app_table.get::<_, mlua::Function>("on_start")
+                        {
+                            log::debug!(
+                                "Invoking on_start fallback on resume for '{}'...",
+                                current_app_name
+                            );
+                            if let Err(e) = on_start.call::<_, ()>(session_table) {
+                                log::error!(
+                                    "Error in on_start on resume for '{}': {:?}",
+                                    current_app_name,
+                                    e
+                                );
                             }
                         }
                     }

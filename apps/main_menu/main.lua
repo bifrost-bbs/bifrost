@@ -98,6 +98,10 @@ function menu.on_start(session)
         local can_show = true
         if app_info.admin_only and not is_admin then
             can_show = false
+        elseif app_info.required_permission and app_info.required_permission ~= "" then
+            if not is_admin and not session.has_permission(app_info.required_permission) then
+                can_show = false
+            end
         end
 
         if can_show then
