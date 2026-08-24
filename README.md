@@ -40,6 +40,7 @@ The project is managed as a Rust Cargo Workspace:
 ├── README.md                        # Project documentation
 ├── AGENTS.md                        # AI coding assistant guidelines
 ├── docs/
+│   ├── Lua_App_Development_Guide.md     # Lua application developer tutorial & API reference
 │   ├── MeshBBS_MeshANSI_Requirements_Specification.md  # Protocol & architecture spec
 │   └── PRD.md                       # Product Requirements Document
 ├── apps/                            # Encapsulated Lua BBS Applications
@@ -121,6 +122,7 @@ cargo run --bin bifrost-tuning -- train --dir captured_packets/raw --out config/
 
 ## 📖 Documentation
 
+*   **[Lua Application Development Guide](docs/Lua_App_Development_Guide.md):** Complete guide, tutorials, and host API reference (`term`, `session`, `db`, `log`, `http`) for developing MeshBBS apps.
 *   **[Product Requirements Document (PRD)](docs/PRD.md):** Vision, functional requirements, and architecture diagrams.
 *   **[Protocol & Architecture Specification](docs/MeshBBS_MeshANSI_Requirements_Specification.md):** Wire format, opcode tables, deduplication schemas, and compression pipelines.
 *   **[Developer & Agent Guidelines](AGENTS.md):** Architecture rules and development SOPs.

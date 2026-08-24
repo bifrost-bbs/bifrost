@@ -315,4 +315,8 @@ function board.on_start(session)
     board.show_categories(session)
 end
 
+function board.on_resume(session)
+    board.show_categories(session)
+end
+
 return board

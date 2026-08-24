@@ -568,4 +568,13 @@ function app.game_over(session, player, cause)
     session.await_input(60, function() session.load_app("main_menu") end)
 end
 
+function app.on_resume(session)
+    local player = db.get("dungeon_players", session.node_id())
+    if player then
+        app.render_dungeon(session, player)
+    else
+        app.on_start(session)
+    end
+end
+
 return app

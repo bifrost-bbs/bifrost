@@ -36,7 +36,10 @@ function profile.on_start(session)
         if action == "save" then
             local new_nick = submission.nickname or user.nickname
             local new_bio = submission.bio or current_bio
-            db.set("users", user_id, { nickname = new_nick, bio = new_bio })
+            local updated_user = user or {}
+            updated_user.nickname = new_nick
+            updated_user.bio = new_bio
+            db.set("users", user_id, updated_user)
             log.info("Profile updated: nickname=" .. new_nick .. ", bio=" .. new_bio)
             session.load_app("main_menu")
         else
@@ -44,6 +47,10 @@ function profile.on_start(session)
             session.load_app("main_menu")
         end
     end)
+end
+
+function profile.on_resume(session)
+    profile.on_start(session)
 end
 
 return profile

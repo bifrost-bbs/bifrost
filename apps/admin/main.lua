@@ -96,4 +96,8 @@ function admin.on_start(session)
     end)
 end
 
+function admin.on_resume(session)
+    admin.on_start(session)
+end
+
 return admin

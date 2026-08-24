@@ -290,4 +290,8 @@ function market.make_offer(session, cat_name, item_idx)
     end)
 end
 
+function market.on_resume(session)
+    market.on_start(session)
+end
+
 return market

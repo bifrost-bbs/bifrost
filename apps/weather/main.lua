@@ -60,4 +60,8 @@ function weather.on_start(session)
     end)
 end
 
+function weather.on_resume(session)
+    weather.on_start(session)
+end
+
 return weather
