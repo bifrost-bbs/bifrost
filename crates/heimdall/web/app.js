@@ -9,26 +9,61 @@ class HeimdallApp {
     this.termWs = null;
     this.logs = [];
     this.logIdSet = new Set();
+    this.autoScrollLogs = true;
     this.currentSelectedApp = null;
     this.currentEditingFile = null;
     this.currentConfig = null;
+    this.currentSelectedTable = null;
+
+    // Authentication & Identity State
+    this.token = localStorage.getItem('heimdall_token') || null;
+    this.currentUser = null;
+    this.impersonating = null;
+    this.allPermissions = [];
+    this.usersList = [];
+    this.setupRequired = false;
     
     this.init();
   }
 
-  init() {
+  async apiFetch(url, options = {}) {
+    options.headers = options.headers || {};
+    if (this.token) {
+      options.headers['Authorization'] = `Bearer ${this.token}`;
+    }
+    try {
+      const res = await fetch(url, options);
+      if (res.status === 401 && !url.includes('/api/auth/')) {
+        this.token = null;
+        localStorage.removeItem('heimdall_token');
+        this.checkAuthStatus();
+      }
+      return res;
+    } catch (e) {
+      throw e;
+    }
+  }
+
+  async init() {
     this.bindEvents();
     this.initTheme();
     this.startClock();
     
-    // Initial fetches
+    // Check Authentication & Setup status first
+    await this.checkAuthStatus();
+
+    // Initial data fetches
     this.fetchOverview();
     this.fetchServices();
     this.fetchApps();
     this.fetchConfig();
     this.fetchTelemetry();
     this.fetchCaptures();
+    this.fetchDatabase();
     this.fetchHistoricalLogs();
+    if (this.hasPerm('heimdall.users')) {
+      this.fetchUsers();
+    }
 
     // Connect Log Stream WebSocket
     this.connectLogsWebSocket();
@@ -41,10 +76,28 @@ class HeimdallApp {
         this.fetchTelemetry();
         this.fetchCaptures();
       }
+      if (this.activeTab === 'database') {
+        this.fetchDatabase();
+      }
+      if (this.activeTab === 'users' && this.hasPerm('heimdall.users')) {
+        this.fetchUsers();
+      }
     }, 3000);
   }
 
+  hasPerm(perm) {
+    if (!this.currentUser) return true; // fallback if open
+    if (this.currentUser.is_admin) return true;
+    const perms = this.currentUser.permissions || [];
+    return perms.includes('admin') || perms.includes('*') || perms.includes(perm);
+  }
+
   bindEvents() {
+    const on = (id, event, fn) => {
+      const el = document.getElementById(id);
+      if (el) el.addEventListener(event, fn);
+    };
+
     // Nav Tabs
     document.querySelectorAll('.nav-tab').forEach(tabBtn => {
       tabBtn.addEventListener('click', () => {
@@ -53,38 +106,183 @@ class HeimdallApp {
     });
 
     // Theme & Scanlines
-    document.getElementById('theme-selector').addEventListener('change', (e) => {
+    on('theme-selector', 'change', (e) => {
       this.setTheme(e.target.value);
     });
 
-    document.getElementById('toggle-scanlines').addEventListener('click', () => {
+    on('toggle-scanlines', 'click', () => {
       const isOverlay = document.body.classList.toggle('crt-overlay');
       const btn = document.getElementById('toggle-scanlines');
-      btn.textContent = `CRT FX: ${isOverlay ? 'ON' : 'OFF'}`;
-      btn.setAttribute('aria-pressed', isOverlay);
+      if (btn) {
+        btn.textContent = `CRT FX: ${isOverlay ? 'ON' : 'OFF'}`;
+        btn.setAttribute('aria-pressed', isOverlay);
+      }
+    });
+
+    // Auth & Profile Controls
+    on('btn-submit-auth', 'click', () => this.submitAuthForm());
+    on('auth-password', 'keydown', (e) => {
+      if (e.key === 'Enter') this.submitAuthForm();
+    });
+    on('auth-confirm-password', 'keydown', (e) => {
+      if (e.key === 'Enter') this.submitAuthForm();
+    });
+    on('btn-logout', 'click', () => this.logout());
+    on('btn-open-change-password', 'click', () => this.openChangePasswordModal());
+    on('btn-confirm-change-pass', 'click', () => this.submitChangePassword());
+    on('btn-cancel-change-pass', 'click', () => {
+      const m = document.getElementById('modal-change-password');
+      if (m) m.style.display = 'none';
+    });
+
+    // Impersonation Banner
+    on('btn-stop-impersonate', 'click', () => this.stopImpersonating());
+
+    // Users Tab Controls & Modals
+    on('btn-refresh-users', 'click', () => this.fetchUsers());
+    on('users-search-input', 'input', () => this.renderUsers());
+    on('btn-open-create-user', 'click', () => this.openCreateUserModal());
+    on('btn-confirm-create-user', 'click', () => this.submitCreateUser());
+    on('btn-cancel-create-user', 'click', () => {
+      const m = document.getElementById('modal-create-user');
+      if (m) m.style.display = 'none';
+    });
+    on('btn-save-edit-perms', 'click', () => this.submitEditPermissions());
+    on('btn-cancel-edit-perms', 'click', () => {
+      const m = document.getElementById('modal-edit-permissions');
+      if (m) m.style.display = 'none';
+    });
+    on('btn-confirm-reset-pass', 'click', () => this.submitResetPassword());
+    on('btn-cancel-reset-pass', 'click', () => {
+      const m = document.getElementById('modal-reset-password');
+      if (m) m.style.display = 'none';
     });
 
     // Supervisor Quick Actions
-    document.getElementById('btn-start-bbs').addEventListener('click', () => this.callSupervisorAction('start_bbs'));
-    document.getElementById('btn-stop-bbs').addEventListener('click', () => this.callSupervisorAction('stop_bbs'));
-    document.getElementById('btn-restart-bbs').addEventListener('click', () => this.callSupervisorAction('restart_bbs'));
-    document.getElementById('btn-quick-crawler').addEventListener('click', () => this.startCrawler(100, 50));
-    document.getElementById('btn-quick-benchmark').addEventListener('click', () => this.runTuning('analyze', []));
+    on('btn-start-bbs', 'click', () => this.callSupervisorAction('start_bbs'));
+    on('btn-stop-bbs', 'click', () => this.callSupervisorAction('stop_bbs'));
+    on('btn-restart-bbs', 'click', () => this.callSupervisorAction('restart_bbs'));
+    on('btn-quick-crawler', 'click', () => this.startCrawler(100, 50));
+    on('btn-quick-benchmark', 'click', () => this.runTuning('analyze', []));
 
     // Logs Controls
-    document.getElementById('log-level-filter').addEventListener('change', () => this.renderLogs());
-    document.getElementById('log-source-filter').addEventListener('change', () => this.renderLogs());
-    document.getElementById('log-search-input').addEventListener('input', () => this.renderLogs());
-    document.getElementById('btn-refresh-logs').addEventListener('click', () => this.fetchHistoricalLogs());
-    document.getElementById('btn-clear-logs').addEventListener('click', () => {
+    on('log-level-filter', 'change', () => this.renderLogs());
+    on('log-source-filter', 'change', () => this.renderLogs());
+    on('log-search-input', 'input', () => this.renderLogs());
+    on('btn-refresh-logs', 'click', () => this.fetchHistoricalLogs());
+    on('btn-toggle-tail', 'click', () => {
+      this.autoScrollLogs = !this.autoScrollLogs;
+      const btn = document.getElementById('btn-toggle-tail');
+      if (btn) {
+        btn.textContent = `AUTO-SCROLL: ${this.autoScrollLogs ? 'ON' : 'OFF'}`;
+        btn.classList.toggle('active', this.autoScrollLogs);
+        btn.setAttribute('aria-pressed', this.autoScrollLogs);
+      }
+    });
+    on('btn-clear-logs', 'click', () => {
       this.logs = [];
       this.logIdSet.clear();
       this.renderLogs();
     });
 
+    // Apps Refresh
+    on('btn-refresh-apps', 'click', () => this.fetchApps());
+
+    // Database Controls
+    on('btn-refresh-db', 'click', () => this.fetchDatabase());
+    on('btn-clear-table', 'click', () => this.clearCurrentTable());
+    on('btn-save-key', 'click', () => this.saveCurrentKey());
+
+    // DB Backup / Restore / Reset
+    on('btn-backup-db', 'click', () => {
+      window.location.href = '/api/database/backup' + (this.token ? `?token=${encodeURIComponent(this.token)}` : '');
+    });
+
+    const restoreInput = document.getElementById('db-restore-file-input');
+    on('btn-restore-db', 'click', () => {
+      if (restoreInput) restoreInput.click();
+    });
+    if (restoreInput) {
+      restoreInput.addEventListener('change', async (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+        if (!confirm(`Restore database from file "${file.name}"? This will overwrite the active database.`)) {
+          restoreInput.value = '';
+          return;
+        }
+        try {
+          const buffer = await file.arrayBuffer();
+          const res = await this.apiFetch('/api/database/restore', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/octet-stream' },
+            body: buffer,
+          });
+          if (res.ok) {
+            alert('Database restored successfully!');
+            this.fetchDatabase();
+            this.fetchOverview();
+          } else {
+            alert('Failed to restore database: ' + await res.text());
+          }
+        } catch (err) {
+          alert('Error restoring database: ' + err);
+        } finally {
+          restoreInput.value = '';
+        }
+      });
+    }
+
+    const nukeModal = document.getElementById('modal-reset-db');
+    const nukeInput = document.getElementById('input-nuke-confirm');
+    const nukeConfirmBtn = document.getElementById('btn-confirm-nuke');
+    const nukeCancelBtn = document.getElementById('btn-cancel-nuke');
+
+    on('btn-reset-db', 'click', () => {
+      if (!confirm('RESET DATABASE (Step 1 of 2): Are you sure you want to reset the database? All tables will be wiped.')) {
+        return;
+      }
+      if (nukeInput && nukeConfirmBtn && nukeModal) {
+        nukeInput.value = '';
+        nukeConfirmBtn.disabled = true;
+        nukeModal.style.display = 'flex';
+        nukeInput.focus();
+      }
+    });
+
+    if (nukeInput && nukeConfirmBtn) {
+      nukeInput.addEventListener('input', () => {
+        nukeConfirmBtn.disabled = nukeInput.value.trim().toUpperCase() !== 'NUKE IT';
+      });
+    }
+
+    if (nukeCancelBtn && nukeModal) {
+      nukeCancelBtn.addEventListener('click', () => {
+        nukeModal.style.display = 'none';
+        if (nukeInput) nukeInput.value = '';
+      });
+    }
+
+    if (nukeConfirmBtn) {
+      nukeConfirmBtn.addEventListener('click', async () => {
+        try {
+          const res = await this.apiFetch('/api/database/reset', { method: 'POST' });
+          if (res.ok) {
+            alert('Database has been completely reset and vacuumed.');
+            if (nukeModal) nukeModal.style.display = 'none';
+            this.fetchDatabase();
+            this.fetchOverview();
+          } else {
+            alert('Failed to reset database: ' + await res.text());
+          }
+        } catch (err) {
+          alert('Error resetting database: ' + err);
+        }
+      });
+    }
+
     // Web Terminal Controls & Keyboard capture
-    document.getElementById('btn-term-reconnect').addEventListener('click', () => this.connectTerminalWebSocket());
-    document.getElementById('btn-term-reset').addEventListener('click', () => {
+    on('btn-term-reconnect', 'click', () => this.connectTerminalWebSocket());
+    on('btn-term-reset', 'click', () => {
       if (this.termWs && this.termWs.readyState === WebSocket.OPEN) {
         this.termWs.send(JSON.stringify({ type: 'reset' }));
       }
@@ -97,7 +295,6 @@ class HeimdallApp {
       });
     });
 
-    const termScreen = document.getElementById('terminal-screen');
     window.addEventListener('keydown', (e) => {
       if (this.activeTab === 'terminal') {
         if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') {
@@ -114,33 +311,300 @@ class HeimdallApp {
     });
 
     // App Editor
-    document.getElementById('btn-save-app-file').addEventListener('click', () => this.saveCurrentAppFile());
+    on('btn-save-app-file', 'click', () => this.saveCurrentAppFile());
 
     // Config Forms
-    document.getElementById('config-form').addEventListener('submit', (e) => {
+    on('config-form', 'submit', (e) => {
       e.preventDefault();
       this.saveConfigForm();
     });
 
-    document.getElementById('btn-reload-config').addEventListener('click', () => this.fetchConfig());
-    document.getElementById('btn-save-raw-toml').addEventListener('click', () => this.saveRawToml());
+    on('btn-reload-config', 'click', () => this.fetchConfig());
+    on('btn-save-raw-toml', 'click', () => this.saveRawToml());
 
     // Tuning Console Actions
-    document.getElementById('btn-run-analyze').addEventListener('click', () => this.runTuning('analyze', []));
-    document.getElementById('btn-run-sweep').addEventListener('click', () => this.runTuning('sweep', []));
-    document.getElementById('btn-run-train').addEventListener('click', () => {
-      const tokens = document.getElementById('tuning-tokens-input').value || '254';
+    on('btn-run-analyze', 'click', () => this.runTuning('analyze', []));
+    on('btn-run-sweep', 'click', () => this.runTuning('sweep', []));
+    on('btn-run-train', 'click', () => {
+      const tokensEl = document.getElementById('tuning-tokens-input');
+      const tokens = tokensEl ? tokensEl.value : '254';
       this.runTuning('train', ['--tokens', tokens]);
     });
-    document.getElementById('btn-run-crawler-custom').addEventListener('click', () => {
-      const steps = parseInt(document.getElementById('crawler-steps-input').value, 10) || 100;
+    on('btn-run-crawler-custom', 'click', () => {
+      const stepsEl = document.getElementById('crawler-steps-input');
+      const steps = stepsEl ? parseInt(stepsEl.value, 10) || 100 : 100;
       this.startCrawler(steps, 50);
     });
 
-    document.getElementById('btn-refresh-captures').addEventListener('click', () => this.fetchCaptures());
+    on('btn-refresh-captures', 'click', () => this.fetchCaptures());
+  }
+
+  async checkAuthStatus() {
+    try {
+      const res = await this.apiFetch('/api/auth/status');
+      if (!res.ok) return;
+      const data = await res.json();
+      
+      this.setupRequired = !!data.setup_required;
+      this.allPermissions = data.all_permissions || [];
+      this.impersonating = data.impersonating || null;
+
+      const authModal = document.getElementById('auth-modal');
+      const userBadge = document.getElementById('current-user-badge');
+      const impBanner = document.getElementById('impersonation-banner');
+
+      if (this.setupRequired) {
+        this.showAuthModal(true);
+        if (userBadge) userBadge.textContent = 'Setup Required';
+      } else if (!data.authenticated) {
+        this.currentUser = null;
+        this.showAuthModal(false);
+        if (userBadge) userBadge.textContent = 'Not Logged In';
+      } else {
+        this.currentUser = data.user;
+        if (authModal) authModal.style.display = 'none';
+
+        if (userBadge && this.currentUser) {
+          const role = this.currentUser.is_admin ? 'ADMIN' : 'USER';
+          userBadge.textContent = `${this.currentUser.nickname} [${role}]`;
+        }
+
+        // Impersonation Banner
+        if (impBanner) {
+          if (this.impersonating) {
+            impBanner.style.display = 'flex';
+            document.getElementById('impersonating-user-name').textContent = this.currentUser.nickname;
+            document.getElementById('impersonating-node-id').textContent = this.currentUser.id.slice(0, 16) + '...';
+          } else {
+            impBanner.style.display = 'none';
+          }
+        }
+
+        // Update tab accessibility
+        this.updateTabPermissions();
+      }
+    } catch (e) {
+      console.warn('Auth status check failed:', e);
+    }
+  }
+
+  showAuthModal(isSetup) {
+    const modal = document.getElementById('auth-modal');
+    const title = document.getElementById('auth-modal-title');
+    const desc = document.getElementById('auth-modal-desc');
+    const confirmGroup = document.getElementById('auth-confirm-group');
+    const submitBtn = document.getElementById('btn-submit-auth');
+    const errorMsg = document.getElementById('auth-error-msg');
+
+    if (!modal) return;
+    if (errorMsg) errorMsg.style.display = 'none';
+
+    if (isSetup) {
+      if (title) title.textContent = '══ FIRST TIME SETUP: CREATE ADMINISTRATOR ══';
+      if (desc) desc.textContent = 'Welcome to Bifrost MeshBBS! Create your root administrative account to initialize the BBS node.';
+      if (confirmGroup) confirmGroup.style.display = 'block';
+      if (submitBtn) submitBtn.textContent = 'CREATE ROOT ADMIN & LOGIN';
+    } else {
+      if (title) title.textContent = '══ HEIMDALL AUTHENTICATION ══';
+      if (desc) desc.textContent = 'Enter your BBS nickname and password to access Heimdall.';
+      if (confirmGroup) confirmGroup.style.display = 'none';
+      if (submitBtn) submitBtn.textContent = 'LOGIN TO HEIMDALL';
+    }
+
+    modal.style.display = 'flex';
+    const userInp = document.getElementById('auth-username');
+    if (userInp) userInp.focus();
+  }
+
+  async submitAuthForm() {
+    const username = (document.getElementById('auth-username').value || '').trim();
+    const password = document.getElementById('auth-password').value || '';
+    const confirmPassword = document.getElementById('auth-confirm-password').value || '';
+    const errorMsg = document.getElementById('auth-error-msg');
+
+    const showError = (msg) => {
+      if (errorMsg) {
+        errorMsg.textContent = msg;
+        errorMsg.style.display = 'block';
+      }
+    };
+
+    if (!username || !password) {
+      showError('Nickname and password are required.');
+      return;
+    }
+
+    if (this.setupRequired) {
+      if (password !== confirmPassword) {
+        showError('Passwords do not match.');
+        return;
+      }
+      try {
+        const res = await fetch('/api/auth/setup', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username, password }),
+        });
+        if (!res.ok) {
+          showError(await res.text());
+          return;
+        }
+        const data = await res.json();
+        this.token = data.token;
+        localStorage.setItem('heimdall_token', this.token);
+        document.getElementById('auth-password').value = '';
+        document.getElementById('auth-confirm-password').value = '';
+        await this.checkAuthStatus();
+        this.fetchOverview();
+        if (this.hasPerm('heimdall.users')) this.fetchUsers();
+      } catch (e) {
+        showError('Setup failed: ' + e);
+      }
+    } else {
+      try {
+        const res = await fetch('/api/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username, password }),
+        });
+        if (!res.ok) {
+          showError('Invalid nickname or password.');
+          return;
+        }
+        const data = await res.json();
+        this.token = data.token;
+        localStorage.setItem('heimdall_token', this.token);
+        document.getElementById('auth-password').value = '';
+        await this.checkAuthStatus();
+        this.fetchOverview();
+        if (this.hasPerm('heimdall.users')) this.fetchUsers();
+      } catch (e) {
+        showError('Login error: ' + e);
+      }
+    }
+  }
+
+  async logout() {
+    try {
+      await this.apiFetch('/api/auth/logout', { method: 'POST' });
+    } catch (e) {}
+    this.token = null;
+    this.currentUser = null;
+    this.impersonating = null;
+    localStorage.removeItem('heimdall_token');
+    if (this.termWs) this.termWs.close();
+    await this.checkAuthStatus();
+  }
+
+  openChangePasswordModal() {
+    const modal = document.getElementById('modal-change-password');
+    const err = document.getElementById('change-pass-error');
+    if (err) err.style.display = 'none';
+    document.getElementById('change-old-pass').value = '';
+    document.getElementById('change-new-pass').value = '';
+    document.getElementById('change-confirm-new-pass').value = '';
+    if (modal) modal.style.display = 'flex';
+  }
+
+  async submitChangePassword() {
+    const oldPass = document.getElementById('change-old-pass').value;
+    const newPass = document.getElementById('change-new-pass').value;
+    const confirmPass = document.getElementById('change-confirm-new-pass').value;
+    const err = document.getElementById('change-pass-error');
+
+    const showErr = (m) => {
+      if (err) { err.textContent = m; err.style.display = 'block'; }
+    };
+
+    if (!oldPass || !newPass) {
+      showErr('All password fields are required.');
+      return;
+    }
+    if (newPass !== confirmPass) {
+      showErr('New passwords do not match.');
+      return;
+    }
+
+    try {
+      const res = await this.apiFetch('/api/auth/change_password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ old_password: oldPass, new_password: newPass }),
+      });
+      if (res.ok) {
+        alert('Password updated successfully!');
+        const modal = document.getElementById('modal-change-password');
+        if (modal) modal.style.display = 'none';
+      } else {
+        showErr(await res.text());
+      }
+    } catch (e) {
+      showErr('Error updating password: ' + e);
+    }
+  }
+
+  async stopImpersonating() {
+    try {
+      const res = await this.apiFetch('/api/auth/stop_impersonating', { method: 'POST' });
+      if (res.ok) {
+        const data = await res.json();
+        this.token = data.token;
+        localStorage.setItem('heimdall_token', this.token);
+        if (this.termWs) {
+          this.termWs.close();
+          this.connectTerminalWebSocket();
+        }
+        await this.checkAuthStatus();
+        this.fetchOverview();
+        if (this.hasPerm('heimdall.users')) this.fetchUsers();
+      } else {
+        alert('Failed to stop impersonating: ' + await res.text());
+      }
+    } catch (e) {
+      alert('Error stopping impersonation: ' + e);
+    }
+  }
+
+  updateTabPermissions() {
+    const permMap = {
+      'overview': 'heimdall.overview',
+      'terminal': 'heimdall.terminal',
+      'logs': 'heimdall.logs',
+      'apps': 'heimdall.apps',
+      'config': 'heimdall.config',
+      'telemetry': 'heimdall.telemetry',
+      'tuning': 'heimdall.tuning',
+      'database': 'heimdall.database',
+      'users': 'heimdall.users',
+    };
+
+    document.querySelectorAll('.nav-tab').forEach(tabBtn => {
+      const tabId = tabBtn.dataset.tab;
+      const reqPerm = permMap[tabId];
+      const allowed = !reqPerm || this.hasPerm(reqPerm);
+      tabBtn.style.display = allowed ? '' : 'none';
+    });
   }
 
   switchTab(tabId) {
+    const permMap = {
+      'overview': 'heimdall.overview',
+      'terminal': 'heimdall.terminal',
+      'logs': 'heimdall.logs',
+      'apps': 'heimdall.apps',
+      'config': 'heimdall.config',
+      'telemetry': 'heimdall.telemetry',
+      'tuning': 'heimdall.tuning',
+      'database': 'heimdall.database',
+      'users': 'heimdall.users',
+    };
+
+    const reqPerm = permMap[tabId];
+    if (reqPerm && !this.hasPerm(reqPerm)) {
+      alert(`Access Denied: You do not have permission '${reqPerm}'`);
+      return;
+    }
+
     this.activeTab = tabId;
 
     document.querySelectorAll('.nav-tab').forEach(btn => {
@@ -163,6 +627,8 @@ class HeimdallApp {
       }, 100);
     } else if (tabId === 'logs') {
       this.fetchHistoricalLogs();
+    } else if (tabId === 'users') {
+      this.fetchUsers();
     }
   }
 
@@ -190,7 +656,7 @@ class HeimdallApp {
 
   async fetchOverview() {
     try {
-      const res = await fetch('/api/supervisor/status');
+      const res = await this.apiFetch('/api/supervisor/status');
       if (!res.ok) return;
       const data = await res.json();
       
@@ -198,12 +664,15 @@ class HeimdallApp {
       const dot = document.getElementById('bbs-indicator');
       const text = document.getElementById('bbs-status-text');
 
-      if (bbs && bbs.state === 'running') {
-        dot.className = 'indicator-dot active';
-        text.textContent = `ONLINE (PID: ${bbs.pid || 'N/A'})`;
-      } else {
-        dot.className = 'indicator-dot stopped';
-        text.textContent = bbs ? bbs.state.toUpperCase() : 'OFFLINE';
+      if (dot) {
+        dot.className = (bbs && bbs.state === 'running') ? 'indicator-dot active' : 'indicator-dot stopped';
+      }
+      if (text) {
+        if (bbs && bbs.state === 'running') {
+          text.textContent = `ONLINE (PID: ${bbs.pid || 'N/A'})`;
+        } else {
+          text.textContent = bbs ? bbs.state.toUpperCase() : 'OFFLINE';
+        }
       }
 
       // Also refresh telemetry overview cards
@@ -215,7 +684,7 @@ class HeimdallApp {
 
   async fetchServices() {
     try {
-      const res = await fetch('/api/supervisor/status');
+      const res = await this.apiFetch('/api/supervisor/status');
       if (!res.ok) return;
       const services = await res.json();
       
@@ -248,7 +717,7 @@ class HeimdallApp {
 
   async fetchApps() {
     try {
-      const res = await fetch('/api/apps');
+      const res = await this.apiFetch('/api/apps');
       if (!res.ok) return;
       const apps = await res.json();
       
@@ -289,7 +758,7 @@ class HeimdallApp {
 
   async fetchAppFiles(appId) {
     try {
-      const res = await fetch(`/api/apps/${appId}/files`);
+      const res = await this.apiFetch(`/api/apps/${appId}/files`);
       if (!res.ok) return;
       const files = await res.json();
 
@@ -336,7 +805,7 @@ class HeimdallApp {
     document.getElementById('editor-file-badge').textContent = filePath;
 
     try {
-      const res = await fetch(`/api/apps/${appId}/file_content?path=${encodeURIComponent(filePath)}`);
+      const res = await this.apiFetch(`/api/apps/${appId}/file_content?path=${encodeURIComponent(filePath)}`);
       if (res.ok) {
         const text = await res.text();
         const editor = document.getElementById('app-file-editor');
@@ -353,7 +822,7 @@ class HeimdallApp {
     const content = document.getElementById('app-file-editor').value;
 
     try {
-      const res = await fetch(`/api/apps/${this.currentSelectedApp}/file_content?path=${encodeURIComponent(this.currentEditingFile)}`, {
+      const res = await this.apiFetch(`/api/apps/${this.currentSelectedApp}/file_content?path=${encodeURIComponent(this.currentEditingFile)}`, {
         method: 'POST',
         headers: { 'Content-Type': 'text/plain' },
         body: content,
@@ -371,7 +840,7 @@ class HeimdallApp {
 
   async fetchConfig() {
     try {
-      const res = await fetch('/api/config');
+      const res = await this.apiFetch('/api/config');
       if (!res.ok) return;
       const cfg = await res.json();
       this.currentConfig = cfg.parsed;
@@ -462,7 +931,7 @@ directory = "${document.getElementById('cfg-capture-dir').value}"
   async saveRawToml() {
     const content = document.getElementById('raw-toml-editor').value;
     try {
-      const res = await fetch('/api/config', {
+      const res = await this.apiFetch('/api/config', {
         method: 'POST',
         headers: { 'Content-Type': 'text/plain' },
         body: content,
@@ -481,18 +950,45 @@ directory = "${document.getElementById('cfg-capture-dir').value}"
 
   async fetchTelemetry() {
     try {
-      const res = await fetch('/api/telemetry/summary');
+      const res = await this.apiFetch('/api/telemetry/summary');
       if (!res.ok) return;
       const s = await res.json();
 
-      document.getElementById('stat-active-sessions').textContent = s.active_sessions || '0';
-      document.getElementById('stat-unique-users').textContent = `24h Users: ${s.unique_users_24h || 0}`;
-      document.getElementById('stat-duty-cycle').textContent = `${(s.duty_cycle_percent || 0).toFixed(2)}%`;
-      document.getElementById('duty-cycle-text').textContent = `${(s.duty_cycle_percent || 0).toFixed(2)}% / 1.0%`;
-      document.getElementById('stat-packets-tx-rx').textContent = `${s.total_packets_sent || 0} / ${s.total_packets_received || 0}`;
-      document.getElementById('stat-ppm').textContent = `PPM: ${(s.send_ppm_1h || 0).toFixed(1)} TX / ${(s.recv_ppm_1h || 0).toFixed(1)} RX`;
-      document.getElementById('stat-compression-savings').textContent = `+${(s.compression_savings_percent || 0).toFixed(1)}%`;
-      document.getElementById('stat-raw-comp-bytes').textContent = `Raw: ${s.total_raw_bytes_sent || 0} B | Comp: ${s.total_compressed_bytes_sent || 0} B`;
+      const setText = (id, val) => {
+        const el = document.getElementById(id);
+        if (el) el.textContent = val;
+      };
+
+      setText('stat-active-sessions', s.active_sessions || '0');
+      setText('stat-unique-users', `24h Users: ${s.unique_users_24h || 0}`);
+      setText('stat-duty-cycle', `${(s.duty_cycle_percent || 0).toFixed(2)}%`);
+      setText('duty-cycle-text', `${(s.duty_cycle_percent || 0).toFixed(2)}% / 1.0%`);
+      setText('stat-packets-tx-rx', `${s.total_packets_sent || 0} / ${s.total_packets_received || 0}`);
+      setText('stat-ppm', `PPM: ${(s.send_ppm_1h || 0).toFixed(1)} TX / ${(s.recv_ppm_1h || 0).toFixed(1)} RX`);
+      setText('stat-compression-savings', `+${(s.compression_savings_percent || 0).toFixed(1)}%`);
+      setText('stat-raw-comp-bytes', `Raw: ${s.total_raw_bytes_sent || 0} B | Comp: ${s.total_compressed_bytes_sent || 0} B`);
+
+      // Surface DB numbers to Overview
+      if (s.database_summary) {
+        const dbSum = s.database_summary;
+        const dbTel = s.database || dbSum.telemetry || {};
+        setText('stat-db-size', formatBytes(dbSum.size_bytes || 0));
+        setText('stat-db-sub', `Records: ${(dbSum.total_records || 0).toLocaleString()} | Growth: ${formatBytes(dbTel.byte_growth_per_day || 0)}/d`);
+      }
+
+      // Populate Database Telemetry & Stats grid
+      if (s.database) {
+        const dt = s.database;
+        setText('db-stat-qph', (dt.queries_per_hour || 0).toFixed(1));
+        setText('db-stat-total-queries', `Total: ${(dt.total_queries || 0).toLocaleString()} queries`);
+        setText('db-stat-avg-time', `${(dt.avg_query_time_micros || 0).toFixed(1)} µs`);
+        setText('db-stat-latency-range', `Min: ${dt.min_query_time_micros || 0} µs | Max: ${dt.max_query_time_micros || 0} µs`);
+        setText('db-stat-rw-ratio', `${(dt.read_queries || 0).toLocaleString()} / ${(dt.write_queries || 0).toLocaleString()}`);
+        setText('db-stat-size', formatBytes(dt.db_size_bytes || 0));
+        setText('db-stat-total-records', `Records: ${(dt.total_records || 0).toLocaleString()}`);
+        setText('db-stat-byte-growth', `+${formatBytes(dt.byte_growth_per_day || 0)}/d`);
+        setText('db-stat-record-growth', `+${(dt.record_growth_per_day || 0).toFixed(1)} rec/d`);
+      }
     } catch (e) {
       console.warn('Telemetry fetch error:', e);
     }
@@ -501,33 +997,38 @@ directory = "${document.getElementById('cfg-capture-dir').value}"
   async fetchCaptures() {
     try {
       const [sumRes, packRes] = await Promise.all([
-        fetch('/api/telemetry/capture_summary'),
-        fetch('/api/telemetry/captures?limit=50')
+        this.apiFetch('/api/telemetry/capture_summary'),
+        this.apiFetch('/api/telemetry/captures?limit=50')
       ]);
 
-      if (sumRes.ok) {
+      const setText = (id, val) => {
+        const el = document.getElementById(id);
+        if (el) el.textContent = val;
+      };
+
+      if (sumRes && sumRes.ok) {
         const sum = await sumRes.json();
-        document.getElementById('cap-stat-samples').textContent = sum.total_samples || 0;
-        document.getElementById('cap-stat-tx-rx').textContent = `TX: ${sum.tx_count || 0} | RX: ${sum.rx_count || 0}`;
+        setText('cap-stat-samples', sum.total_samples || 0);
+        setText('cap-stat-tx-rx', `TX: ${sum.tx_count || 0} | RX: ${sum.rx_count || 0}`);
         const avgPacket = (sum.avg_bytes_per_packet || sum.avg_comp_bytes || 0).toFixed(1);
         const avgRaw = (sum.avg_raw_bytes || 0).toFixed(1);
         const avgComp = (sum.avg_comp_bytes || 0).toFixed(1);
-        document.getElementById('cap-stat-avg-packet').textContent = `${avgPacket} B`;
-        document.getElementById('cap-stat-avg-packet-sub').textContent = `Raw: ${avgRaw} B | Comp: ${avgComp} B`;
+        setText('cap-stat-avg-packet', `${avgPacket} B`);
+        setText('cap-stat-avg-packet-sub', `Raw: ${avgRaw} B | Comp: ${avgComp} B`);
         const avgUser = (sum.avg_bytes_per_packet_per_user || 0).toFixed(1);
         const users = sum.unique_users_count || 1;
-        document.getElementById('cap-stat-avg-user-packet').textContent = `${avgUser} B`;
-        document.getElementById('cap-stat-avg-user-sub').textContent = `Active Users: ${users}`;
-        document.getElementById('cap-stat-raw').textContent = `${(sum.total_raw_bytes || 0).toLocaleString()} B`;
-        document.getElementById('cap-stat-avg-raw').textContent = `Avg: ${(sum.avg_raw_bytes || 0).toFixed(1)} B`;
-        document.getElementById('cap-stat-comp').textContent = `${(sum.total_comp_bytes || 0).toLocaleString()} B`;
+        setText('cap-stat-avg-user-packet', `${avgUser} B`);
+        setText('cap-stat-avg-user-sub', `Active Users: ${users}`);
+        setText('cap-stat-raw', `${(sum.total_raw_bytes || 0).toLocaleString()} B`);
+        setText('cap-stat-avg-raw', `Avg: ${(sum.avg_raw_bytes || 0).toFixed(1)} B`);
+        setText('cap-stat-comp', `${(sum.total_comp_bytes || 0).toLocaleString()} B`);
         const saved = (sum.total_raw_bytes || 0) - (sum.total_comp_bytes || 0);
-        document.getElementById('cap-stat-saved').textContent = `Saved: ${saved.toLocaleString()} B`;
-        document.getElementById('cap-stat-savings').textContent = `+${(sum.net_savings_percent || 0).toFixed(2)}%`;
-        document.getElementById('cap-stat-avg-time').textContent = `Avg Time: ${(sum.avg_duration_us || 0).toFixed(1)} µs`;
+        setText('cap-stat-saved', `Saved: ${saved.toLocaleString()} B`);
+        setText('cap-stat-savings', `+${(sum.net_savings_percent || 0).toFixed(2)}%`);
+        setText('cap-stat-avg-time', `Avg Time: ${(sum.avg_duration_us || 0).toFixed(1)} µs`);
       }
 
-      if (packRes.ok) {
+      if (packRes && packRes.ok) {
         const data = await packRes.json();
         const tbody = document.getElementById('captures-tbody');
         tbody.innerHTML = '';
@@ -556,7 +1057,7 @@ directory = "${document.getElementById('cfg-capture-dir').value}"
 
   async callSupervisorAction(action) {
     try {
-      const res = await fetch(`/api/supervisor/${action}`, { method: 'POST' });
+      const res = await this.apiFetch(`/api/supervisor/${action}`, { method: 'POST' });
       if (res.ok) {
         this.fetchOverview();
         this.fetchServices();
@@ -570,7 +1071,7 @@ directory = "${document.getElementById('cfg-capture-dir').value}"
 
   async startCrawler(steps, delay) {
     try {
-      const res = await fetch(`/api/supervisor/crawler?steps=${steps}&delay=${delay}`, { method: 'POST' });
+      const res = await this.apiFetch(`/api/supervisor/crawler?steps=${steps}&delay=${delay}`, { method: 'POST' });
       if (res.ok) {
         this.switchTab('logs');
       }
@@ -581,7 +1082,7 @@ directory = "${document.getElementById('cfg-capture-dir').value}"
 
   async runTuning(subcmd, extraArgs) {
     try {
-      const res = await fetch(`/api/supervisor/tuning?command=${subcmd}`, {
+      const res = await this.apiFetch(`/api/supervisor/tuning?command=${subcmd}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ args: extraArgs }),
@@ -598,7 +1099,7 @@ directory = "${document.getElementById('cfg-capture-dir').value}"
 
   async fetchHistoricalLogs() {
     try {
-      const res = await fetch('/api/logs?limit=5000');
+      const res = await this.apiFetch('/api/logs?limit=5000');
       if (!res.ok) return;
       const history = await res.json();
       
@@ -622,7 +1123,7 @@ directory = "${document.getElementById('cfg-capture-dir').value}"
 
   connectLogsWebSocket() {
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const url = `${proto}//${location.host}/ws/logs`;
+    const url = `${proto}//${location.host}/ws/logs` + (this.token ? `?token=${encodeURIComponent(this.token)}` : '');
     this.logsWs = new WebSocket(url);
 
     this.logsWs.onmessage = (event) => {
@@ -652,9 +1153,13 @@ directory = "${document.getElementById('cfg-capture-dir').value}"
   }
 
   matchesLogFilter(entry) {
-    const lvlFilter = document.getElementById('log-level-filter').value;
-    const srcFilter = document.getElementById('log-source-filter').value;
-    const search = document.getElementById('log-search-input').value.toLowerCase();
+    const lvlEl = document.getElementById('log-level-filter');
+    const srcEl = document.getElementById('log-source-filter');
+    const searchEl = document.getElementById('log-search-input');
+
+    const lvlFilter = lvlEl ? lvlEl.value : 'ALL';
+    const srcFilter = srcEl ? srcEl.value : 'ALL';
+    const search = searchEl ? searchEl.value.toLowerCase() : '';
 
     if (lvlFilter !== 'ALL' && !entry.level.toUpperCase().includes(lvlFilter)) return false;
     if (srcFilter !== 'ALL' && !entry.source.toLowerCase().includes(srcFilter.toLowerCase())) return false;
@@ -663,8 +1168,9 @@ directory = "${document.getElementById('cfg-capture-dir').value}"
   }
 
   renderLogs() {
-    const consoleEl = document.getElementById('log-console');
-    consoleEl.innerHTML = '';
+    const container = document.getElementById('log-entries') || document.getElementById('log-console');
+    if (!container) return;
+    container.innerHTML = '';
     
     this.logs.forEach(entry => {
       if (this.matchesLogFilter(entry)) {
@@ -677,24 +1183,29 @@ directory = "${document.getElementById('cfg-capture-dir').value}"
 
   updateLogCountBadge() {
     const total = this.logs.length;
-    document.getElementById('log-count-badge').textContent = total;
-    document.getElementById('log-count-indicator').textContent = `${total} buffered logs`;
+    const badge = document.getElementById('log-count-badge');
+    if (badge) badge.textContent = total;
+    const ind = document.getElementById('log-count-indicator');
+    if (ind) ind.textContent = `${total} buffered logs`;
   }
 
   appendLogEntry(entry) {
-    const consoleEl = document.getElementById('log-console');
+    const container = document.getElementById('log-entries') || document.getElementById('log-console');
+    const scrollParent = document.getElementById('log-console') || container;
+    if (!container) return;
+
     const div = document.createElement('div');
     div.className = 'log-entry';
     div.innerHTML = `
-      <span class="log-ts">${entry.timestamp.slice(11, 23)}</span>
-      <span class="log-lvl log-lvl-${entry.level.toLowerCase()}">[${entry.level}]</span>
-      <span class="log-src">&lt;${entry.source}&gt;</span>
-      <span class="log-msg">${escapeHtml(entry.message)}</span>
+      <span class="log-ts">${entry.timestamp ? entry.timestamp.slice(11, 23) : ''}</span>
+      <span class="log-lvl log-lvl-${(entry.level || 'info').toLowerCase()}">[${entry.level || 'INFO'}]</span>
+      <span class="log-src">&lt;${entry.source || 'sys'}&gt;</span>
+      <span class="log-msg">${escapeHtml(entry.message || '')}</span>
     `;
-    consoleEl.appendChild(div);
+    container.appendChild(div);
 
-    if (document.getElementById('log-autoscroll').checked) {
-      consoleEl.scrollTop = consoleEl.scrollHeight;
+    if (this.autoScrollLogs && scrollParent) {
+      scrollParent.scrollTop = scrollParent.scrollHeight;
     }
   }
 
@@ -705,7 +1216,7 @@ directory = "${document.getElementById('cfg-capture-dir').value}"
       this.termWs.close();
     }
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const url = `${proto}//${location.host}/ws/terminal`;
+    const url = `${proto}//${location.host}/ws/terminal` + (this.token ? `?token=${encodeURIComponent(this.token)}` : '');
     this.termWs = new WebSocket(url);
 
     const termGrid = document.getElementById('terminal-canvas-grid');
@@ -753,11 +1264,463 @@ directory = "${document.getElementById('cfg-capture-dir').value}"
       this.termWs.send(JSON.stringify({ type: 'key', key: key }));
     }
   }
+
+  // --- USER MANAGEMENT ---
+
+  async fetchUsers() {
+    try {
+      const res = await this.apiFetch('/api/users');
+      if (!res.ok) return;
+      this.usersList = await res.json();
+      this.renderUsers();
+    } catch (e) {
+      console.warn('Fetch users error:', e);
+    }
+  }
+
+  renderUsers() {
+    const tbody = document.getElementById('users-tbody');
+    const searchInp = document.getElementById('users-search-input');
+    const countLabel = document.getElementById('users-count-label');
+    if (!tbody) return;
+
+    const filter = searchInp ? searchInp.value.trim().toLowerCase() : '';
+    const filtered = this.usersList.filter(u => {
+      if (!filter) return true;
+      return u.nickname.toLowerCase().includes(filter) || u.id.toLowerCase().includes(filter);
+    });
+
+    if (countLabel) countLabel.textContent = `Total Users: ${this.usersList.length}`;
+    tbody.innerHTML = '';
+
+    if (filtered.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="5" class="empty-state">No users found</td></tr>';
+      return;
+    }
+
+    filtered.forEach(u => {
+      const tr = document.createElement('tr');
+      const isSelf = this.currentUser && this.currentUser.id === u.id;
+      
+      // Permissions tags
+      let permsBadges = '';
+      if (u.is_admin) {
+        permsBadges += '<span class="role-badge role-badge-admin">ADMIN</span>';
+      } else {
+        permsBadges += '<span class="role-badge role-badge-user">USER</span>';
+      }
+      (u.permissions || []).forEach(p => {
+        if (p !== 'admin') {
+          permsBadges += `<span class="role-badge role-badge-perm">${escapeHtml(p)}</span>`;
+        }
+      });
+
+      tr.innerHTML = `
+        <td><strong>${escapeHtml(u.nickname)}</strong> ${isSelf ? '<span style="color:var(--term-accent);font-size:10px;">(YOU)</span>' : ''}</td>
+        <td><code style="font-size:11px;">${u.id.slice(0, 16)}...</code></td>
+        <td>${permsBadges}</td>
+        <td style="text-align: center;">${u.has_password ? '✅ SET' : '❌ NONE'}</td>
+        <td style="text-align: center; white-space: nowrap;">
+          <button class="retro-btn btn-sm impersonate-btn" data-id="${u.id}" ${isSelf ? 'disabled' : ''} title="Impersonate User">🎭 Impersonate</button>
+          <button class="retro-btn btn-sm edit-perms-btn" data-id="${u.id}" title="Edit Permissions">🛡️ Perms</button>
+          <button class="retro-btn btn-sm reset-pass-btn" data-id="${u.id}" data-nick="${escapeHtml(u.nickname)}" title="Reset Password">🔑 Pass</button>
+          <button class="retro-btn btn-sm btn-danger delete-user-btn" data-id="${u.id}" data-nick="${escapeHtml(u.nickname)}" ${isSelf ? 'disabled' : ''} title="Delete User">🗑️</button>
+        </td>
+      `;
+      tbody.appendChild(tr);
+    });
+
+    // Attach event listeners
+    tbody.querySelectorAll('.impersonate-btn').forEach(btn => {
+      btn.addEventListener('click', () => this.impersonateUser(btn.dataset.id));
+    });
+    tbody.querySelectorAll('.edit-perms-btn').forEach(btn => {
+      btn.addEventListener('click', () => this.openEditPermissionsModal(btn.dataset.id));
+    });
+    tbody.querySelectorAll('.reset-pass-btn').forEach(btn => {
+      btn.addEventListener('click', () => this.openResetPasswordModal(btn.dataset.id, btn.dataset.nick));
+    });
+    tbody.querySelectorAll('.delete-user-btn').forEach(btn => {
+      btn.addEventListener('click', () => this.deleteUser(btn.dataset.id, btn.dataset.nick));
+    });
+  }
+
+  openCreateUserModal() {
+    const modal = document.getElementById('modal-create-user');
+    const err = document.getElementById('create-user-error');
+    if (err) err.style.display = 'none';
+    document.getElementById('create-username').value = '';
+    document.getElementById('create-password').value = '';
+
+    const list = document.getElementById('create-user-perms-list');
+    if (list) {
+      list.innerHTML = '';
+      this.allPermissions.forEach(p => {
+        const label = document.createElement('label');
+        label.className = 'perm-item-label';
+        const isChecked = ['heimdall.login', 'heimdall.overview', 'heimdall.terminal', 'read', 'write'].includes(p.id);
+        label.innerHTML = `
+          <input type="checkbox" value="${p.id}" ${isChecked ? 'checked' : ''}>
+          <span><strong>${escapeHtml(p.id)}</strong> (${escapeHtml(p.name)})</span>
+        `;
+        list.appendChild(label);
+      });
+    }
+
+    if (modal) modal.style.display = 'flex';
+  }
+
+  async submitCreateUser() {
+    const username = (document.getElementById('create-username').value || '').trim();
+    const password = document.getElementById('create-password').value || '';
+    const err = document.getElementById('create-user-error');
+
+    const showErr = (m) => {
+      if (err) { err.textContent = m; err.style.display = 'block'; }
+    };
+
+    if (!username || !password) {
+      showErr('Nickname and password are required.');
+      return;
+    }
+
+    const selectedPerms = [];
+    document.querySelectorAll('#create-user-perms-list input[type="checkbox"]:checked').forEach(cb => {
+      selectedPerms.push(cb.value);
+    });
+
+    try {
+      const res = await this.apiFetch('/api/users', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          username,
+          password,
+          permissions: selectedPerms,
+        }),
+      });
+      if (res.ok) {
+        alert(`User '${username}' created successfully!`);
+        const modal = document.getElementById('modal-create-user');
+        if (modal) modal.style.display = 'none';
+        this.fetchUsers();
+      } else {
+        showErr(await res.text());
+      }
+    } catch (e) {
+      showErr('Error creating user: ' + e);
+    }
+  }
+
+  openEditPermissionsModal(nodeId) {
+    const user = this.usersList.find(u => u.id === nodeId);
+    if (!user) return;
+    this.editingUserNodeId = nodeId;
+
+    document.getElementById('edit-perm-username').textContent = user.nickname;
+    document.getElementById('edit-perm-node-id').textContent = nodeId;
+    const err = document.getElementById('edit-perms-error');
+    if (err) err.style.display = 'none';
+
+    const list = document.getElementById('edit-perms-list');
+    if (list) {
+      list.innerHTML = '';
+      this.allPermissions.forEach(p => {
+        const isChecked = (user.permissions || []).includes(p.id) || (user.is_admin && p.id === 'admin');
+        const label = document.createElement('label');
+        label.className = 'perm-item-label';
+        label.innerHTML = `
+          <input type="checkbox" value="${p.id}" ${isChecked ? 'checked' : ''}>
+          <span><strong>${escapeHtml(p.id)}</strong> (${escapeHtml(p.name)})</span>
+        `;
+        list.appendChild(label);
+      });
+    }
+
+    const modal = document.getElementById('modal-edit-permissions');
+    if (modal) modal.style.display = 'flex';
+  }
+
+  async submitEditPermissions() {
+    if (!this.editingUserNodeId) return;
+    const selectedPerms = [];
+    document.querySelectorAll('#edit-perms-list input[type="checkbox"]:checked').forEach(cb => {
+      selectedPerms.push(cb.value);
+    });
+
+    try {
+      const res = await this.apiFetch(`/api/users/${this.editingUserNodeId}/permissions`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ permissions: selectedPerms }),
+      });
+      if (res.ok) {
+        alert('Permissions updated successfully!');
+        const modal = document.getElementById('modal-edit-permissions');
+        if (modal) modal.style.display = 'none';
+        this.fetchUsers();
+      } else {
+        alert('Failed to update permissions: ' + await res.text());
+      }
+    } catch (e) {
+      alert('Error updating permissions: ' + e);
+    }
+  }
+
+  openResetPasswordModal(nodeId, nickname) {
+    this.resettingUserNodeId = nodeId;
+    document.getElementById('reset-pass-username').textContent = nickname;
+    document.getElementById('input-reset-new-pass').value = '';
+    const err = document.getElementById('reset-pass-error');
+    if (err) err.style.display = 'none';
+
+    const modal = document.getElementById('modal-reset-password');
+    if (modal) modal.style.display = 'flex';
+  }
+
+  async submitResetPassword() {
+    if (!this.resettingUserNodeId) return;
+    const newPass = document.getElementById('input-reset-new-pass').value;
+    const err = document.getElementById('reset-pass-error');
+
+    if (!newPass) {
+      if (err) { err.textContent = 'Please enter a new password.'; err.style.display = 'block'; }
+      return;
+    }
+
+    try {
+      const res = await this.apiFetch(`/api/users/${this.resettingUserNodeId}/reset_password`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ new_password: newPass }),
+      });
+      if (res.ok) {
+        alert('Password reset successfully!');
+        const modal = document.getElementById('modal-reset-password');
+        if (modal) modal.style.display = 'none';
+        this.fetchUsers();
+      } else {
+        if (err) { err.textContent = await res.text(); err.style.display = 'block'; }
+      }
+    } catch (e) {
+      if (err) { err.textContent = 'Error resetting password: ' + e; err.style.display = 'block'; }
+    }
+  }
+
+  async impersonateUser(nodeId) {
+    if (!confirm('Impersonate this user? You will adopt their identity and permissions. You can return to your admin session at any time.')) {
+      return;
+    }
+    try {
+      const res = await this.apiFetch(`/api/users/${nodeId}/impersonate`, { method: 'POST' });
+      if (res.ok) {
+        const data = await res.json();
+        this.token = data.token;
+        localStorage.setItem('heimdall_token', this.token);
+        if (this.termWs) {
+          this.termWs.close();
+          this.connectTerminalWebSocket();
+        }
+        await this.checkAuthStatus();
+        this.fetchOverview();
+        if (this.hasPerm('heimdall.users')) this.fetchUsers();
+      } else {
+        alert('Impersonation failed: ' + await res.text());
+      }
+    } catch (e) {
+      alert('Error impersonating user: ' + e);
+    }
+  }
+
+  async deleteUser(nodeId, nickname) {
+    if (!confirm(`Delete user "${nickname}" (${nodeId.slice(0, 16)}...)? This cannot be undone.`)) {
+      return;
+    }
+    try {
+      const res = await this.apiFetch(`/api/users/${nodeId}`, { method: 'DELETE' });
+      if (res.ok) {
+        this.fetchUsers();
+      } else {
+        alert('Failed to delete user: ' + await res.text());
+      }
+    } catch (e) {
+      alert('Error deleting user: ' + e);
+    }
+  }
+
+  // --- DATABASE MANAGER ---
+
+  async fetchDatabase() {
+    try {
+      const res = await this.apiFetch('/api/database/summary');
+      if (!res.ok) return;
+      const data = await res.json();
+
+      const pathEl = document.getElementById('db-file-path');
+      if (pathEl) pathEl.textContent = data.path;
+      const sizeEl = document.getElementById('db-file-size');
+      if (sizeEl) sizeEl.textContent = `${(data.size_bytes || 0).toLocaleString()} bytes (${formatBytes(data.size_bytes || 0)})`;
+      const totalTblEl = document.getElementById('db-total-tables');
+      if (totalTblEl) totalTblEl.textContent = data.total_tables;
+      const totalRecEl = document.getElementById('db-total-records');
+      if (totalRecEl) totalRecEl.textContent = (data.total_records || 0).toLocaleString();
+
+      const container = document.getElementById('db-tables-container');
+      if (!container) return;
+      container.innerHTML = '';
+
+      if (!data.tables || data.tables.length === 0) {
+        container.innerHTML = '<div class="empty-state" style="padding: 10px; font-size: 11px;">No tables found in database</div>';
+        return;
+      }
+
+      data.tables.forEach(tbl => {
+        const btn = document.createElement('button');
+        btn.className = `retro-btn table-item-btn ${this.currentSelectedTable === tbl.namespace ? 'btn-active' : ''}`;
+        btn.style.textAlign = 'left';
+        btn.style.display = 'flex';
+        btn.style.justifyContent = 'space-between';
+        btn.style.alignItems = 'center';
+        btn.style.padding = '6px 10px';
+        btn.innerHTML = `
+          <span><strong>${escapeHtml(tbl.namespace)}</strong></span>
+          <span class="badge" style="font-size: 10px;">${(tbl.count || 0).toLocaleString()} recs | ${formatBytes(tbl.size_bytes || 0)}</span>
+        `;
+        btn.addEventListener('click', () => this.selectTable(tbl.namespace));
+        container.appendChild(btn);
+      });
+
+      if (this.currentSelectedTable) {
+        this.selectTable(this.currentSelectedTable, false);
+      }
+    } catch (e) {
+      console.warn('Failed to fetch database summary:', e);
+    }
+  }
+
+  async selectTable(namespace, refreshTables = true) {
+    this.currentSelectedTable = namespace;
+    const titleEl = document.getElementById('db-selected-table-title');
+    if (titleEl) titleEl.textContent = `══ TABLE: ${namespace.toUpperCase()} ══`;
+    const clearBtn = document.getElementById('btn-clear-table');
+    if (clearBtn) clearBtn.style.display = 'inline-block';
+    const actionsBar = document.getElementById('db-actions-bar');
+    if (actionsBar) actionsBar.style.display = 'flex';
+
+    // Highlight active in tables list
+    document.querySelectorAll('.table-item-btn').forEach(btn => {
+      if (btn.textContent.includes(namespace)) {
+        btn.classList.add('btn-active');
+      } else {
+        btn.classList.remove('btn-active');
+      }
+    });
+
+    try {
+      const res = await this.apiFetch(`/api/database/table/${encodeURIComponent(namespace)}`);
+      if (!res.ok) return;
+      const records = await res.json();
+
+      const tbody = document.getElementById('db-records-tbody');
+      if (!tbody) return;
+      tbody.innerHTML = '';
+
+      if (!records || records.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="3" class="empty-state">Table is empty</td></tr>';
+        return;
+      }
+
+      records.forEach(rec => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td style="font-family: monospace; font-weight: bold;">${escapeHtml(rec.key)}</td>
+          <td style="font-family: monospace; word-break: break-all;">${escapeHtml(rec.value)}</td>
+          <td style="text-align: center;">
+            <button class="btn-small btn-danger delete-key-btn" data-key="${escapeHtml(rec.key)}">🗑 DEL</button>
+          </td>
+        `;
+        tbody.appendChild(tr);
+      });
+
+      tbody.querySelectorAll('.delete-key-btn').forEach(btn => {
+        btn.addEventListener('click', () => this.deleteKey(namespace, btn.dataset.key));
+      });
+    } catch (e) {
+      console.warn('Failed to load table records:', e);
+    }
+  }
+
+  async saveCurrentKey() {
+    if (!this.currentSelectedTable) return;
+    const keyInput = document.getElementById('db-new-key');
+    const valInput = document.getElementById('db-new-val');
+    const key = keyInput.value.trim();
+    const val = valInput.value.trim();
+
+    if (!key) {
+      alert('Please specify a key.');
+      return;
+    }
+
+    try {
+      const res = await this.apiFetch(`/api/database/table/${encodeURIComponent(this.currentSelectedTable)}/key/${encodeURIComponent(key)}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ value: val }),
+      });
+      if (res.ok) {
+        keyInput.value = '';
+        valInput.value = '';
+        this.fetchDatabase();
+      } else {
+        alert('Failed to save key.');
+      }
+    } catch (e) {
+      alert('Error saving key: ' + e);
+    }
+  }
+
+  async deleteKey(namespace, key) {
+    if (!confirm(`Delete key "${key}" from table "${namespace}"?`)) return;
+    try {
+      const res = await this.apiFetch(`/api/database/table/${encodeURIComponent(namespace)}/key/${encodeURIComponent(key)}`, {
+        method: 'DELETE',
+      });
+      if (res.ok) {
+        this.fetchDatabase();
+      }
+    } catch (e) {
+      console.warn('Failed to delete key:', e);
+    }
+  }
+
+  async clearCurrentTable() {
+    if (!this.currentSelectedTable) return;
+    if (!confirm(`Clear all records in table "${this.currentSelectedTable}"? This action cannot be undone.`)) return;
+    try {
+      const res = await this.apiFetch(`/api/database/table/${encodeURIComponent(this.currentSelectedTable)}`, {
+        method: 'DELETE',
+      });
+      if (res.ok) {
+        this.fetchDatabase();
+      }
+    } catch (e) {
+      console.warn('Failed to clear table:', e);
+    }
+  }
 }
 
 function escapeHtml(text) {
   const map = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' };
   return text.replace(/[&<>"']/g, m => map[m]);
+}
+
+function formatBytes(bytes) {
+  if (!bytes || bytes === 0) return '0 B';
+  const k = 1024;
+  const sizes = ['B', 'KB', 'MB', 'GB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return (bytes / Math.pow(k, i)).toFixed(i === 0 ? 0 : 1) + ' ' + sizes[i];
 }
 
 window.app = new HeimdallApp();

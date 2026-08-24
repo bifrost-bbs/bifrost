@@ -21,6 +21,13 @@
     </div>
 
     <div class="header-status-group">
+      <div class="status-pill" id="user-status-pill" title="Logged in user identity">
+        <span class="pill-title">USER</span>
+        <span class="pill-value" id="current-user-badge">Not Logged In</span>
+        <button id="btn-open-change-password" class="retro-btn btn-sm" style="margin-left: 5px; padding: 2px 6px;" title="Change Password">🔑</button>
+        <button id="btn-logout" class="retro-btn btn-sm btn-danger" style="margin-left: 3px; padding: 2px 6px;" title="Logout">🚪</button>
+      </div>
+
       <div class="status-pill" id="bbs-status-pill" aria-live="polite">
         <span class="indicator-dot" id="bbs-indicator"></span>
         <span class="status-label">BBS: <strong id="bbs-status-text">CONNECTING...</strong></span>
@@ -62,12 +69,25 @@
       <span class="tab-key">[5]</span> CONFIG
     </button>
     <button class="nav-tab" data-tab="telemetry" id="tab-btn-telemetry" aria-controls="tab-telemetry" aria-selected="false">
-      <span class="tab-key">[6]</span> TELEMETRY
+      <span class="tab-key">[6]</span> TELEMETRY &amp; STATS
     </button>
     <button class="nav-tab" data-tab="tuning" id="tab-btn-tuning" aria-controls="tab-tuning" aria-selected="false">
       <span class="tab-key">[7]</span> TUNING &amp; TOOLS
     </button>
+    <button class="nav-tab" data-tab="database" id="tab-btn-database" aria-controls="tab-database" aria-selected="false">
+      <span class="tab-key">[8]</span> DATABASE
+    </button>
+    <button class="nav-tab" data-tab="users" id="tab-btn-users" aria-controls="tab-users" aria-selected="false">
+      <span class="tab-key">[9]</span> USERS
+    </button>
   </nav>
+
+  <!-- Impersonation Alert Banner -->
+  <div id="impersonation-banner" class="impersonation-banner" style="display: none;">
+    <span class="banner-icon">⚠️</span>
+    <span>IMPERSONATING USER: <strong id="impersonating-user-name">...</strong> (Node: <code id="impersonating-node-id">...</code>)</span>
+    <button id="btn-stop-impersonate" class="retro-btn btn-sm btn-warning" style="margin-left: 15px;">RETURN TO ADMIN SESSION</button>
+  </div>
 
   <!-- Main Content Container -->
   <main class="main-content" role="main">
@@ -109,6 +129,11 @@
           <span class="card-label">COMPRESSION SAVINGS</span>
           <span class="card-value" id="stat-compression-savings">+0.0%</span>
           <span class="card-sub" id="stat-raw-comp-bytes">Raw: 0 B | Comp: 0 B</span>
+        </div>
+        <div class="retro-card stat-card">
+          <span class="card-label">SQLITE DB SIZE &amp; RECORDS</span>
+          <span class="card-value" id="stat-db-size">0 B</span>
+          <span class="card-sub" id="stat-db-sub">Records: 0 | Growth: 0 B/d</span>
         </div>
       </div>
 
@@ -249,31 +274,47 @@
               <option value="web_client">web_client</option>
               <option value="bifrost_tuning">bifrost_tuning</option>
               <option value="heimdall">heimdall</option>
+              <option value="crawler">crawler</option>
+              <option value="tuning">tuning</option>
             </select>
-            <input type="text" id="log-search-input" class="retro-input" placeholder="Search log buffer...">
-            <label class="checkbox-label">
-              <input type="checkbox" id="log-autoscroll" checked> Auto-Scroll
-            </label>
+          </div>
+          <div class="filter-group flex-1">
+            <label for="log-search-input">Search:</label>
+            <input type="text" id="log-search-input" class="retro-input" placeholder="Regex or substring search...">
+          </div>
+          <div class="log-actions">
+            <button id="btn-toggle-tail" class="retro-btn btn-sm active" aria-pressed="true">AUTO-SCROLL: ON</button>
             <button id="btn-refresh-logs" class="retro-btn btn-sm">RELOAD</button>
-            <button id="btn-clear-logs" class="retro-btn btn-sm">CLEAR</button>
+            <button id="btn-clear-logs" class="retro-btn btn-sm btn-danger">CLEAR LOGS</button>
           </div>
         </div>
-        <div class="log-console" id="log-console">
-          <!-- Log Entries Streamed Here -->
+
+        <!-- Terminal Logs Window -->
+        <div class="retro-panel log-window-panel">
+          <div class="panel-header">
+            <span class="panel-title">══ SYSTEM LOG STREAM ══</span>
+            <span class="log-stream-status" id="log-stream-status">● LIVE STREAM</span>
+          </div>
+          <div class="log-console-container" tabindex="0" role="log" aria-live="polite">
+            <div id="log-console" class="log-console">
+              <div id="log-entries" class="log-entries"></div>
+            </div>
+          </div>
         </div>
       </div>
     </section>
 
-    <!-- TAB 4: APP MANAGER & MULTI-FILE EDITOR -->
+    <!-- TAB 4: APPS & ASSETS -->
     <section id="tab-apps" class="tab-pane" role="tabpanel" aria-labelledby="tab-btn-apps">
-      <div class="apps-three-pane-layout">
-        <!-- 1. Applications List -->
-        <div class="retro-panel apps-list-panel">
+      <div class="apps-grid-layout">
+        <!-- 1. App Catalog List -->
+        <div class="retro-panel app-list-panel">
           <div class="panel-header">
-            <span class="panel-title">══ APPLICATIONS ══</span>
+            <span class="panel-title">══ REGISTERED BBS APPS ══</span>
+            <button id="btn-refresh-apps" class="retro-btn btn-sm">↻ REFRESH</button>
           </div>
           <div class="apps-grid" id="apps-grid">
-            <!-- Dynamically Loaded App Cards -->
+            <!-- Dynamically Populated App Cards -->
           </div>
         </div>
 
@@ -405,8 +446,11 @@
       </div>
     </section>
 
-    <!-- TAB 6: TELEMETRY & CAPTURE LOGS -->
+    <!-- TAB 6: TELEMETRY & STATS -->
     <section id="tab-telemetry" class="tab-pane" role="tabpanel" aria-labelledby="tab-btn-telemetry">
+      <div class="panel-header" style="margin-bottom: 8px;">
+        <span class="panel-title">══ RADIO &amp; TRANSPORT PACKET TELEMETRY ══</span>
+      </div>
       <div class="telemetry-stats-grid">
         <div class="retro-card">
           <span class="card-label">TOTAL PACKET SAMPLES</span>
@@ -440,7 +484,44 @@
         </div>
       </div>
 
-      <div class="retro-panel">
+      <!-- Database Performance & Growth Section -->
+      <div class="panel-header" style="margin-top: 20px; margin-bottom: 8px;">
+        <span class="panel-title">══ SQLITE DATABASE TELEMETRY &amp; STATS ══</span>
+      </div>
+      <div class="telemetry-stats-grid">
+        <div class="retro-card">
+          <span class="card-label">QUERIES / HOUR</span>
+          <span class="card-value" id="db-stat-qph">0.0</span>
+          <span class="card-sub" id="db-stat-total-queries">Total: 0 queries</span>
+        </div>
+        <div class="retro-card">
+          <span class="card-label">AVG QUERY LATENCY</span>
+          <span class="card-value" id="db-stat-avg-time">0.0 µs</span>
+          <span class="card-sub" id="db-stat-latency-range">Min: 0 µs | Max: 0 µs</span>
+        </div>
+        <div class="retro-card">
+          <span class="card-label">READ / WRITE RATIO</span>
+          <span class="card-value" id="db-stat-rw-ratio">0 / 0</span>
+          <span class="card-sub" id="db-stat-rw-sub">Reads vs Writes</span>
+        </div>
+        <div class="retro-card">
+          <span class="card-label">DATABASE SIZE</span>
+          <span class="card-value" id="db-stat-size">0 B</span>
+          <span class="card-sub" id="db-stat-total-records">Records: 0</span>
+        </div>
+        <div class="retro-card">
+          <span class="card-label">BYTE GROWTH / DAY</span>
+          <span class="card-value" id="db-stat-byte-growth">+0.0 B/d</span>
+          <span class="card-sub" id="db-stat-byte-growth-sub">Projected 24h</span>
+        </div>
+        <div class="retro-card">
+          <span class="card-label">RECORD GROWTH / DAY</span>
+          <span class="card-value text-success" id="db-stat-record-growth">+0.0 rec/d</span>
+          <span class="card-sub" id="db-stat-record-growth-sub">Rate / 24h</span>
+        </div>
+      </div>
+
+      <div class="retro-panel" style="margin-top: 15px;">
         <div class="panel-header">
           <span class="panel-title">══ PACKET CAPTURE LOG (compression_log.csv) ══</span>
           <button id="btn-refresh-captures" class="retro-btn btn-sm">↻ REFRESH</button>
@@ -504,7 +585,272 @@
       </div>
     </section>
 
+    <!-- TAB 8: DATABASE MANAGER -->
+    <section id="tab-database" class="tab-pane" role="tabpanel" aria-labelledby="tab-btn-database">
+      <div class="database-grid" style="display: grid; grid-template-columns: 340px 1fr; gap: 15px;">
+        <div class="retro-panel">
+          <div class="panel-header">
+            <span class="panel-title">══ SQLITE PERSISTENCE ══</span>
+            <button id="btn-refresh-db" class="btn-small">🔄 REFRESH</button>
+          </div>
+          <div class="meta-row" style="margin-top: 8px;">
+            <span class="meta-label">DATABASE FILE:</span>
+            <span class="meta-val" id="db-file-path" style="font-family: monospace; font-size: 11px;">database.db</span>
+          </div>
+          <div class="meta-row">
+            <span class="meta-label">DATABASE SIZE:</span>
+            <span class="meta-val" id="db-file-size" style="font-weight: bold; color: var(--accent);">0 bytes</span>
+          </div>
+          <div class="meta-row">
+            <span class="meta-label">TOTAL TABLES:</span>
+            <span class="meta-val" id="db-total-tables">0</span>
+          </div>
+          <div class="meta-row">
+            <span class="meta-label">TOTAL RECORDS:</span>
+            <span class="meta-val" id="db-total-records">0</span>
+          </div>
+
+          <!-- DB Backup / Restore / Reset Toolbar -->
+          <div class="db-maintenance-group" style="margin-top: 12px; display: flex; flex-direction: column; gap: 6px;">
+            <button id="btn-backup-db" class="retro-btn btn-sm btn-success" style="width: 100%;">💾 BACKUP DATABASE</button>
+            <div style="display: flex; gap: 6px;">
+              <button id="btn-restore-db" class="retro-btn btn-sm" style="flex: 1;">📥 RESTORE DB</button>
+              <input type="file" id="db-restore-file-input" accept=".db,.sqlite" style="display: none;">
+              <button id="btn-reset-db" class="retro-btn btn-sm btn-danger" style="flex: 1;">☢️ RESET DB</button>
+            </div>
+          </div>
+          
+          <div class="panel-header" style="margin-top: 15px;">
+            <span class="panel-title">══ TABLES (RECORDS / BYTES) ══</span>
+          </div>
+          <div class="db-tables-list" id="db-tables-container" style="margin-top: 8px; display: flex; flex-direction: column; gap: 4px; max-height: 360px; overflow-y: auto;">
+            <!-- Dynamically populated tables list with records & bytes -->
+          </div>
+        </div>
+
+        <div class="retro-panel">
+          <div class="panel-header">
+            <span class="panel-title" id="db-selected-table-title">══ TABLE: SELECT A NAMESPACE ══</span>
+            <button id="btn-clear-table" class="btn-small btn-danger" style="display: none;">🗑 CLEAR TABLE</button>
+          </div>
+          
+          <div class="db-actions-bar" id="db-actions-bar" style="display: none; margin: 10px 0; gap: 8px; align-items: center;">
+            <input type="text" id="db-new-key" class="retro-input" placeholder="Key (e.g. player_id)" style="width: 180px;">
+            <input type="text" id="db-new-val" class="retro-input" placeholder="JSON or Text Value" style="flex: 1;">
+            <button id="btn-save-key" class="retro-btn btn-success" style="padding: 4px 10px;">💾 SET KEY</button>
+          </div>
+
+          <div class="table-container" style="max-height: 500px; overflow-y: auto;">
+            <table class="retro-table" id="db-records-table">
+              <thead>
+                <tr>
+                  <th style="width: 200px;">KEY</th>
+                  <th>VALUE</th>
+                  <th style="width: 80px; text-align: center;">ACTIONS</th>
+                </tr>
+              </thead>
+              <tbody id="db-records-tbody">
+                <tr><td colspan="3" class="empty-state">Select a database table from the left to view records</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 9: USERS & PERMISSIONS -->
+    <section id="tab-users" class="tab-pane" role="tabpanel" aria-labelledby="tab-btn-users">
+      <div class="retro-panel">
+        <div class="panel-header">
+          <span class="panel-title">══ USER &amp; IDENTITY MANAGEMENT ══</span>
+          <div style="display: flex; gap: 8px;">
+            <button id="btn-open-create-user" class="retro-btn btn-success btn-sm">➕ CREATE USER</button>
+            <button id="btn-refresh-users" class="retro-btn btn-sm">↻ REFRESH</button>
+          </div>
+        </div>
+
+        <div style="margin: 10px 0; display: flex; gap: 10px; align-items: center;">
+          <input type="text" id="users-search-input" class="retro-input" placeholder="Search by nickname or node ID..." style="flex: 1; max-width: 400px;">
+          <span style="color: var(--text-dim);" id="users-count-label">Total Users: 0</span>
+        </div>
+
+        <div class="table-container" style="max-height: 550px; overflow-y: auto;">
+          <table class="retro-table" id="users-table">
+            <thead>
+              <tr>
+                <th style="width: 140px;">NICKNAME</th>
+                <th style="width: 220px;">NODE ID</th>
+                <th>PERMISSIONS &amp; ROLES</th>
+                <th style="width: 90px; text-align: center;">PASSWORD</th>
+                <th style="width: 150px; text-align: center;">ACTIONS</th>
+              </tr>
+            </thead>
+            <tbody id="users-tbody">
+              <tr><td colspan="5" class="empty-state">Loading users...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
   </main>
+
+  <!-- AUTH / LOGIN / SETUP MODAL -->
+  <div id="auth-modal" class="retro-modal-overlay" style="display: none;">
+    <div class="retro-modal-box" style="max-width: 460px;">
+      <div class="panel-header">
+        <span class="panel-title" id="auth-modal-title">══ HEIMDALL AUTHENTICATION ══</span>
+      </div>
+      <div class="retro-modal-body" style="padding: 15px 0;">
+        <p id="auth-modal-desc" style="margin-bottom: 15px; color: var(--accent-color); font-size: 13px;">
+          Enter your operator nickname and password to access Heimdall.
+        </p>
+
+        <div class="form-group" style="margin-bottom: 12px;">
+          <label for="auth-username" style="display: block; margin-bottom: 4px; font-weight: bold;">NICKNAME / USERNAME:</label>
+          <input type="text" id="auth-username" class="retro-input" placeholder="e.g. SysOp" style="width: 100%;">
+        </div>
+
+        <div class="form-group" style="margin-bottom: 12px;">
+          <label for="auth-password" style="display: block; margin-bottom: 4px; font-weight: bold;">PASSWORD:</label>
+          <input type="password" id="auth-password" class="retro-input" placeholder="••••••••" style="width: 100%;">
+        </div>
+
+        <div class="form-group" id="auth-confirm-group" style="display: none; margin-bottom: 12px;">
+          <label for="auth-confirm-password" style="display: block; margin-bottom: 4px; font-weight: bold;">CONFIRM PASSWORD:</label>
+          <input type="password" id="auth-confirm-password" class="retro-input" placeholder="••••••••" style="width: 100%;">
+        </div>
+
+        <div id="auth-error-msg" style="color: #ff4444; font-size: 12px; margin-top: 8px; display: none;"></div>
+      </div>
+
+      <div class="retro-modal-actions" style="display: flex; justify-content: flex-end; gap: 10px; margin-top: 10px;">
+        <button id="btn-submit-auth" class="retro-btn btn-success" style="width: 100%;">LOGIN TO HEIMDALL</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- CREATE USER MODAL -->
+  <div id="modal-create-user" class="retro-modal-overlay" style="display: none;">
+    <div class="retro-modal-box" style="max-width: 520px;">
+      <div class="panel-header">
+        <span class="panel-title">══ CREATE NEW BBS USER ══</span>
+      </div>
+      <div class="retro-modal-body" style="padding: 15px 0;">
+        <div class="form-group" style="margin-bottom: 10px;">
+          <label for="create-username" style="display: block; margin-bottom: 4px; font-weight: bold;">NICKNAME:</label>
+          <input type="text" id="create-username" class="retro-input" placeholder="e.g. Alice" style="width: 100%;">
+        </div>
+        <div class="form-group" style="margin-bottom: 15px;">
+          <label for="create-password" style="display: block; margin-bottom: 4px; font-weight: bold;">PASSWORD:</label>
+          <input type="password" id="create-password" class="retro-input" placeholder="••••••••" style="width: 100%;">
+        </div>
+
+        <label style="display: block; margin-bottom: 6px; font-weight: bold;">PERMISSIONS &amp; CAPABILITIES:</label>
+        <div id="create-user-perms-list" class="perms-grid" style="display: grid; grid-template-columns: 1fr 1fr; gap: 6px; max-height: 200px; overflow-y: auto; padding: 6px; border: 1px solid var(--border-color); background: var(--card-bg);">
+          <!-- Injected via JS -->
+        </div>
+        <div id="create-user-error" style="color: #ff4444; font-size: 12px; margin-top: 8px; display: none;"></div>
+      </div>
+      <div class="retro-modal-actions" style="display: flex; justify-content: flex-end; gap: 10px;">
+        <button id="btn-cancel-create-user" class="retro-btn">CANCEL</button>
+        <button id="btn-confirm-create-user" class="retro-btn btn-success">CREATE USER</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- EDIT PERMISSIONS MODAL -->
+  <div id="modal-edit-permissions" class="retro-modal-overlay" style="display: none;">
+    <div class="retro-modal-box" style="max-width: 520px;">
+      <div class="panel-header">
+        <span class="panel-title">══ EDIT PERMISSIONS: <span id="edit-perm-username">...</span> ══</span>
+      </div>
+      <div class="retro-modal-body" style="padding: 15px 0;">
+        <p style="font-size: 12px; color: var(--text-dim); margin-bottom: 10px;">Node ID: <code id="edit-perm-node-id">...</code></p>
+        <div id="edit-perms-list" class="perms-grid" style="display: grid; grid-template-columns: 1fr 1fr; gap: 6px; max-height: 250px; overflow-y: auto; padding: 6px; border: 1px solid var(--border-color); background: var(--card-bg);">
+          <!-- Injected via JS -->
+        </div>
+        <div id="edit-perms-error" style="color: #ff4444; font-size: 12px; margin-top: 8px; display: none;"></div>
+      </div>
+      <div class="retro-modal-actions" style="display: flex; justify-content: flex-end; gap: 10px;">
+        <button id="btn-cancel-edit-perms" class="retro-btn">CANCEL</button>
+        <button id="btn-save-edit-perms" class="retro-btn btn-success">SAVE PERMISSIONS</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- RESET USER PASSWORD MODAL -->
+  <div id="modal-reset-password" class="retro-modal-overlay" style="display: none;">
+    <div class="retro-modal-box" style="max-width: 440px;">
+      <div class="panel-header">
+        <span class="panel-title">══ RESET PASSWORD: <span id="reset-pass-username">...</span> ══</span>
+      </div>
+      <div class="retro-modal-body" style="padding: 15px 0;">
+        <div class="form-group">
+          <label for="input-reset-new-pass" style="display: block; margin-bottom: 4px; font-weight: bold;">NEW PASSWORD:</label>
+          <input type="password" id="input-reset-new-pass" class="retro-input" placeholder="••••••••" style="width: 100%;">
+        </div>
+        <div id="reset-pass-error" style="color: #ff4444; font-size: 12px; margin-top: 8px; display: none;"></div>
+      </div>
+      <div class="retro-modal-actions" style="display: flex; justify-content: flex-end; gap: 10px;">
+        <button id="btn-cancel-reset-pass" class="retro-btn">CANCEL</button>
+        <button id="btn-confirm-reset-pass" class="retro-btn btn-warning">SET NEW PASSWORD</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- CHANGE MY PASSWORD MODAL -->
+  <div id="modal-change-password" class="retro-modal-overlay" style="display: none;">
+    <div class="retro-modal-box" style="max-width: 440px;">
+      <div class="panel-header">
+        <span class="panel-title">══ CHANGE MY PASSWORD ══</span>
+      </div>
+      <div class="retro-modal-body" style="padding: 15px 0;">
+        <div class="form-group" style="margin-bottom: 10px;">
+          <label for="change-old-pass" style="display: block; margin-bottom: 4px; font-weight: bold;">CURRENT PASSWORD:</label>
+          <input type="password" id="change-old-pass" class="retro-input" placeholder="••••••••" style="width: 100%;">
+        </div>
+        <div class="form-group" style="margin-bottom: 10px;">
+          <label for="change-new-pass" style="display: block; margin-bottom: 4px; font-weight: bold;">NEW PASSWORD:</label>
+          <input type="password" id="change-new-pass" class="retro-input" placeholder="••••••••" style="width: 100%;">
+        </div>
+        <div class="form-group">
+          <label for="change-confirm-new-pass" style="display: block; margin-bottom: 4px; font-weight: bold;">CONFIRM NEW PASSWORD:</label>
+          <input type="password" id="change-confirm-new-pass" class="retro-input" placeholder="••••••••" style="width: 100%;">
+        </div>
+        <div id="change-pass-error" style="color: #ff4444; font-size: 12px; margin-top: 8px; display: none;"></div>
+      </div>
+      <div class="retro-modal-actions" style="display: flex; justify-content: flex-end; gap: 10px;">
+        <button id="btn-cancel-change-pass" class="retro-btn">CANCEL</button>
+        <button id="btn-confirm-change-pass" class="retro-btn btn-success">UPDATE PASSWORD</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Funny Double Confirmation Modal for Reset DB -->
+  <div id="modal-reset-db" class="retro-modal-overlay" style="display: none;">
+    <div class="retro-modal-box">
+      <div class="panel-header" style="color: #ff3333; font-weight: bold;">
+        <span>☢️ CRITICAL WARNING: TOTAL DATABASE OBLITERATION ☢️</span>
+      </div>
+      <div class="retro-modal-body" style="padding: 15px 0; line-height: 1.5;">
+        <p style="color: #ff5555; font-weight: bold; margin-bottom: 10px;">
+          Hold on, Space Commander! Are you ABSOLUTELY, UNEQUIVOCALLY SURE?!
+        </p>
+        <p style="margin-bottom: 10px;">
+          Pressing the big red button will permanently vaporize all user accounts, messages, Void Trader galaxies, door game high scores, and marketplace wares into cosmic static! There is no warp drive that can bring them back!
+        </p>
+        <p style="margin-bottom: 15px;">
+          Type <strong style="color: #ffff55;">"NUKE IT"</strong> below to confirm total annihilation:
+        </p>
+        <input type="text" id="input-nuke-confirm" class="retro-input" placeholder="Type NUKE IT" style="width: 100%; text-align: center; text-transform: uppercase; font-size: 14px; font-weight: bold;">
+      </div>
+      <div class="retro-modal-actions" style="display: flex; justify-content: flex-end; gap: 10px; margin-top: 10px;">
+        <button id="btn-cancel-nuke" class="retro-btn">ABORT / MERCY!</button>
+        <button id="btn-confirm-nuke" class="retro-btn btn-danger" disabled>💥 OBLITERATE EVERYTHING 💥</button>
+      </div>
+    </div>
+  </div>
 
   <!-- Global Footer Bar -->
   <footer class="heimdall-footer" role="contentinfo">

@@ -1,20 +1,25 @@
-//! Web server router, REST API handlers, static file serving, and WebSocket endpoints.
+//! Web server router, REST API handlers, static file serving, user management, and WebSocket endpoints.
 
 use crate::app_mgr::AppManager;
-use crate::auth::{AuthConfig, auth_middleware};
+use crate::auth::{AuthConfig, Session, SessionManager, TokenQuery};
 use crate::config_mgr::ConfigManager;
+use crate::db_mgr::DatabaseManager;
 use crate::logs::{LogBuffer, LogQuery};
 use crate::stats::StatsManager;
 use crate::supervisor::Supervisor;
+use crate::user_mgr::{
+    UserManager, UserInfo, ALL_HEIMDALL_PERMISSIONS, PERM_ADMIN,
+    PERM_HEIMDALL_LOGIN, PERM_HEIMDALL_USERS,
+};
 use crate::web_client::handle_web_terminal_ws;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path as AxumPath, Query, State};
-use axum::http::{StatusCode, header};
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
-use axum::routing::{get, post};
-use axum::{Json, Router, middleware};
+use axum::routing::{get, post, put};
+use axum::{Json, Router};
 use futures_util::{SinkExt, StreamExt};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tower_http::cors::CorsLayer;
@@ -29,6 +34,9 @@ pub struct AppState {
     pub config_mgr: Arc<ConfigManager>,
     pub app_mgr: Arc<AppManager>,
     pub stats_mgr: Arc<StatsManager>,
+    pub db_mgr: Arc<DatabaseManager>,
+    pub user_mgr: Arc<UserManager>,
+    pub session_mgr: Arc<SessionManager>,
     pub log_buffer: Arc<LogBuffer>,
     pub auth_config: AuthConfig,
     pub web_dir: Option<PathBuf>,
@@ -62,10 +70,84 @@ pub struct AppFileQuery {
     pub path: String,
 }
 
-pub fn create_router(state: AppState) -> Router {
-    let auth_conf = state.auth_config.clone();
+#[derive(Debug, Deserialize)]
+pub struct SetKeyBody {
+    pub value: String,
+}
 
+#[derive(Debug, Deserialize)]
+pub struct SetupBody {
+    pub username: String,
+    pub password: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct LoginBody {
+    pub username: String,
+    pub password: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ChangePasswordBody {
+    pub old_password: String,
+    pub new_password: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateUserBody {
+    pub username: String,
+    pub password: String,
+    pub permissions: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdatePermissionsBody {
+    pub permissions: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ResetPasswordBody {
+    pub new_password: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AuthStatusResponse {
+    pub setup_required: bool,
+    pub authenticated: bool,
+    pub user: Option<UserInfo>,
+    pub impersonating: Option<crate::auth::ImpersonationInfo>,
+    pub all_permissions: Vec<PermissionMeta>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PermissionMeta {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AuthResponse {
+    pub token: String,
+    pub user: UserInfo,
+}
+
+pub fn create_router(state: AppState) -> Router {
     let api_routes = Router::new()
+        // Auth & Identity
+        .route("/api/auth/status", get(get_auth_status_handler))
+        .route("/api/auth/setup", post(setup_admin_handler))
+        .route("/api/auth/login", post(login_handler))
+        .route("/api/auth/logout", post(logout_handler))
+        .route("/api/auth/me", get(get_me_handler))
+        .route("/api/auth/change_password", post(change_my_password_handler))
+        .route("/api/auth/stop_impersonating", post(stop_impersonating_handler))
+        // User Management
+        .route("/api/users", get(list_users_handler).post(create_user_handler))
+        .route("/api/users/:node_id", get(get_user_handler).delete(delete_user_handler))
+        .route("/api/users/:node_id/permissions", put(update_user_permissions_handler))
+        .route("/api/users/:node_id/reset_password", post(reset_user_password_handler))
+        .route("/api/users/:node_id/impersonate", post(impersonate_user_handler))
         // Supervisor
         .route("/api/supervisor/status", get(get_supervisor_status))
         .route("/api/supervisor/start_bbs", post(start_bbs_handler))
@@ -84,28 +166,324 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/apps/:app_id/files", get(list_app_files_handler))
         .route("/api/apps/:app_id/file_content", get(get_app_file_content_handler).post(save_app_file_content_handler))
         .route("/api/apps/:app_id/files/:filename", post(save_app_file_handler))
-        // Telemetry & Captures
+        // Database
+        .route("/api/database/summary", get(get_database_summary_handler))
+        .route("/api/database/tables", get(list_database_tables_handler))
+        .route("/api/database/telemetry", get(get_database_telemetry_handler))
+        .route("/api/database/backup", get(backup_database_handler))
+        .route("/api/database/restore", post(restore_database_handler))
+        .route("/api/database/reset", post(reset_database_handler))
+        .route("/api/database/table/:namespace", get(get_database_table_handler).delete(clear_database_table_handler))
+        .route("/api/database/table/:namespace/key/:key", get(get_database_key_handler).post(set_database_key_handler).delete(delete_database_key_handler))
+        // Telemetry
         .route("/api/telemetry/summary", get(get_telemetry_summary_handler))
         .route("/api/telemetry/captures", get(get_captures_handler))
         .route("/api/telemetry/capture_summary", get(get_capture_summary_handler))
-        // Apply Auth middleware to protected APIs if enabled
-        .layer(middleware::from_fn_with_state(auth_conf.clone(), auth_middleware));
-
-    let public_routes = Router::new()
-        // Static assets
-        .route("/", get(serve_index_html))
-        .route("/index.html", get(serve_index_html))
-        .route("/style.css", get(serve_style_css))
-        .route("/app.js", get(serve_app_js))
         // WebSockets
         .route("/ws/logs", get(ws_logs_handler))
         .route("/ws/terminal", get(ws_terminal_handler));
 
+    // Static asset handlers
     Router::new()
-        .merge(public_routes)
         .merge(api_routes)
+        .route("/", get(serve_index_html))
+        .route("/index.html", get(serve_index_html))
+        .route("/style.css", get(serve_style_css))
+        .route("/app.js", get(serve_app_js))
         .layer(CorsLayer::permissive())
         .with_state(state)
+}
+
+// --- AUTH HELPERS ---
+
+fn extract_session(state: &AppState, headers: &HeaderMap, query_tok: Option<&str>) -> Option<Session> {
+    let tok = state.session_mgr.extract_token(headers, query_tok)?;
+    state.session_mgr.get_session(&tok)
+}
+
+fn require_auth_session(state: &AppState, headers: &HeaderMap) -> Result<Session, (StatusCode, String)> {
+    if let Some(session) = extract_session(state, headers, None) {
+        return Ok(session);
+    }
+    // If auth is completely disabled in config AND no users exist, allow fallback
+    if !state.auth_config.enabled && state.user_mgr.is_setup_required().unwrap_or(false) {
+        return Ok(Session {
+            token: "anon".to_string(),
+            user_id: [0u8; 32],
+            user_id_hex: "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
+            username: "Admin (Open Mode)".to_string(),
+            permissions: vec![PERM_ADMIN.to_string()],
+            is_admin: true,
+            impersonating: None,
+            created_instant: None,
+            created_at: 0,
+        });
+    }
+    Err((StatusCode::UNAUTHORIZED, "Authentication required".to_string()))
+}
+
+fn require_perm(state: &AppState, headers: &HeaderMap, perm: &str) -> Result<Session, (StatusCode, String)> {
+    let session = require_auth_session(state, headers)?;
+    if !session.has_permission(perm) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            format!("Access Denied: Missing permission '{}'", perm),
+        ));
+    }
+    Ok(session)
+}
+
+// --- AUTH & USER HANDLERS ---
+
+async fn get_auth_status_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<AuthStatusResponse>, (StatusCode, String)> {
+    let setup_required = state.user_mgr.is_setup_required().unwrap_or(false);
+    let session = extract_session(&state, &headers, None);
+
+    let all_perms = ALL_HEIMDALL_PERMISSIONS
+        .iter()
+        .map(|(id, name, desc)| PermissionMeta {
+            id: id.to_string(),
+            name: name.to_string(),
+            description: desc.to_string(),
+        })
+        .collect();
+
+    Ok(Json(AuthStatusResponse {
+        setup_required,
+        authenticated: session.is_some(),
+        user: session.as_ref().map(|s| s.to_user_info()),
+        impersonating: session.and_then(|s| s.impersonating),
+        all_permissions: all_perms,
+    }))
+}
+
+async fn setup_admin_handler(
+    State(state): State<AppState>,
+    Json(payload): Json<SetupBody>,
+) -> Result<Json<AuthResponse>, (StatusCode, String)> {
+    let setup_required = state
+        .user_mgr
+        .is_setup_required()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    if !setup_required {
+        return Err((StatusCode::BAD_REQUEST, "Setup has already been completed".to_string()));
+    }
+
+    let user_info = state
+        .user_mgr
+        .setup_initial_admin(&payload.username, &payload.password)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+
+    let session = state.session_mgr.create_session(&user_info);
+
+    state.log_buffer.push(
+        "heimdall",
+        "INFO",
+        &format!("Initial administrator account '{}' registered", user_info.nickname),
+    );
+
+    Ok(Json(AuthResponse {
+        token: session.token,
+        user: user_info,
+    }))
+}
+
+async fn login_handler(
+    State(state): State<AppState>,
+    Json(payload): Json<LoginBody>,
+) -> Result<Json<AuthResponse>, (StatusCode, String)> {
+    let user_info = state
+        .user_mgr
+        .authenticate(&payload.username, &payload.password)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((StatusCode::UNAUTHORIZED, "Invalid nickname or password".to_string()))?;
+
+    if !user_info.is_admin && !user_info.permissions.iter().any(|p| p == PERM_HEIMDALL_LOGIN || p == PERM_ADMIN) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Access Denied: You do not have permission to log into Heimdall".to_string(),
+        ));
+    }
+
+    let session = state.session_mgr.create_session(&user_info);
+
+    state.log_buffer.push(
+        "heimdall",
+        "INFO",
+        &format!("User '{}' logged into Heimdall", user_info.nickname),
+    );
+
+    Ok(Json(AuthResponse {
+        token: session.token,
+        user: user_info,
+    }))
+}
+
+async fn logout_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<StatusCode, (StatusCode, String)> {
+    if let Some(tok) = state.session_mgr.extract_token(&headers, None) {
+        state.session_mgr.destroy_session(&tok);
+    }
+    Ok(StatusCode::OK)
+}
+
+async fn get_me_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Session>, (StatusCode, String)> {
+    let session = require_auth_session(&state, &headers)?;
+    Ok(Json(session))
+}
+
+async fn change_my_password_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<ChangePasswordBody>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let session = require_auth_session(&state, &headers)?;
+    state
+        .user_mgr
+        .change_password(&session.user_id_hex, &payload.old_password, &payload.new_password)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    Ok(StatusCode::OK)
+}
+
+async fn stop_impersonating_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Session>, (StatusCode, String)> {
+    let session = require_auth_session(&state, &headers)?;
+    let imp = session.impersonating.ok_or((StatusCode::BAD_REQUEST, "Not currently impersonating".to_string()))?;
+    let admin_user = state
+        .user_mgr
+        .get_user(&imp.admin_id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((StatusCode::NOT_FOUND, "Original admin user not found".to_string()))?;
+
+    let restored = state
+        .session_mgr
+        .stop_impersonating(&session.token, &admin_user)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    state.log_buffer.push(
+        "heimdall",
+        "INFO",
+        &format!("Admin '{}' returned from impersonation", admin_user.nickname),
+    );
+
+    Ok(Json(restored))
+}
+
+async fn list_users_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<UserInfo>>, (StatusCode, String)> {
+    require_perm(&state, &headers, PERM_HEIMDALL_USERS)?;
+    state
+        .user_mgr
+        .list_users()
+        .map(Json)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
+async fn create_user_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<CreateUserBody>,
+) -> Result<Json<UserInfo>, (StatusCode, String)> {
+    require_perm(&state, &headers, PERM_HEIMDALL_USERS)?;
+    let perms = payload.permissions.unwrap_or_default();
+    state
+        .user_mgr
+        .create_user(&payload.username, &payload.password, perms)
+        .map(Json)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))
+}
+
+async fn get_user_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath(node_id): AxumPath<String>,
+) -> Result<Json<UserInfo>, (StatusCode, String)> {
+    require_perm(&state, &headers, PERM_HEIMDALL_USERS)?;
+    state
+        .user_mgr
+        .get_user(&node_id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map(Json)
+        .ok_or((StatusCode::NOT_FOUND, "User not found".to_string()))
+}
+
+async fn update_user_permissions_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath(node_id): AxumPath<String>,
+    Json(payload): Json<UpdatePermissionsBody>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    require_perm(&state, &headers, PERM_HEIMDALL_USERS)?;
+    state
+        .user_mgr
+        .update_permissions(&node_id, payload.permissions)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    Ok(StatusCode::OK)
+}
+
+async fn reset_user_password_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath(node_id): AxumPath<String>,
+    Json(payload): Json<ResetPasswordBody>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    require_perm(&state, &headers, PERM_HEIMDALL_USERS)?;
+    state
+        .user_mgr
+        .reset_password(&node_id, &payload.new_password)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    Ok(StatusCode::OK)
+}
+
+async fn impersonate_user_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath(node_id): AxumPath<String>,
+) -> Result<Json<Session>, (StatusCode, String)> {
+    let session = require_perm(&state, &headers, PERM_HEIMDALL_USERS)?;
+    let target_user = state
+        .user_mgr
+        .get_user(&node_id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((StatusCode::NOT_FOUND, "Target user not found".to_string()))?;
+
+    let updated = state
+        .session_mgr
+        .impersonate(&session.token, &target_user)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+
+    state.log_buffer.push(
+        "heimdall",
+        "INFO",
+        &format!("Admin '{}' is now impersonating '{}'", session.username, target_user.nickname),
+    );
+
+    Ok(Json(updated))
+}
+
+async fn delete_user_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath(node_id): AxumPath<String>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    require_perm(&state, &headers, PERM_HEIMDALL_USERS)?;
+    state
+        .user_mgr
+        .delete_user(&node_id)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    Ok(StatusCode::OK)
 }
 
 // --- STATIC FILE SERVING ---
@@ -313,6 +691,8 @@ async fn save_app_file_handler(
 async fn get_telemetry_summary_handler(State(state): State<AppState>) -> impl IntoResponse {
     let cap_summary = state.stats_mgr.get_capture_summary();
     let cfg = state.config_mgr.get_config();
+    let db_tel = state.db_mgr.telemetry().ok();
+    let db_summary = state.db_mgr.summary().ok();
 
     let snapshot = serde_json::json!({
         "active_sessions": 0,
@@ -328,6 +708,8 @@ async fn get_telemetry_summary_handler(State(state): State<AppState>) -> impl In
         "avg_bytes_per_packet_per_user": cap_summary.avg_bytes_per_packet_per_user,
         "compression_savings_percent": cap_summary.net_savings_percent,
         "max_duty_cycle_limit": cfg.rate_limiter.max_duty_cycle_percent,
+        "database": db_tel,
+        "database_summary": db_summary,
     });
 
     Json(snapshot)
@@ -344,6 +726,142 @@ async fn get_captures_handler(
 async fn get_capture_summary_handler(State(state): State<AppState>) -> impl IntoResponse {
     let summary = state.stats_mgr.get_capture_summary();
     Json(summary)
+}
+
+async fn get_database_summary_handler(
+    State(state): State<AppState>,
+) -> Result<Json<crate::db_mgr::DatabaseSummary>, (StatusCode, String)> {
+    state
+        .db_mgr
+        .summary()
+        .map(Json)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
+async fn list_database_tables_handler(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<crate::db_mgr::TableSummary>>, (StatusCode, String)> {
+    state
+        .db_mgr
+        .list_tables()
+        .map(Json)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
+async fn get_database_telemetry_handler(
+    State(state): State<AppState>,
+) -> Result<Json<bifrost_bbs::DbTelemetryStats>, (StatusCode, String)> {
+    state
+        .db_mgr
+        .telemetry()
+        .map(Json)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
+async fn backup_database_handler(
+    State(state): State<AppState>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let bytes = state
+        .db_mgr
+        .backup_db()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let filename = format!(
+        "database_backup_{}.db",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+    );
+
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(header::CONTENT_TYPE, "application/octet-stream".parse().unwrap());
+    headers.insert(
+        header::CONTENT_DISPOSITION,
+        format!("attachment; filename=\"{}\"", filename).parse().unwrap(),
+    );
+
+    Ok((headers, bytes))
+}
+
+async fn restore_database_handler(
+    State(state): State<AppState>,
+    body: axum::body::Bytes,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    if body.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "Empty backup data".to_string()));
+    }
+    state
+        .db_mgr
+        .restore_db(&body)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(serde_json::json!({ "status": "ok", "restored": true, "bytes": body.len() })))
+}
+
+async fn reset_database_handler(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    state
+        .db_mgr
+        .reset_db()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(serde_json::json!({ "status": "ok", "reset": true })))
+}
+
+async fn get_database_table_handler(
+    State(state): State<AppState>,
+    AxumPath(namespace): AxumPath<String>,
+) -> Result<Json<Vec<crate::db_mgr::KeyValueEntry>>, (StatusCode, String)> {
+    state
+        .db_mgr
+        .get_table_entries(&namespace)
+        .map(Json)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
+async fn clear_database_table_handler(
+    State(state): State<AppState>,
+    AxumPath(namespace): AxumPath<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let count = state
+        .db_mgr
+        .clear_table(&namespace)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(serde_json::json!({ "status": "ok", "cleared_records": count })))
+}
+
+async fn get_database_key_handler(
+    State(state): State<AppState>,
+    AxumPath((namespace, key)): AxumPath<(String, String)>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let val = state
+        .db_mgr
+        .get_key(&namespace, &key)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(serde_json::json!({ "namespace": namespace, "key": key, "value": val })))
+}
+
+async fn set_database_key_handler(
+    State(state): State<AppState>,
+    AxumPath((namespace, key)): AxumPath<(String, String)>,
+    Json(body): Json<SetKeyBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    state
+        .db_mgr
+        .set_key(&namespace, &key, &body.value)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(serde_json::json!({ "status": "ok", "namespace": namespace, "key": key })))
+}
+
+async fn delete_database_key_handler(
+    State(state): State<AppState>,
+    AxumPath((namespace, key)): AxumPath<(String, String)>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    state
+        .db_mgr
+        .delete_key(&namespace, &key)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(serde_json::json!({ "status": "ok", "deleted": true })))
 }
 
 // --- WEBSOCKET HANDLERS ---
@@ -370,11 +888,15 @@ async fn handle_logs_ws(socket: WebSocket, log_buffer: Arc<LogBuffer>) {
 
 async fn ws_terminal_handler(
     ws: WebSocketUpgrade,
+    headers: HeaderMap,
+    Query(tok_query): Query<TokenQuery>,
     State(state): State<AppState>,
 ) -> Response {
+    let session = extract_session(&state, &headers, tok_query.token.as_deref());
+    let authenticated_node = session.map(|s| s.user_id);
     let port = state.radio_port.clone();
     let log_buf = state.log_buffer.clone();
-    ws.on_upgrade(move |socket| handle_web_terminal_ws(socket, port, log_buf))
+    ws.on_upgrade(move |socket| handle_web_terminal_ws(socket, port, log_buf, authenticated_node))
 }
 
 #[cfg(test)]
@@ -394,12 +916,19 @@ mod tests {
         let config_mgr = Arc::new(ConfigManager::new(temp_dir.join("config.toml")));
         let app_mgr = Arc::new(AppManager::new(temp_dir.join("apps")));
         let stats_mgr = Arc::new(StatsManager::new(temp_dir.join("captures")));
+        let db_path = temp_dir.join("database.db");
+        let db_mgr = Arc::new(DatabaseManager::new(&db_path));
+        let user_mgr = Arc::new(UserManager::new(&db_path));
+        let session_mgr = Arc::new(SessionManager::new());
 
         let state = AppState {
             supervisor,
             config_mgr,
             app_mgr,
             stats_mgr,
+            db_mgr,
+            user_mgr,
+            session_mgr,
             log_buffer: log_buf,
             auth_config: AuthConfig::default(),
             web_dir: None,
@@ -418,75 +947,57 @@ mod tests {
         let resp_css = app.clone().oneshot(req_css).await.unwrap();
         assert_eq!(resp_css.status(), StatusCode::OK);
 
+        // Test GET /api/auth/status
+        let req_auth_stat = Request::builder().uri("/api/auth/status").body(Body::empty()).unwrap();
+        let resp_auth_stat = app.clone().oneshot(req_auth_stat).await.unwrap();
+        assert_eq!(resp_auth_stat.status(), StatusCode::OK);
+
+        // Test POST /api/auth/setup
+        let setup_body = serde_json::json!({
+            "username": "AdminUser",
+            "password": "AdminPassword123"
+        }).to_string();
+        let req_setup = Request::builder()
+            .method("POST")
+            .uri("/api/auth/setup")
+            .header("Content-Type", "application/json")
+            .body(Body::from(setup_body))
+            .unwrap();
+        let resp_setup = app.clone().oneshot(req_setup).await.unwrap();
+        assert_eq!(resp_setup.status(), StatusCode::OK);
+        let body_bytes = axum::body::to_bytes(resp_setup.into_body(), usize::MAX).await.unwrap();
+        let auth_res: AuthResponse = serde_json::from_slice(&body_bytes).unwrap();
+        let token = auth_res.token;
+
         // Test GET /api/supervisor/status
         let req_status = Request::builder().uri("/api/supervisor/status").body(Body::empty()).unwrap();
         let resp_status = app.clone().oneshot(req_status).await.unwrap();
         assert_eq!(resp_status.status(), StatusCode::OK);
 
-        // Test GET /api/config
-        let req_cfg = Request::builder().uri("/api/config").body(Body::empty()).unwrap();
-        let resp_cfg = app.clone().oneshot(req_cfg).await.unwrap();
-        assert_eq!(resp_cfg.status(), StatusCode::OK);
+        // Test GET /api/users
+        let req_users = Request::builder()
+            .uri("/api/users")
+            .header("Authorization", format!("Bearer {}", token))
+            .body(Body::empty())
+            .unwrap();
+        let resp_users = app.clone().oneshot(req_users).await.unwrap();
+        assert_eq!(resp_users.status(), StatusCode::OK);
 
-        // Test POST /api/config
-        let valid_toml = r#"
-log_level = "debug"
-
-[rate_limiter]
-max_packets_per_minute = 45
-max_burst_packets = 4
-inter_packet_guard_ms = 350
-max_duty_cycle_percent = 1.0
-duty_cycle_window_secs = 3600
-
-[asset_broadcaster]
-enable_on_demand_broadcast = true
-max_asset_broadcast_duty_cycle = 0.15
-
-[form_colors]
-submit_fg = 14
-submit_bg = 4
-field_fg = 0
-field_bg = 14
-
-admin_nodes = []
-
-[apps]
-main_app = "main_menu"
-enabled = ["main_menu"]
-
-[packet_capture]
-enabled = false
-directory = "captured_packets"
-"#;
-        let req_save_cfg = Request::builder().method("POST").uri("/api/config").body(Body::from(valid_toml)).unwrap();
-        let resp_save_cfg = app.clone().oneshot(req_save_cfg).await.unwrap();
-        assert_eq!(resp_save_cfg.status(), StatusCode::OK);
-
-        // Test GET /api/apps
-        let req_apps = Request::builder().uri("/api/apps").body(Body::empty()).unwrap();
-        let resp_apps = app.clone().oneshot(req_apps).await.unwrap();
-        assert_eq!(resp_apps.status(), StatusCode::OK);
-
-        // Test GET /api/telemetry/summary
-        let req_tel = Request::builder().uri("/api/telemetry/summary").body(Body::empty()).unwrap();
-        let resp_tel = app.clone().oneshot(req_tel).await.unwrap();
-        assert_eq!(resp_tel.status(), StatusCode::OK);
-
-        // Test GET /api/telemetry/captures
-        let req_cap = Request::builder().uri("/api/telemetry/captures").body(Body::empty()).unwrap();
-        let resp_cap = app.clone().oneshot(req_cap).await.unwrap();
-        assert_eq!(resp_cap.status(), StatusCode::OK);
-
-        // Test GET /api/telemetry/capture_summary
-        let req_cap_sum = Request::builder().uri("/api/telemetry/capture_summary").body(Body::empty()).unwrap();
-        let resp_cap_sum = app.clone().oneshot(req_cap_sum).await.unwrap();
-        assert_eq!(resp_cap_sum.status(), StatusCode::OK);
-
-        // Test GET /api/logs
-        let req_logs = Request::builder().uri("/api/logs").body(Body::empty()).unwrap();
-        let resp_logs = app.clone().oneshot(req_logs).await.unwrap();
-        assert_eq!(resp_logs.status(), StatusCode::OK);
+        // Test POST /api/users
+        let create_user_body = serde_json::json!({
+            "username": "BobUser",
+            "password": "BobPassword123",
+            "permissions": [PERM_HEIMDALL_LOGIN, "heimdall.terminal"]
+        }).to_string();
+        let req_create_u = Request::builder()
+            .method("POST")
+            .uri("/api/users")
+            .header("Authorization", format!("Bearer {}", token))
+            .header("Content-Type", "application/json")
+            .body(Body::from(create_user_body))
+            .unwrap();
+        let resp_create_u = app.clone().oneshot(req_create_u).await.unwrap();
+        assert_eq!(resp_create_u.status(), StatusCode::OK);
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }

@@ -907,3 +907,122 @@ body.crt-overlay::before {
   font-size: 11px;
   color: var(--term-muted);
 }
+
+/* ==========================================================================
+   MODALS & DATABASE STYLING
+   ========================================================================== */
+.retro-modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.85);
+  backdrop-filter: blur(2px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 9999;
+}
+
+.retro-modal-box {
+  background: var(--term-surface);
+  border: 2px solid var(--term-danger);
+  box-shadow: 0 0 30px rgba(255, 50, 50, 0.4), inset 0 0 15px rgba(255, 50, 50, 0.2);
+  width: 90%;
+  max-width: 520px;
+  padding: 16px;
+  font-family: var(--font-mono);
+  color: var(--term-fg);
+}
+
+.db-table-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 10px;
+  background: var(--term-bg);
+  border: 1px solid var(--term-border-dim);
+  cursor: pointer;
+  font-size: 11px;
+  transition: all 0.15s ease;
+}
+
+.db-table-item:hover, .db-table-item.active {
+  border-color: var(--term-accent);
+  background: var(--term-surface);
+  color: var(--term-accent);
+}
+
+.db-table-name {
+  font-weight: 700;
+}
+
+.db-table-meta {
+  color: var(--term-muted);
+  font-size: 10px;
+}
+
+/* Impersonation Banner */
+.impersonation-banner {
+  background: #ffaa0022;
+  border-bottom: 2px solid var(--term-warn);
+  color: var(--term-warn);
+  padding: 8px 16px;
+  display: flex;
+  align-items: center;
+  font-size: 13px;
+  font-weight: bold;
+  box-shadow: 0 0 15px rgba(255, 170, 0, 0.2);
+}
+
+.impersonation-banner .banner-icon {
+  margin-right: 8px;
+  font-size: 16px;
+}
+
+/* Permissions selection grid & items */
+.perm-item-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  cursor: pointer;
+  padding: 3px 5px;
+  border-radius: 2px;
+  user-select: none;
+}
+
+.perm-item-label:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.role-badge {
+  display: inline-block;
+  padding: 2px 6px;
+  border-radius: 3px;
+  font-size: 10px;
+  font-weight: bold;
+  text-transform: uppercase;
+  margin: 1px 2px;
+}
+
+.role-badge-admin {
+  background: rgba(255, 68, 68, 0.2);
+  border: 1px solid var(--term-danger);
+  color: var(--term-danger);
+}
+
+.role-badge-user {
+  background: rgba(0, 255, 102, 0.15);
+  border: 1px solid var(--term-accent);
+  color: var(--term-accent);
+}
+
+.role-badge-perm {
+  background: rgba(0, 180, 255, 0.1);
+  border: 1px solid rgba(0, 180, 255, 0.4);
+  color: #55ccff;
+}
+
+
