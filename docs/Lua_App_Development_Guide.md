@@ -174,19 +174,14 @@ return app
 
 ### Step 3: Enable the App in `config.toml`
 
-Add `"hello_world"` to the `[apps]` section in `config.toml`:
+Add `"hello_world"` to the `[apps]` section in your local `config.toml` (copied from `config.example.toml`):
 
 ```toml
 [apps]
-main_app = "main_menu"
 enabled = [
-    "main_menu",
     "messages",
-    "marketplace",
-    "minidungeon",
     "profile",
     "admin",
-    "weather",
     "hello_world",
 ]
 ```

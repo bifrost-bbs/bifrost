@@ -79,6 +79,18 @@ To compile and run Bifrost:
 cargo build --release
 ```
 
+### ⚙️ Initial Configuration Setup
+
+Bifrost ships with an example configuration template. Copy it to create your local `config.toml` (which is gitignored so local configurations and installed catalog apps remain untouched):
+
+```bash
+# Copy example configuration template
+cp config.example.toml config.toml
+```
+
+> [!NOTE]
+> `config.toml` is gitignored to keep node operator credentials, form colors, and local settings private. The core applications (`apps/admin`, `apps/messages`, `apps/profile`) are committed to the repository, while external apps downloaded via the Heimdall App Store into `apps/<app_id>/` are automatically gitignored.
+
 ### 🧪 Running Tests & Code Coverage
 
 ```bash
