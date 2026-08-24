@@ -6,17 +6,23 @@ function menu.on_start(session)
     local user = db.get("users", user_id)
 
     term.clear()
-    local cfg = session.get_menu_config() or {
-        banner_asset = "main_menu_banner",
-        title = "=== BIFROST MESHBBS ===",
-        header_fg = 14,
-        header_bg = 0,
-        layout = "grid",
-        start_col = 2,
-        start_row = 10,
-        col_width = 16,
-        show_logout = true
-    }
+    local cfg = nil
+    if type(session.get_menu_config) == "function" then
+        cfg = session.get_menu_config()
+    end
+    if not cfg then
+        cfg = {
+            banner_asset = "main_menu_banner",
+            title = "=== BIFROST MESHBBS ===",
+            header_fg = 14,
+            header_bg = 0,
+            layout = "grid",
+            start_col = 2,
+            start_row = 10,
+            col_width = 16,
+            show_logout = true
+        }
+    end
 
     if cfg.banner_asset and cfg.banner_asset ~= "" then
         term.render_asset(cfg.banner_asset)
@@ -60,7 +66,21 @@ function menu.on_start(session)
     term.print("Select options using Tab/Arrows or Hotkeys:\n\n")
 
     local is_admin = session.has_permission("admin")
-    local apps = session.get_apps() or {}
+    local apps = nil
+    if type(session.get_apps) == "function" then
+        apps = session.get_apps()
+    end
+    if not apps or #apps == 0 then
+        apps = {
+            { id = "messages", name = "Message Boards", admin_only = false },
+            { id = "minidungeon", name = "Mini Dungeon", admin_only = false },
+            { id = "voidtrader", name = "Void Trader", admin_only = false },
+            { id = "marketplace", name = "Marketplace", admin_only = false },
+            { id = "weather", name = "Weather Forecast", admin_only = false },
+            { id = "profile", name = "Profile Editor", admin_only = false },
+            { id = "admin", name = "Admin Console", admin_only = true },
+        }
+    end
 
     term.define_form(10)
 
