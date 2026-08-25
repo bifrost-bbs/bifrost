@@ -8,6 +8,7 @@ members = [
     "crates/bifrost-client",
     "crates/bifrost-tuning",
     "crates/heimdall",
+    "crates/bifrost-app-runner",
 ]
 
 [workspace.dependencies]

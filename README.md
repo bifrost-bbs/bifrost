@@ -67,6 +67,7 @@ The project is managed as a Rust Cargo Workspace:
     ├── bifrost-bbs/                # Main host server daemon (kernel, Lua runner, packet capture)
     ├── bifrost-client/             # Interactive terminal emulator & automated crawler
     ├── bifrost-tuning/             # Parameter grid search & dictionary training CLI
+    ├── bifrost-app-runner/         # Standalone developer runtime & interactive testing CLI
     └── heimdall/                   # Master supervisor, NOC web dashboard & App Store
 ```
 ---

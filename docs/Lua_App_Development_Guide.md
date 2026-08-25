@@ -615,14 +615,31 @@ The **`bifrost-bbs/app-catalog`** repository serves as the official registry for
    ```
 3. Submit a Pull Request to `bifrost-bbs/app-catalog`. Once merged, your app appears immediately in the Heimdall App Store across all Bifrost nodes!
 
-### 🏪 Managing Apps with Heimdall App Store
+### ⚡ Quick Start with `app-starter` Template
 
-BBS SysOps can manage apps via the Heimdall web dashboard or REST API:
+Developers can bootstrap a new Bifrost Lua app instantly using the official starter repository:
+👉 **[`https://github.com/bifrost-bbs/app-starter`](https://github.com/bifrost-bbs/app-starter)**
 
-1. **Browse Catalog:** Open Heimdall (`http://localhost:9324`) and switch to the **[0] APP STORE** tab. Filter by category or search by keyword.
-2. **One-Click Install:** Click **`+ INSTALL`** on any catalog application. Heimdall downloads the release tarball, extracts it into `apps/<app_id>/`, and automatically registers it in `config.toml`.
-3. **Seamless Updates:** When a new release is published to the catalog, Heimdall highlights an **`⬆ UPDATE`** button showing version diffs (`v0.1.0 → v0.2.0`).
-4. **Enable / Disable / Uninstall:** Toggle apps in real-time or delete them safely with a single click.
+```bash
+git clone https://github.com/bifrost-bbs/app-starter app-mygame
+cd app-mygame
+./scripts/dev.sh
+```
+
+### 🖥️ Local Interactive Testing with `bifrost-runner`
+
+Bifrost includes a standalone developer runtime CLI (`bifrost-runner`) that executes Lua apps in an isolated sandbox with full mock host APIs (`term`, `session`, `db`, `log`, `http`) and interactive terminal rendering without requiring a running BBS server:
+
+```bash
+# Run interactively in the current app directory
+bifrost-runner
+
+# Run a specific app directory
+bifrost-runner ./apps/messages
+
+# Run in headless mode (for CI or automated unit tests)
+bifrost-runner --headless ./apps/weather
+```
 
 ---
 
