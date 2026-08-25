@@ -70,3 +70,15 @@ show_logout = true
 # Enable capturing all in/out raw and compressed packets with CSV metrics logging
 enabled = false
 directory = "captured_packets"
+
+[network]
+# Enable multi-BBS network relay features and discovery hub
+enabled = true
+# Maximum number of hops allowed for relayed multi-hop sessions
+max_hops = 3
+# Allow other BBS nodes to relay inbound user traffic through this node
+allow_inbound_relay = true
+# Central network registry repository catalog URL
+registry_url = "https://raw.githubusercontent.com/bifrost-bbs/bbs-network-registry/main/registry.json"
+# Local registry cache file
+registry_cache_file = ".client_cache/network_registry.json"

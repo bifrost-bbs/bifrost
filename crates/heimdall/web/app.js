@@ -14,6 +14,7 @@ class HeimdallApp {
     this.currentEditingFile = null;
     this.currentConfig = null;
     this.currentSelectedTable = null;
+    this.networkNodes = [];
 
     // Authentication & Identity State
     this.token = localStorage.getItem('heimdall_token') || null;
@@ -57,6 +58,7 @@ class HeimdallApp {
     this.fetchServices();
     this.fetchApps();
     this.fetchCatalog();
+    this.fetchNetworkRegistry();
     this.fetchConfig();
     this.fetchTelemetry();
     this.fetchCaptures();
@@ -73,6 +75,9 @@ class HeimdallApp {
     setInterval(() => {
       this.fetchOverview();
       this.fetchServices();
+      if (this.activeTab === 'network') {
+        this.fetchNetworkRegistry();
+      }
       if (this.activeTab === 'telemetry') {
         this.fetchTelemetry();
         this.fetchCaptures();
@@ -193,6 +198,10 @@ class HeimdallApp {
     on('btn-refresh-catalog', 'click', () => this.fetchCatalog(true));
     on('store-category-filter', 'change', () => this.renderCatalog());
     on('store-search-input', 'input', () => this.renderCatalog());
+
+    // Multi-BBS Network Controls
+    on('btn-refresh-network', 'click', () => this.syncNetworkRegistry());
+    on('network-search-input', 'input', (e) => this.filterNetworkNodes(e.target.value));
 
     // Database Controls
     on('btn-refresh-db', 'click', () => this.fetchDatabase());
@@ -605,6 +614,7 @@ class HeimdallApp {
       'database': 'heimdall.database',
       'users': 'heimdall.users',
       'store': 'heimdall.apps',
+      'network': 'heimdall.overview',
     };
 
     const reqPerm = permMap[tabId];
@@ -639,6 +649,8 @@ class HeimdallApp {
       this.fetchUsers();
     } else if (tabId === 'store') {
       this.fetchCatalog();
+    } else if (tabId === 'network') {
+      this.fetchNetworkRegistry();
     }
   }
 
@@ -1920,6 +1932,161 @@ directory = "${document.getElementById('cfg-capture-dir').value}"
       }
     } catch (e) {
       console.warn('Failed to clear table:', e);
+    }
+  }
+
+  // --- MULTI-BBS NETWORK REGISTRY METHODS ---
+
+  async fetchNetworkRegistry() {
+    try {
+      const res = await this.apiFetch('/api/network');
+      if (!res.ok) return;
+      const data = await res.json();
+      this.networkNodes = data.nodes || [];
+
+      // Update Summary Cards
+      const statusEl = document.getElementById('net-card-status');
+      if (statusEl) {
+        statusEl.textContent = data.network_enabled ? 'ACTIVE' : 'DISABLED';
+        statusEl.style.color = data.network_enabled ? '#55ff55' : '#ff5555';
+      }
+      const totalEl = document.getElementById('net-card-total-nodes');
+      if (totalEl) totalEl.textContent = (data.total_nodes || this.networkNodes.length).toString();
+
+      const hopsEl = document.getElementById('net-card-max-hops');
+      if (hopsEl) hopsEl.textContent = `${data.max_hops || 3} Hops`;
+
+      const inboundEl = document.getElementById('net-card-inbound-status');
+      if (inboundEl) {
+        inboundEl.textContent = data.allow_inbound_relay ? 'ALLOWED' : 'BLOCKED';
+        inboundEl.style.color = data.allow_inbound_relay ? '#ff55ff' : '#888888';
+      }
+
+      this.renderNetworkNodes(this.networkNodes);
+    } catch (e) {
+      console.warn('Failed to fetch network registry:', e);
+    }
+  }
+
+  filterNetworkNodes(query) {
+    const q = (query || '').toLowerCase().trim();
+    if (!q) {
+      this.renderNetworkNodes(this.networkNodes);
+      return;
+    }
+    const filtered = this.networkNodes.filter(n => {
+      return (n.callsign || '').toLowerCase().includes(q)
+        || (n.name || '').toLowerCase().includes(q)
+        || (n.description || '').toLowerCase().includes(q)
+        || (n.location?.region || '').toLowerCase().includes(q)
+        || (n.location?.grid || '').toLowerCase().includes(q);
+    });
+    this.renderNetworkNodes(filtered);
+  }
+
+  renderNetworkNodes(nodes) {
+    const tbody = document.getElementById('network-nodes-tbody');
+    if (!tbody) return;
+    tbody.innerHTML = '';
+
+    if (!nodes || nodes.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="7" class="empty-state" style="text-align: center; padding: 20px; color: #888;">No BBS nodes found in network registry.</td></tr>';
+      return;
+    }
+
+    nodes.forEach(node => {
+      const tr = document.createElement('tr');
+      tr.style.borderBottom = '1px solid rgba(255,255,255,0.05)';
+
+      const endpointsStr = (node.endpoints || []).map(ep => `${ep.protocol.toUpperCase()}://${ep.host}:${ep.port}`).join('<br>') || 'None';
+      const appsStr = (node.capabilities?.supported_apps || []).join(', ') || 'Standard';
+
+      const firstEndpoint = (node.endpoints && node.endpoints.length > 0) ? node.endpoints[0] : null;
+
+      tr.innerHTML = `
+        <td style="padding: 8px; font-weight: bold; color: #55ffff; font-family: monospace;">${escapeHtml(node.callsign || 'N/A')}</td>
+        <td style="padding: 8px;">
+          <strong>${escapeHtml(node.name || 'Unnamed BBS')}</strong>
+          ${node.description ? `<div style="font-size: 11px; color: #888; margin-top: 2px;">${escapeHtml(node.description)}</div>` : ''}
+        </td>
+        <td style="padding: 8px;">
+          <div>${escapeHtml(node.location?.region || 'Global')}</div>
+          ${node.location?.grid ? `<span class="badge" style="font-size: 10px;">${escapeHtml(node.location.grid)}</span>` : ''}
+        </td>
+        <td style="padding: 8px; font-family: monospace; font-size: 11px;">${endpointsStr}</td>
+        <td style="padding: 8px; font-size: 11px; color: #aaa;">${escapeHtml(appsStr)}</td>
+        <td style="padding: 8px; font-size: 11px;">${escapeHtml(node.sysop?.contact || node.sysop?.handle || 'N/A')}</td>
+        <td style="padding: 8px; text-align: right;">
+          ${firstEndpoint ? `<button class="retro-btn btn-sm btn-ping-node" data-host="${escapeHtml(firstEndpoint.host)}" data-port="${firstEndpoint.port}">⚡ PING</button>` : ''}
+        </td>
+      `;
+
+      tbody.appendChild(tr);
+    });
+
+    tbody.querySelectorAll('.btn-ping-node').forEach(btn => {
+      btn.addEventListener('click', () => {
+        this.testPingNode(btn.dataset.host, parseInt(btn.dataset.port, 10), btn);
+      });
+    });
+  }
+
+  async syncNetworkRegistry() {
+    const btn = document.getElementById('btn-refresh-network');
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = 'SYNCING...';
+    }
+    try {
+      const res = await this.apiFetch('/api/network/sync', { method: 'POST' });
+      if (res.ok) {
+        const data = await res.json();
+        alert(`Successfully synced network registry! ${data.synced_nodes || 0} nodes verified.`);
+        await this.fetchNetworkRegistry();
+      } else {
+        alert('Registry sync failed: ' + (await res.text()));
+      }
+    } catch (e) {
+      alert('Error syncing registry: ' + e);
+    } finally {
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = '↻ SYNC REGISTRY';
+      }
+    }
+  }
+
+  async testPingNode(host, port, btnEl) {
+    const originalText = btnEl.textContent;
+    btnEl.disabled = true;
+    btnEl.textContent = '...';
+    try {
+      const res = await this.apiFetch('/api/network/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ host, port }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.reachable) {
+          btnEl.textContent = `✓ ${data.latency_ms}ms`;
+          btnEl.style.color = '#55ff55';
+        } else {
+          btnEl.textContent = `✗ FAIL`;
+          btnEl.style.color = '#ff5555';
+          console.warn('Ping failed for', host, port, data.error);
+        }
+      } else {
+        btnEl.textContent = `ERR`;
+      }
+    } catch (e) {
+      btnEl.textContent = `ERR`;
+    } finally {
+      setTimeout(() => {
+        btnEl.disabled = false;
+        btnEl.textContent = originalText;
+        btnEl.style.color = '';
+      }, 4000);
     }
   }
 }

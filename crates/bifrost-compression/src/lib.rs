@@ -1,6 +1,6 @@
-use heatshrink::{Config, encode, decode, EncodeError, DecodeError};
-use thiserror::Error;
+use heatshrink::{decode, encode, Config, DecodeError, EncodeError};
 use std::collections::HashMap;
+use thiserror::Error;
 
 /// Error types occurring during compression or decompression.
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -50,7 +50,9 @@ impl CompressionDictionary {
     /// Creates a new CompressionDictionary with validated tokens (max 254 tokens, each 2..=64 bytes).
     pub fn new(tokens: Vec<Vec<u8>>) -> Result<Self, CompressionError> {
         if tokens.len() > 254 {
-            return Err(CompressionError::InvalidParameters("dictionary cannot contain more than 254 tokens"));
+            return Err(CompressionError::InvalidParameters(
+                "dictionary cannot contain more than 254 tokens",
+            ));
         }
         let mut clean_tokens = Vec::new();
         for t in tokens {
@@ -98,13 +100,17 @@ impl CompressionDictionary {
     /// Deserializes dictionary from binary format, verifying magic, version, and CRC32.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, CompressionError> {
         if bytes.len() < 10 {
-            return Err(CompressionError::CorruptDictionary("dictionary header too short"));
+            return Err(CompressionError::CorruptDictionary(
+                "dictionary header too short",
+            ));
         }
         if &bytes[0..4] != DICT_MAGIC {
             return Err(CompressionError::CorruptDictionary("invalid magic bytes"));
         }
         if bytes[4] != DICT_VERSION {
-            return Err(CompressionError::CorruptDictionary("unsupported dictionary version"));
+            return Err(CompressionError::CorruptDictionary(
+                "unsupported dictionary version",
+            ));
         }
         let count = bytes[5] as usize;
         let mut offset = 6;
@@ -112,19 +118,25 @@ impl CompressionDictionary {
 
         for _ in 0..count {
             if offset >= bytes.len() - 4 {
-                return Err(CompressionError::CorruptDictionary("unexpected EOF reading tokens"));
+                return Err(CompressionError::CorruptDictionary(
+                    "unexpected EOF reading tokens",
+                ));
             }
             let t_len = bytes[offset] as usize;
             offset += 1;
             if offset + t_len > bytes.len() - 4 {
-                return Err(CompressionError::CorruptDictionary("token length out of bounds"));
+                return Err(CompressionError::CorruptDictionary(
+                    "token length out of bounds",
+                ));
             }
             tokens.push(bytes[offset..offset + t_len].to_vec());
             offset += t_len;
         }
 
         if offset != bytes.len() - 4 {
-            return Err(CompressionError::CorruptDictionary("trailing payload before CRC"));
+            return Err(CompressionError::CorruptDictionary(
+                "trailing payload before CRC",
+            ));
         }
 
         let expected_crc = u32::from_be_bytes([
@@ -203,7 +215,9 @@ impl CompressionDictionary {
             let byte = input[i];
             if byte == TOKEN_ESCAPE {
                 if i + 1 >= input.len() {
-                    return Err(CompressionError::CorruptDictionary("truncated escape sequence"));
+                    return Err(CompressionError::CorruptDictionary(
+                        "truncated escape sequence",
+                    ));
                 }
                 let next_byte = input[i + 1];
                 if next_byte == ESCAPED_LITERAL {
@@ -232,18 +246,18 @@ impl CompressionDictionary {
     pub fn standard_static() -> Self {
         let raw_tokens: &[&[u8]] = &[
             // ANSI Attributes & Control Sequences
-            &[0xC0, 0x07], // Set Color Light Gray
-            &[0xC0, 0x0F], // Set Color Bright White
-            &[0xC0, 0x0E], // Set Color Yellow
-            &[0xC0, 0x0A], // Set Color Bright Green
-            &[0xC0, 0x09], // Set Color Bright Blue
-            &[0xC0, 0x0C], // Set Color Bright Red
-            &[0xC0, 0x0D], // Set Color Bright Magenta
-            &[0xC0, 0x0B], // Set Color Bright Cyan
+            &[0xC0, 0x07],             // Set Color Light Gray
+            &[0xC0, 0x0F],             // Set Color Bright White
+            &[0xC0, 0x0E],             // Set Color Yellow
+            &[0xC0, 0x0A],             // Set Color Bright Green
+            &[0xC0, 0x09],             // Set Color Bright Blue
+            &[0xC0, 0x0C],             // Set Color Bright Red
+            &[0xC0, 0x0D],             // Set Color Bright Magenta
+            &[0xC0, 0x0B],             // Set Color Bright Cyan
             &[0x01, 0xC3, 0x01, 0x01], // Clear screen + cursor to 1,1
-            &[0xD0, 0x01], // Form Start
-            &[0xD3, 0x04], // Form End + EndOfFrame
-            &[0xC5, 0x01], // Render asset prefix
+            &[0xD0, 0x01],             // Form Start
+            &[0xD3, 0x04],             // Form End + EndOfFrame
+            &[0xC5, 0x01],             // Render asset prefix
             b"----------------------------------------",
             b"========================================",
             b"[Submit]",
@@ -338,7 +352,8 @@ impl DictionaryTrainer {
             }
         }
 
-        CompressionDictionary::new(selected_tokens).unwrap_or_else(|_| CompressionDictionary::standard_static())
+        CompressionDictionary::new(selected_tokens)
+            .unwrap_or_else(|_| CompressionDictionary::standard_static())
     }
 }
 
@@ -351,13 +366,17 @@ pub struct Heatshrink {
 impl Heatshrink {
     pub fn new(window_sz2: u8, lookahead_sz2: u8) -> Result<Self, CompressionError> {
         if !(4..=14).contains(&window_sz2) {
-            return Err(CompressionError::InvalidParameters("window size must be between 4 and 14"));
+            return Err(CompressionError::InvalidParameters(
+                "window size must be between 4 and 14",
+            ));
         }
         if lookahead_sz2 < 3 || lookahead_sz2 > window_sz2 {
-            return Err(CompressionError::InvalidParameters("lookahead size must be between 3 and window size"));
+            return Err(CompressionError::InvalidParameters(
+                "lookahead size must be between 3 and window size",
+            ));
         }
-        let config = Config::new(window_sz2, lookahead_sz2)
-            .map_err(CompressionError::InvalidParameters)?;
+        let config =
+            Config::new(window_sz2, lookahead_sz2).map_err(CompressionError::InvalidParameters)?;
         Ok(Self { config })
     }
 
@@ -497,13 +516,17 @@ pub fn decompress_adaptive(
             hs.decompress(data)
         }
         0x04 => {
-            let d = dict.ok_or(CompressionError::CorruptDictionary("dictionary required but not provided"))?;
+            let d = dict.ok_or(CompressionError::CorruptDictionary(
+                "dictionary required but not provided",
+            ))?;
             d.decompress(data)
         }
         0x06 => {
             let hs = Heatshrink::new(window_sz2, lookahead_sz2)?;
             let lzss_decomp = hs.decompress(data)?;
-            let d = dict.ok_or(CompressionError::CorruptDictionary("dictionary required but not provided"))?;
+            let d = dict.ok_or(CompressionError::CorruptDictionary(
+                "dictionary required but not provided",
+            ))?;
             d.decompress(&lzss_decomp)
         }
         _ => Ok(data.to_vec()),
@@ -517,9 +540,12 @@ mod tests {
     #[test]
     fn test_heatshrink_compress_decompress_roundtrip() {
         let hs = Heatshrink::new(8, 4).expect("Config 8, 4 should be valid");
-        let original = b"The quick brown fox jumps over the lazy dog. The quick brown fox jumps again!";
+        let original =
+            b"The quick brown fox jumps over the lazy dog. The quick brown fox jumps again!";
         let compressed = hs.compress(original).expect("Compression should succeed");
-        let decompressed = hs.decompress(&compressed).expect("Decompression should succeed");
+        let decompressed = hs
+            .decompress(&compressed)
+            .expect("Decompression should succeed");
         assert_eq!(original.to_vec(), decompressed);
     }
 
@@ -528,7 +554,10 @@ mod tests {
         let hs = Heatshrink::new(8, 4).unwrap();
         let original = vec![0xAB; 256];
         let compressed = hs.compress(&original).unwrap();
-        assert!(compressed.len() < original.len(), "Repetitive data should compress significantly");
+        assert!(
+            compressed.len() < original.len(),
+            "Repetitive data should compress significantly"
+        );
         let decompressed = hs.decompress(&compressed).unwrap();
         assert_eq!(original, decompressed);
     }
@@ -553,8 +582,13 @@ mod tests {
         let dict = CompressionDictionary::standard_static();
         let original = b"Welcome to Bifrost! Select an option from the Main Menu. Nickname: User1";
         let compressed = dict.compress(original);
-        assert!(compressed.len() < original.len(), "Dictionary compression should reduce size for known phrases");
-        let decompressed = dict.decompress(&compressed).expect("Decompression should succeed");
+        assert!(
+            compressed.len() < original.len(),
+            "Dictionary compression should reduce size for known phrases"
+        );
+        let decompressed = dict
+            .decompress(&compressed)
+            .expect("Decompression should succeed");
         assert_eq!(original.to_vec(), decompressed);
     }
 
@@ -571,7 +605,8 @@ mod tests {
     fn test_dictionary_serialization_roundtrip() {
         let dict = CompressionDictionary::standard_static();
         let bytes = dict.to_bytes();
-        let restored = CompressionDictionary::from_bytes(&bytes).expect("Deserialization should succeed");
+        let restored =
+            CompressionDictionary::from_bytes(&bytes).expect("Deserialization should succeed");
         assert_eq!(dict.tokens, restored.tokens);
         assert_eq!(dict.crc32, restored.crc32);
     }
@@ -588,7 +623,10 @@ mod tests {
         assert!(!trained.tokens().is_empty());
         let test_str = b"Welcome to the Grand Dragon Arena. Select an option: (1) Attack";
         let comp = trained.compress(test_str);
-        assert!(comp.len() < test_str.len(), "Trained dictionary should compress test string");
+        assert!(
+            comp.len() < test_str.len(),
+            "Trained dictionary should compress test string"
+        );
         let decomp = trained.decompress(&comp).unwrap();
         assert_eq!(test_str.to_vec(), decomp);
     }
@@ -599,7 +637,10 @@ mod tests {
         // High entropy data that usually expands in LZSS
         let random_bytes = vec![0x12, 0x98, 0x34, 0x76, 0x55, 0xFA, 0x09, 0x33, 0x88, 0x19];
         let (flags, payload) = compress_adaptive(&random_bytes, Some(&dict), 8, 4);
-        assert!(payload.len() <= random_bytes.len(), "Adaptive compression must never exceed raw length");
+        assert!(
+            payload.len() <= random_bytes.len(),
+            "Adaptive compression must never exceed raw length"
+        );
         let decomp = decompress_adaptive(flags, &payload, Some(&dict), 8, 4).unwrap();
         assert_eq!(random_bytes, decomp);
     }
@@ -628,5 +669,3 @@ mod tests {
         );
     }
 }
-
-

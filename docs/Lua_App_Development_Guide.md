@@ -16,6 +16,7 @@ Welcome to the **Bifrost MeshBBS Lua Application Framework** developer guide. Th
    * [Persistent Storage (`db`)](#53-persistent-storage-db)
    * [System Logging (`log`)](#54-system-logging-log)
    * [HTTP & External Data (`http`)](#55-http--external-data-http)
+   * [Multi-BBS Peering & Relay](#56-multi-bbs-peering--relay)
 6. [Declarative UI: Forms & Menus](#6-declarative-ui-forms--menus)
 7. [Asset Management & Caching](#7-asset-management--caching)
 8. [Session Lifecycle & Resumption Hooks](#8-session-lifecycle--resumption-hooks)
@@ -328,6 +329,9 @@ The `session` global table manages client identity, user inputs, permissions, sc
 | `session.has_permission(perm)` | `(perm: string)` | `boolean` | Checks if the user holds a specific capability (`"admin"`, `"read"`, `"write"`, etc.). |
 | `session.get_apps()` | `()` | `table` | Returns array of enabled application descriptors (`id`, `name`, `description`, `admin_only`, `hotkey`). |
 | `session.get_menu_config()` | `()` | `table` | Returns the server's `[main_menu]` configuration from `config.toml` (`banner_asset`, `title`, `header_fg`, `layout`, etc.). |
+| `session.is_network_enabled()` | `()` | `boolean` | Returns `true` if the Multi-BBS network relay subsystem is enabled in `config.toml`. |
+| `session.get_network_nodes([query])` | `([query: string])` | `table` | Searches and retrieves verified BBS nodes from the network registry directory. |
+| `session.start_relay_session(target_node_id)` | `(target_node_id: string)` | `boolean` | Initiates an authenticated multi-hop relay connection to a remote BBS node. |
 | `session.include(filename)` | `(filename: string)` | `any` | Loads and executes a Lua file within the active app directory. |
 | `session.time()` | `()` | `integer` | Returns current Unix timestamp in seconds. |
 | `session.date_str()` | `()` | `string` | Returns a day identifier (e.g. `"day-20690"`) useful for daily reset mechanics. |
@@ -391,6 +395,60 @@ end
 ```
 
 > **Security Note:** To protect BBS nodes on local intranets, URLs must begin with approved whitelist prefixes (e.g. `https://api.open-meteo.com/`).
+
+---
+
+### 5.6 Multi-BBS Peering & Relay
+
+Applications can discover remote BBS nodes across the global mesh network and initiate authenticated multi-hop relay connections.
+
+#### Checking Network Availability
+```lua
+if session.is_network_enabled() then
+    log.info("Multi-BBS network relaying is active on this host.")
+end
+```
+
+#### Searching & Querying the Directory
+The `session.get_network_nodes(query)` function queries the locally cached network directory (synced with the central registry). It supports substring search across callsigns, names, descriptions, regions, and Maidenhead grid locators:
+
+```lua
+-- Search for nodes in New Zealand
+local nodes = session.get_network_nodes("New Zealand")
+
+for i, node in ipairs(nodes) do
+    print(string.format("[%d] %s (%s) - %s", i, node.callsign, node.name, node.region))
+    print(string.format("    Node ID: %s", node.node_id))
+    print(string.format("    Contact: %s", node.contact))
+    print(string.format("    Relay Capable: %s", tostring(node.relay_enabled)))
+end
+```
+
+#### Node Structure Reference
+
+| Field | Type | Description |
+| :--- | :--- | :--- |
+| `node_id` | `string` | 64-character hexadecimal Ed25519 identity key of the BBS. |
+| `name` | `string` | Descriptive name of the BBS (e.g. `"Pacific Mesh Core Prime"`). |
+| `callsign` | `string` | Official radio callsign or network identifier (e.g. `"ZL1BBS"`). |
+| `description`| `string` | Overview description of services and gateway functionality. |
+| `region` | `string` | Geographic territory or administrative region. |
+| `grid` | `string` | Maidenhead Grid square locator (e.g. `"RF73hd"`). |
+| `lat` | `number` | Latitude in decimal degrees. |
+| `lon` | `number` | Longitude in decimal degrees. |
+| `contact` | `string` | Sysop contact address (Mesh address, packet callsign, etc.). |
+| `relay_enabled` | `boolean` | `true` if the node accepts inbound multi-hop relay connections. |
+
+#### Establishing an Authenticated Relay Session
+Calling `session.start_relay_session(node_id)` initiates an encrypted tunnel to the destination BBS, encapsulating terminal interactions inside authenticated multi-hop `BifrostRelayFrame` packets:
+
+```lua
+local ok = session.start_relay_session("0101010101010101010101010101010101010101010101010101010101010101")
+if not ok then
+    term.set_color(12, 0)
+    term.print("Relay connection to target BBS failed or node unreachable.\n")
+end
+```
 
 ---
 

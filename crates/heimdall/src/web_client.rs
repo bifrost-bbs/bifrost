@@ -1,5 +1,7 @@
 //! Virtual Web-based ANSI/CP437 BBS Test Client bridge over WebSocket.
 
+use crate::find_workspace_root;
+use crate::logs::LogBuffer;
 use axum::extract::ws::{Message, WebSocket};
 use bifrost_transport::{
     MeshBbsMessage, MockSocketTransport, RadioPacket, RadioTransport, SessionPayloadCache,
@@ -10,27 +12,23 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use crate::find_workspace_root;
-use crate::logs::LogBuffer;
 
 /// IBM PC CP437 to Unicode Character Mapping Table
 pub const CP437_MAP: [char; 256] = [
-    ' ', '☺', '☻', '♥', '♦', '♣', '♠', '•', '◘', '○', '◙', '♂', '♀', '♪', '♫', '☼',
-    '►', '◄', '↕', '‼', '¶', '§', '▬', '↨', '↑', '↓', '→', '←', '∟', '↔', '▲', '▼',
-    ' ', '!', '"', '#', '$', '%', '&', '\'', '(', ')', '*', '+', ',', '-', '.', '/',
-    '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', ':', ';', '<', '=', '>', '?',
-    '@', 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O',
-    'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z', '[', '\\', ']', '^', '_',
-    '`', 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o',
-    'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z', '{', '|', '}', '~', '⌂',
-    'Ç', 'ü', 'é', 'â', 'ä', 'à', 'å', 'ç', 'ê', 'ë', 'è', 'ï', 'î', 'ì', 'Ä', 'Å',
-    'É', 'æ', 'Æ', 'ô', 'ö', 'ò', 'û', 'ù', 'ÿ', 'Ö', 'Ü', '¢', '£', '¥', '₧', 'ƒ',
-    'á', 'í', 'ó', 'ú', 'ñ', 'Ñ', 'ª', 'º', '¿', '⌐', '¬', '½', '¼', '¡', '«', '»',
-    '░', '▒', '▓', '│', '┤', '╡', '╢', '╖', '╕', '╣', '║', '╗', '╝', '╜', '╛', '┐',
-    '└', '┴', '┬', '├', '─', '┼', '╞', '╟', '╚', '╔', '╩', '╦', '╠', '═', '╬', '╧',
-    '╨', '╤', '╥', '╙', '╘', '╙', '╓', '╫', '╪', '┘', '┌', '█', '▄', '▌', '▐', '▀',
-    'α', 'ß', 'Γ', 'π', 'Σ', 'σ', 'µ', 'τ', 'Φ', 'Θ', 'Ω', 'δ', '∞', 'φ', 'ε', '∩',
-    '≡', '±', '≥', '≤', '⌠', '⌡', '÷', '≈', '°', '∙', '·', '√', 'ⁿ', '²', '■', ' ',
+    ' ', '☺', '☻', '♥', '♦', '♣', '♠', '•', '◘', '○', '◙', '♂', '♀', '♪', '♫', '☼', '►', '◄', '↕',
+    '‼', '¶', '§', '▬', '↨', '↑', '↓', '→', '←', '∟', '↔', '▲', '▼', ' ', '!', '"', '#', '$', '%',
+    '&', '\'', '(', ')', '*', '+', ',', '-', '.', '/', '0', '1', '2', '3', '4', '5', '6', '7', '8',
+    '9', ':', ';', '<', '=', '>', '?', '@', 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K',
+    'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z', '[', '\\', ']', '^',
+    '_', '`', 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q',
+    'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z', '{', '|', '}', '~', '⌂', 'Ç', 'ü', 'é', 'â', 'ä',
+    'à', 'å', 'ç', 'ê', 'ë', 'è', 'ï', 'î', 'ì', 'Ä', 'Å', 'É', 'æ', 'Æ', 'ô', 'ö', 'ò', 'û', 'ù',
+    'ÿ', 'Ö', 'Ü', '¢', '£', '¥', '₧', 'ƒ', 'á', 'í', 'ó', 'ú', 'ñ', 'Ñ', 'ª', 'º', '¿', '⌐', '¬',
+    '½', '¼', '¡', '«', '»', '░', '▒', '▓', '│', '┤', '╡', '╢', '╖', '╕', '╣', '║', '╗', '╝', '╜',
+    '╛', '┐', '└', '┴', '┬', '├', '─', '┼', '╞', '╟', '╚', '╔', '╩', '╦', '╠', '═', '╬', '╧', '╨',
+    '╤', '╥', '╙', '╘', '╙', '╓', '╫', '╪', '┘', '┌', '█', '▄', '▌', '▐', '▀', 'α', 'ß', 'Γ', 'π',
+    'Σ', 'σ', 'µ', 'τ', 'Φ', 'Θ', 'Ω', 'δ', '∞', 'φ', 'ε', '∩', '≡', '±', '≥', '≤', '⌠', '⌡', '÷',
+    '≈', '°', '∙', '·', '√', 'ⁿ', '²', '■', ' ',
 ];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -167,12 +165,26 @@ impl VirtualTerminalCanvas {
                                 for part in seq_str.split(';') {
                                     if let Ok(code) = part.parse::<u8>() {
                                         match code {
-                                            0 => { self.current_fg = 7; self.current_bg = 0; }
-                                            1 => { self.current_fg |= 0x08; } // Bold / Bright
-                                            30..=37 => { self.current_fg = (self.current_fg & 0x08) | (code - 30); }
-                                            40..=47 => { self.current_bg = code - 40; }
-                                            90..=97 => { self.current_fg = 8 + (code - 90); }
-                                            100..=107 => { self.current_bg = 8 + (code - 100); }
+                                            0 => {
+                                                self.current_fg = 7;
+                                                self.current_bg = 0;
+                                            }
+                                            1 => {
+                                                self.current_fg |= 0x08;
+                                            } // Bold / Bright
+                                            30..=37 => {
+                                                self.current_fg =
+                                                    (self.current_fg & 0x08) | (code - 30);
+                                            }
+                                            40..=47 => {
+                                                self.current_bg = code - 40;
+                                            }
+                                            90..=97 => {
+                                                self.current_fg = 8 + (code - 90);
+                                            }
+                                            100..=107 => {
+                                                self.current_bg = 8 + (code - 100);
+                                            }
                                             _ => {}
                                         }
                                     }
@@ -181,8 +193,16 @@ impl VirtualTerminalCanvas {
                         }
                         'H' | 'f' => {
                             let parts: Vec<&str> = seq_str.split(';').collect();
-                            let row = parts.first().and_then(|s| s.parse::<usize>().ok()).unwrap_or(1).saturating_sub(1);
-                            let col = parts.get(1).and_then(|s| s.parse::<usize>().ok()).unwrap_or(1).saturating_sub(1);
+                            let row = parts
+                                .first()
+                                .and_then(|s| s.parse::<usize>().ok())
+                                .unwrap_or(1)
+                                .saturating_sub(1);
+                            let col = parts
+                                .get(1)
+                                .and_then(|s| s.parse::<usize>().ok())
+                                .unwrap_or(1)
+                                .saturating_sub(1);
                             self.cursor_row = row.min(self.height.saturating_sub(1));
                             self.cursor_col = col.min(self.width.saturating_sub(1));
                         }
@@ -227,7 +247,11 @@ impl VirtualTerminalCanvas {
                         (form.submit_fg, form.submit_bg)
                     };
                     let attr = (bg << 4) | (fg & 0x0F);
-                    let label_text = if !field.val.is_empty() { &field.val } else { &field.id };
+                    let label_text = if !field.val.is_empty() {
+                        &field.val
+                    } else {
+                        &field.id
+                    };
                     let label = format!("[ {} ]", label_text);
                     let r = field.row as usize;
                     let c = field.col as usize;
@@ -251,7 +275,11 @@ impl VirtualTerminalCanvas {
                             let curr_r = field.row as usize + r_off;
                             let curr_c = field.col as usize + w;
                             let char_idx = r_off * (field.width as usize) + w;
-                            let ch = if char_idx < val_chars.len() { val_chars[char_idx] } else { ' ' };
+                            let ch = if char_idx < val_chars.len() {
+                                val_chars[char_idx]
+                            } else {
+                                ' '
+                            };
                             if curr_r < self.height && curr_c < self.width {
                                 self.grid[curr_r][curr_c] = (ch, attr);
                             }
@@ -287,7 +315,8 @@ impl VirtualTerminalCanvas {
                         return KeyAction::HandledLocally;
                     }
                     "ArrowUp" | "ArrowLeft" | "Up" | "Left" => {
-                        form.active_idx = (form.active_idx + form.fields.len() - 1) % form.fields.len();
+                        form.active_idx =
+                            (form.active_idx + form.fields.len() - 1) % form.fields.len();
                         self.render_form_fields();
                         return KeyAction::HandledLocally;
                     }
@@ -351,9 +380,12 @@ impl VirtualTerminalCanvas {
                                                 break;
                                             }
                                         }
-                                        let label_first = f.val.chars().next().map(|c| c.to_ascii_lowercase());
-                                        let id_first = f.id.chars().next().map(|c| c.to_ascii_lowercase());
-                                        if label_first == Some(lower_c) || id_first == Some(lower_c) {
+                                        let label_first =
+                                            f.val.chars().next().map(|c| c.to_ascii_lowercase());
+                                        let id_first =
+                                            f.id.chars().next().map(|c| c.to_ascii_lowercase());
+                                        if label_first == Some(lower_c) || id_first == Some(lower_c)
+                                        {
                                             matched_idx = Some(i);
                                             break;
                                         }
@@ -487,8 +519,12 @@ impl VirtualTerminalCanvas {
                         let dcol = bytecode[idx] as i8;
                         let drow = bytecode[idx + 1] as i8;
                         idx += 2;
-                        self.cursor_col = (self.cursor_col as isize + dcol as isize).clamp(0, self.width as isize - 1) as usize;
-                        self.cursor_row = (self.cursor_row as isize + drow as isize).clamp(0, self.height as isize - 1) as usize;
+                        self.cursor_col = (self.cursor_col as isize + dcol as isize)
+                            .clamp(0, self.width as isize - 1)
+                            as usize;
+                        self.cursor_row = (self.cursor_row as isize + drow as isize)
+                            .clamp(0, self.height as isize - 1)
+                            as usize;
                     }
                 }
                 0xC5 => {
@@ -511,7 +547,8 @@ impl VirtualTerminalCanvas {
                                 let p_len = bytecode[idx] as usize;
                                 idx += 1;
                                 if idx + p_len <= bytecode.len() {
-                                    let s = String::from_utf8_lossy(&bytecode[idx..idx + p_len]).to_string();
+                                    let s = String::from_utf8_lossy(&bytecode[idx..idx + p_len])
+                                        .to_string();
                                     idx += p_len;
                                     params.push(s);
                                 }
@@ -519,12 +556,23 @@ impl VirtualTerminalCanvas {
                         }
                         if let Some((template_str, desc)) = get_asset_content_by_id(asset_id) {
                             if let Some(ref lb) = self.log_buffer {
-                                lb.push("web_client", "INFO", &format!("Rendering template ID 0x{:04X} -> '{}'", asset_id, desc));
+                                lb.push(
+                                    "web_client",
+                                    "INFO",
+                                    &format!(
+                                        "Rendering template ID 0x{:04X} -> '{}'",
+                                        asset_id, desc
+                                    ),
+                                );
                             }
                             let expanded = bifrost_bbs::substitute_template(&template_str, &params);
                             self.apply_ansi_str(&expanded);
                         } else if let Some(ref lb) = self.log_buffer {
-                            lb.push("web_client", "WARN", &format!("Failed to resolve template ID 0x{:04X}", asset_id));
+                            lb.push(
+                                "web_client",
+                                "WARN",
+                                &format!("Failed to resolve template ID 0x{:04X}", asset_id),
+                            );
                         }
                     }
                 }
@@ -532,12 +580,21 @@ impl VirtualTerminalCanvas {
                     // OP_RENDER_MENU (asset_id u16, toggle_mask u32)
                     if idx + 5 < bytecode.len() {
                         let asset_id = u16::from_be_bytes([bytecode[idx], bytecode[idx + 1]]);
-                        let mask = u32::from_be_bytes([bytecode[idx + 2], bytecode[idx + 3], bytecode[idx + 4], bytecode[idx + 5]]);
+                        let mask = u32::from_be_bytes([
+                            bytecode[idx + 2],
+                            bytecode[idx + 3],
+                            bytecode[idx + 4],
+                            bytecode[idx + 5],
+                        ]);
                         idx += 6;
 
                         if let Some((menu_csv, desc)) = get_asset_content_by_id(asset_id) {
                             if let Some(ref lb) = self.log_buffer {
-                                lb.push("web_client", "INFO", &format!("Rendering menu ID 0x{:04X} -> '{}'", asset_id, desc));
+                                lb.push(
+                                    "web_client",
+                                    "INFO",
+                                    &format!("Rendering menu ID 0x{:04X} -> '{}'", asset_id, desc),
+                                );
                             }
                             let menu_def = bifrost_bbs::parse_menu_csv(&menu_csv);
                             let f_fg = menu_def.field_fg.unwrap_or(7);
@@ -548,15 +605,21 @@ impl VirtualTerminalCanvas {
                             let mut fields = Vec::new();
                             let align_mode = menu_def.align.as_deref().unwrap_or("top_left");
                             let is_bottom = align_mode.starts_with("bottom");
-                            let is_center = align_mode.ends_with("center") || align_mode == "center";
+                            let is_center =
+                                align_mode.ends_with("center") || align_mode == "center";
                             let is_right = align_mode.ends_with("right") || align_mode == "right";
 
-                            let max_col = if self.width > 10 { self.width as u8 - 2 } else { 78 };
+                            let max_col = if self.width > 10 {
+                                self.width as u8 - 2
+                            } else {
+                                78
+                            };
                             let term_h = self.height as u8;
 
                             // Pre-filter enabled buttons and compute row totals for alignment
                             let mut enabled_buttons = Vec::new();
-                            let mut row_widths: std::collections::HashMap<u8, u8> = std::collections::HashMap::new();
+                            let mut row_widths: std::collections::HashMap<u8, u8> =
+                                std::collections::HashMap::new();
 
                             for (b_idx, btn) in menu_def.buttons.iter().enumerate() {
                                 if b_idx < 32 && (mask & (1 << b_idx)) != 0 {
@@ -575,26 +638,38 @@ impl VirtualTerminalCanvas {
                                     enabled_buttons.push((btn, btn_width, base_row));
 
                                     let entry = row_widths.entry(base_row).or_insert(0);
-                                    if *entry > 0 { *entry += 1; }
+                                    if *entry > 0 {
+                                        *entry += 1;
+                                    }
                                     *entry += btn_width;
                                 }
                             }
 
-                            let mut row_cols: std::collections::HashMap<u8, u8> = std::collections::HashMap::new();
+                            let mut row_cols: std::collections::HashMap<u8, u8> =
+                                std::collections::HashMap::new();
 
                             for (btn, btn_width, base_row) in enabled_buttons {
                                 let mut cur_row = base_row;
                                 let default_start_col = if is_center {
                                     let tot = *row_widths.get(&base_row).unwrap_or(&btn_width);
-                                    if max_col > tot { ((max_col + 2 - tot) / 2).max(2) } else { 2 }
+                                    if max_col > tot {
+                                        ((max_col + 2 - tot) / 2).max(2)
+                                    } else {
+                                        2
+                                    }
                                 } else if is_right {
                                     let tot = *row_widths.get(&base_row).unwrap_or(&btn_width);
-                                    if max_col > tot { (max_col + 2 - tot).max(2) } else { 2 }
+                                    if max_col > tot {
+                                        (max_col + 2 - tot).max(2)
+                                    } else {
+                                        2
+                                    }
                                 } else {
                                     2
                                 };
 
-                                let mut cur_col = *row_cols.get(&cur_row).unwrap_or(&default_start_col);
+                                let mut cur_col =
+                                    *row_cols.get(&cur_row).unwrap_or(&default_start_col);
 
                                 if cur_col + btn_width > max_col && cur_col > default_start_col {
                                     cur_row += 2;
@@ -628,7 +703,11 @@ impl VirtualTerminalCanvas {
                                 submit_bg: s_bg,
                             });
                         } else if let Some(ref lb) = self.log_buffer {
-                            lb.push("web_client", "WARN", &format!("Failed to resolve menu ID 0x{:04X}", asset_id));
+                            lb.push(
+                                "web_client",
+                                "WARN",
+                                &format!("Failed to resolve menu ID 0x{:04X}", asset_id),
+                            );
                         }
                     }
                 }
@@ -652,7 +731,11 @@ impl VirtualTerminalCanvas {
                             submit_bg,
                         });
                         if let Some(ref lb) = self.log_buffer {
-                            lb.push("web_client", "DEBUG", &format!("Bytecode: OP_FORM_START (form_id: {})", form_id));
+                            lb.push(
+                                "web_client",
+                                "DEBUG",
+                                &format!("Bytecode: OP_FORM_START (form_id: {})", form_id),
+                            );
                         }
                     }
                 }
@@ -665,13 +748,15 @@ impl VirtualTerminalCanvas {
                         let id_len = bytecode[idx + 3] as usize;
                         idx += 4;
                         if idx + id_len <= bytecode.len() {
-                            let id_str = String::from_utf8_lossy(&bytecode[idx..idx + id_len]).to_string();
+                            let id_str =
+                                String::from_utf8_lossy(&bytecode[idx..idx + id_len]).to_string();
                             idx += id_len;
                             if idx < bytecode.len() {
                                 let val_len = bytecode[idx] as usize;
                                 idx += 1;
                                 let val_str = if idx + val_len <= bytecode.len() {
-                                    let s = String::from_utf8_lossy(&bytecode[idx..idx + val_len]).to_string();
+                                    let s = String::from_utf8_lossy(&bytecode[idx..idx + val_len])
+                                        .to_string();
                                     idx += val_len;
                                     s
                                 } else {
@@ -702,7 +787,8 @@ impl VirtualTerminalCanvas {
                         let id_len = bytecode[idx + 2] as usize;
                         idx += 3;
                         if idx + id_len <= bytecode.len() {
-                            let id_str = String::from_utf8_lossy(&bytecode[idx..idx + id_len]).to_string();
+                            let id_str =
+                                String::from_utf8_lossy(&bytecode[idx..idx + id_len]).to_string();
                             idx += id_len;
 
                             if let Some(ref mut f) = self.active_form {
@@ -718,7 +804,11 @@ impl VirtualTerminalCanvas {
                                 });
                             }
                             if let Some(ref lb) = self.log_buffer {
-                                lb.push("web_client", "DEBUG", &format!("Bytecode: OP_FORM_SUBMIT ('{}')", id_str));
+                                lb.push(
+                                    "web_client",
+                                    "DEBUG",
+                                    &format!("Bytecode: OP_FORM_SUBMIT ('{}')", id_str),
+                                );
                             }
                         }
                     }
@@ -740,13 +830,15 @@ impl VirtualTerminalCanvas {
                         let id_len = bytecode[idx + 4] as usize;
                         idx += 5;
                         if idx + id_len <= bytecode.len() {
-                            let id_str = String::from_utf8_lossy(&bytecode[idx..idx + id_len]).to_string();
+                            let id_str =
+                                String::from_utf8_lossy(&bytecode[idx..idx + id_len]).to_string();
                             idx += id_len;
                             if idx < bytecode.len() {
                                 let val_len = bytecode[idx] as usize;
                                 idx += 1;
                                 let val_str = if idx + val_len <= bytecode.len() {
-                                    let s = String::from_utf8_lossy(&bytecode[idx..idx + val_len]).to_string();
+                                    let s = String::from_utf8_lossy(&bytecode[idx..idx + val_len])
+                                        .to_string();
                                     idx += val_len;
                                     s
                                 } else {
@@ -818,17 +910,25 @@ impl VirtualTerminalCanvas {
     fn render_asset_by_id(&mut self, asset_id: u16) {
         if let Some((content, desc)) = get_asset_content_by_id(asset_id) {
             if let Some(ref lb) = self.log_buffer {
-                lb.push("web_client", "INFO", &format!("Rendering asset ID 0x{:04X} -> '{}'", asset_id, desc));
+                lb.push(
+                    "web_client",
+                    "INFO",
+                    &format!("Rendering asset ID 0x{:04X} -> '{}'", asset_id, desc),
+                );
             }
             self.apply_ansi_str(&content);
         } else if let Some(ref lb) = self.log_buffer {
-            lb.push("web_client", "WARN", &format!("Failed to resolve asset ID 0x{:04X}", asset_id));
+            lb.push(
+                "web_client",
+                "WARN",
+                &format!("Failed to resolve asset ID 0x{:04X}", asset_id),
+            );
         }
     }
 
     pub fn to_html_lines(&self) -> Vec<String> {
         let mut lines = Vec::with_capacity(self.height);
-        
+
         // Standard 16-color ANSI Palette (0..15)
         let palette = [
             "#000000", // 0: Black
@@ -1011,9 +1111,16 @@ pub async fn handle_web_terminal_ws(
         node
     });
     let node_hex = hex_encode(&client_node);
-    let short_id = format!("{:02x}{:02x}..{:02x}{:02x}", client_node[0], client_node[1], client_node[30], client_node[31]);
+    let short_id = format!(
+        "{:02x}{:02x}..{:02x}{:02x}",
+        client_node[0], client_node[1], client_node[30], client_node[31]
+    );
 
-    log_buf.push("web_client", "INFO", &format!("Web terminal client connected (Node ID: {})", short_id));
+    log_buf.push(
+        "web_client",
+        "INFO",
+        &format!("Web terminal client connected (Node ID: {})", short_id),
+    );
 
     let _ = ws_sender
         .send(Message::Text(
@@ -1053,7 +1160,11 @@ pub async fn handle_web_terminal_ws(
         }
     });
 
-    let canvas_lock = Arc::new(tokio::sync::Mutex::new(VirtualTerminalCanvas::new(80, 25, Some(log_buf.clone()))));
+    let canvas_lock = Arc::new(tokio::sync::Mutex::new(VirtualTerminalCanvas::new(
+        80,
+        25,
+        Some(log_buf.clone()),
+    )));
     let client_dict = load_active_client_dictionary();
     let client_session_cache = Arc::new(tokio::sync::Mutex::new(SessionPayloadCache::new(50)));
 
@@ -1078,7 +1189,9 @@ pub async fn handle_web_terminal_ws(
                         continue;
                     }
 
-                    if let Ok(Some(msg)) = assembler.process_packet(packet.src_node, &packet.payload) {
+                    if let Ok(Some(msg)) =
+                        assembler.process_packet(packet.src_node, &packet.payload)
+                    {
                         let payload = if (msg.flags & 0x08) != 0 {
                             // Hash-referencing previous session payload
                             if msg.payload.len() >= 4 {
@@ -1090,10 +1203,22 @@ pub async fn handle_web_terminal_ws(
                                 ]);
                                 let sc = rx_session_cache.lock().await;
                                 if let Some(cached) = sc.get(crc) {
-                                    rx_log_buf.push("web_client", "DEBUG", &format!("[SESSION DEDUP] Hit for template 0x{:08X} ({} B)", crc, cached.len()));
+                                    rx_log_buf.push(
+                                        "web_client",
+                                        "DEBUG",
+                                        &format!(
+                                            "[SESSION DEDUP] Hit for template 0x{:08X} ({} B)",
+                                            crc,
+                                            cached.len()
+                                        ),
+                                    );
                                     cached.clone()
                                 } else {
-                                    rx_log_buf.push("web_client", "WARN", &format!("[SESSION DEDUP] Miss for template 0x{:08X}", crc));
+                                    rx_log_buf.push(
+                                        "web_client",
+                                        "WARN",
+                                        &format!("[SESSION DEDUP] Miss for template 0x{:08X}", crc),
+                                    );
                                     msg.payload
                                 }
                             } else {
@@ -1112,7 +1237,11 @@ pub async fn handle_web_terminal_ws(
                                     decomp
                                 }
                                 Err(e) => {
-                                    rx_log_buf.push("web_client", "ERROR", &format!("Bytecode decompress error: {:?}", e));
+                                    rx_log_buf.push(
+                                        "web_client",
+                                        "ERROR",
+                                        &format!("Bytecode decompress error: {:?}", e),
+                                    );
                                     msg.payload
                                 }
                             }
@@ -1170,7 +1299,14 @@ pub async fn handle_web_terminal_ws(
 
                         match action {
                             KeyAction::HandledLocally => {
-                                tx_log_buf.push("web_client", "DEBUG", &format!("Key '{}' handled locally (form navigation / text update)", key));
+                                tx_log_buf.push(
+                                    "web_client",
+                                    "DEBUG",
+                                    &format!(
+                                        "Key '{}' handled locally (form navigation / text update)",
+                                        key
+                                    ),
+                                );
                                 // Form focus / text updated locally in canvas, update browser screen!
                                 let canvas = tx_canvas.lock().await;
                                 let lines = canvas.to_html_lines();
@@ -1188,7 +1324,15 @@ pub async fn handle_web_terminal_ws(
                                     .await;
                             }
                             KeyAction::SendBytes(payload_bytes) => {
-                                tx_log_buf.push("web_client", "INFO", &format!("Key '{}' dispatched packet ({} B) to BBS", key, payload_bytes.len()));
+                                tx_log_buf.push(
+                                    "web_client",
+                                    "INFO",
+                                    &format!(
+                                        "Key '{}' dispatched packet ({} B) to BBS",
+                                        key,
+                                        payload_bytes.len()
+                                    ),
+                                );
                                 let bbs_msg = MeshBbsMessage::new(0x02, 0x02, 0x00, payload_bytes);
                                 if let Ok(frags) = bbs_msg.to_fragments(200) {
                                     for frag in frags {
@@ -1216,7 +1360,11 @@ pub async fn handle_web_terminal_ws(
         }
     }
 
-    log_buf.push("web_client", "INFO", &format!("Web terminal client disconnected (Node ID: {})", short_id));
+    log_buf.push(
+        "web_client",
+        "INFO",
+        &format!("Web terminal client disconnected (Node ID: {})", short_id),
+    );
     radio_rx_task.abort();
     ws_send_task.abort();
 }
@@ -1282,7 +1430,7 @@ mod tests {
 
         canvas.apply_bytecode(&bytecode);
         assert!(canvas.active_form.is_some());
-        
+
         // Typing into input field
         match canvas.process_key("1") {
             KeyAction::HandledLocally => {
@@ -1363,27 +1511,39 @@ mod tests {
     #[test]
     fn test_asset_resolution_by_id() {
         let main_banner = get_asset_content_by_id(0x0101);
-        assert!(main_banner.is_some(), "Main menu banner 0x0101 should resolve");
+        assert!(
+            main_banner.is_some(),
+            "Main menu banner 0x0101 should resolve"
+        );
         let (content1, desc1) = main_banner.unwrap();
-        assert!(content1.contains("Bifrost") || content1.contains("___"), "Should contain Bifrost banner art");
+        assert!(
+            content1.contains("Bifrost") || content1.contains("___"),
+            "Should contain Bifrost banner art"
+        );
         assert!(desc1.contains("main_menu_banner.ans"));
 
         let main_border = get_asset_content_by_id(0x0102);
-        assert!(main_border.is_some(), "Main menu border 0x0102 should resolve");
+        assert!(
+            main_border.is_some(),
+            "Main menu border 0x0102 should resolve"
+        );
         let (content2, desc2) = main_border.unwrap();
         assert!(desc2.contains("main_menu_border.ans"));
-        assert_ne!(content1, content2, "Main menu border must be distinct from banner");
+        assert_ne!(
+            content1, content2,
+            "Main menu border must be distinct from banner"
+        );
     }
 
     #[test]
     fn test_main_menu_canvas_rendering() {
         let mut canvas = VirtualTerminalCanvas::new(80, 25, None);
         let payload = [
-            1, 197, 1, 1, 195, 2, 7, 192, 7, 72, 101, 108, 108, 111, 44, 32, 84, 101, 115, 116,
-            67, 108, 105, 101, 110, 116, 33, 10, 10, 83, 101, 108, 101, 99, 116, 32, 111, 112,
-            116, 105, 111, 110, 115, 32, 117, 115, 105, 110, 103, 32, 84, 97, 98, 47, 65, 114,
-            114, 111, 119, 115, 32, 97, 110, 100, 32, 69, 110, 116, 101, 114, 58, 10, 10, 208,
-            10, 15, 4, 0, 7, 200, 1, 3, 0, 0, 0, 255, 211, 4,
+            1, 197, 1, 1, 195, 2, 7, 192, 7, 72, 101, 108, 108, 111, 44, 32, 84, 101, 115, 116, 67,
+            108, 105, 101, 110, 116, 33, 10, 10, 83, 101, 108, 101, 99, 116, 32, 111, 112, 116,
+            105, 111, 110, 115, 32, 117, 115, 105, 110, 103, 32, 84, 97, 98, 47, 65, 114, 114, 111,
+            119, 115, 32, 97, 110, 100, 32, 69, 110, 116, 101, 114, 58, 10, 10, 208, 10, 15, 4, 0,
+            7, 200, 1, 3, 0, 0, 0, 255, 211, 4,
         ];
         canvas.apply_bytecode(&payload);
         println!("Canvas raw text:\n{}", canvas.to_raw_text());
@@ -1401,7 +1561,10 @@ mod tests {
         match canvas.process_key("m") {
             KeyAction::SendBytes(bytes) => {
                 let json_str = String::from_utf8(bytes).unwrap();
-                assert!(json_str.contains("\"submit\":\"messages\""), "Should submit messages on 'm' hotkey");
+                assert!(
+                    json_str.contains("\"submit\":\"messages\""),
+                    "Should submit messages on 'm' hotkey"
+                );
             }
             _ => panic!("Expected SendBytes on 'm' hotkey"),
         }

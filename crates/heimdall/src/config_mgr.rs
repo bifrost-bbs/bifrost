@@ -1,7 +1,7 @@
 //! Configuration manager for inspecting, editing, and validating `config.toml`.
 
 use anyhow::{Context, Result};
-use bifrost_bbs::{AppConfig, default_config};
+use bifrost_bbs::{default_config, AppConfig};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -23,7 +23,11 @@ impl ConfigManager {
     pub fn new(path: impl AsRef<Path>) -> Self {
         let config_path = path.as_ref().to_path_buf();
         let loaded = Self::load_from_path(&config_path).unwrap_or_else(|e| {
-            log::warn!("Failed to load config from {:?}: {}. Using defaults.", config_path, e);
+            log::warn!(
+                "Failed to load config from {:?}: {}. Using defaults.",
+                config_path,
+                e
+            );
             default_config()
         });
 
@@ -77,7 +81,10 @@ impl ConfigManager {
             .with_context(|| format!("Failed to write config file to {:?}", self.config_path))?;
 
         *self.current_config.lock().unwrap() = parsed.clone();
-        log::info!("Successfully saved and reloaded config from {:?}", self.config_path);
+        log::info!(
+            "Successfully saved and reloaded config from {:?}",
+            self.config_path
+        );
 
         Ok(parsed)
     }
@@ -105,7 +112,13 @@ mod tests {
 
     #[test]
     fn test_config_manager_load_and_save() {
-        let temp_dir = std::env::temp_dir().join(format!("heimdall_cfg_test_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let temp_dir = std::env::temp_dir().join(format!(
+            "heimdall_cfg_test_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         std::fs::create_dir_all(&temp_dir).unwrap();
         let cfg_path = temp_dir.join("config.toml");
 

@@ -45,7 +45,9 @@ async fn main() -> Result<()> {
                 println!();
                 println!("Options:");
                 println!("  -c, --config <PATH>      Path to config file [default: config.toml]");
-                println!("  -l, --log-level <LEVEL>  Set log level (trace, debug, info, warn, error)");
+                println!(
+                    "  -l, --log-level <LEVEL>  Set log level (trace, debug, info, warn, error)"
+                );
                 println!("      --capture-packets [DIR] Capture all in/out raw and compressed packets to CSV and .bin files [default: captured_packets]");
                 println!("  -v, --debug, --verbose   Enable debug logging");
                 println!("      --trace              Enable trace logging");
@@ -83,7 +85,8 @@ async fn main() -> Result<()> {
     };
 
     if !default_level.is_empty() {
-        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(default_level)).init();
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(default_level))
+            .init();
     } else {
         env_logger::init();
     }
