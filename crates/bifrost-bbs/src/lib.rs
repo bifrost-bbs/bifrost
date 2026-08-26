@@ -25,8 +25,8 @@ pub use network::{
 
 // Pull from sibling workspace crates
 use bifrost_transport::{
-    MeshBbsMessage, MessageReassembler, MockSocketTransport, RadioPacket, RadioTransport,
-    TransportStats,
+    KissModemConfig, KissModemTransport, MeshBbsMessage, MessageReassembler, MockSocketTransport,
+    RadioPacket, RadioTransport, TransportStats,
 };
 
 /// BBS-level statistics tracker for session and user accounting.
@@ -247,11 +247,78 @@ pub fn default_main_menu_config() -> MainMenuConfig {
     }
 }
 
+fn default_radio_mode() -> String {
+    "serial".to_string()
+}
+
+fn default_radio_port() -> String {
+    "/dev/ttyACM1".to_string()
+}
+
+fn default_radio_baud() -> u32 {
+    115200
+}
+
+fn default_radio_freq() -> u32 {
+    917_375_000
+}
+
+fn default_radio_bw() -> u32 {
+    62_500
+}
+
+fn default_radio_sf() -> u8 {
+    7
+}
+
+fn default_radio_cr() -> u8 {
+    5
+}
+
+fn default_radio_tx_power() -> i8 {
+    22
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq)]
+pub struct RadioConfig {
+    #[serde(default = "default_radio_mode")]
+    pub mode: String, // "serial", "kiss", or "mock"
+    #[serde(default = "default_radio_port")]
+    pub port: String,
+    #[serde(default = "default_radio_baud")]
+    pub baud_rate: u32,
+    #[serde(default = "default_radio_freq")]
+    pub frequency_hz: u32,
+    #[serde(default = "default_radio_bw")]
+    pub bandwidth_hz: u32,
+    #[serde(default = "default_radio_sf")]
+    pub spreading_factor: u8,
+    #[serde(default = "default_radio_cr")]
+    pub coding_rate: u8,
+    #[serde(default = "default_radio_tx_power")]
+    pub tx_power_dbm: i8,
+}
+
+pub fn default_radio_config() -> RadioConfig {
+    RadioConfig {
+        mode: default_radio_mode(),
+        port: default_radio_port(),
+        baud_rate: default_radio_baud(),
+        frequency_hz: default_radio_freq(),
+        bandwidth_hz: default_radio_bw(),
+        spreading_factor: default_radio_sf(),
+        coding_rate: default_radio_cr(),
+        tx_power_dbm: default_radio_tx_power(),
+    }
+}
+
 /// Bifrost BBS Server Configuration Loaded from config.toml
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq)]
 pub struct AppConfig {
     #[serde(default = "default_log_level")]
     pub log_level: String,
+    #[serde(default = "default_radio_config")]
+    pub radio: RadioConfig,
     pub rate_limiter: RateLimiterConfig,
     pub asset_broadcaster: AssetBroadcasterConfig,
     #[serde(default = "default_form_colors")]
@@ -456,6 +523,7 @@ struct AirtimeRegulator {
 pub fn default_config() -> AppConfig {
     AppConfig {
         log_level: "info".to_string(),
+        radio: default_radio_config(),
         rate_limiter: RateLimiterConfig {
             max_packets_per_minute: 45,
             max_burst_packets: 4,
@@ -516,14 +584,47 @@ pub async fn run_bbs_with_capture(
         config.packet_capture.directory = dir;
     }
 
-    // 2. Initialize Transport
-    let mock_transport = if run_duration_secs.is_some() {
-        MockSocketTransport::new(0.0, 10, 200)
-    } else {
-        MockSocketTransport::new_server("127.0.0.1:8088".to_string(), 0.0, 10, 200)
+    // 2. Initialize Transport (Serial KISS Modem vs Mock Socket)
+    let (transport, transport_stats): (Arc<dyn RadioTransport>, Arc<TransportStats>) = match config.radio.mode.as_str() {
+        "serial" | "kiss" | "hardware" => {
+            info!("Initializing MeshCore KISS Modem Transport on {}", config.radio.port);
+            let kiss_cfg = KissModemConfig {
+                port_path: config.radio.port.clone(),
+                baud_rate: config.radio.baud_rate,
+                frequency_hz: config.radio.frequency_hz,
+                bandwidth_hz: config.radio.bandwidth_hz,
+                spreading_factor: config.radio.spreading_factor,
+                coding_rate: config.radio.coding_rate,
+                tx_power_dbm: config.radio.tx_power_dbm,
+            };
+
+            match KissModemTransport::open(kiss_cfg).await {
+                Ok(modem) => {
+                    let stats = modem.stats.clone();
+                    (Arc::new(modem), stats)
+                }
+                Err(e) => {
+                    warn!("Failed to open physical modem on {}: {}. Falling back to virtual socket transport.", config.radio.port, e);
+                    let mock_transport = if run_duration_secs.is_some() {
+                        MockSocketTransport::new(0.0, 10, 200)
+                    } else {
+                        MockSocketTransport::new_server("127.0.0.1:8088".to_string(), 0.0, 10, 200)
+                    };
+                    let stats = mock_transport.stats.clone();
+                    (Arc::new(mock_transport), stats)
+                }
+            }
+        }
+        _ => {
+            let mock_transport = if run_duration_secs.is_some() {
+                MockSocketTransport::new(0.0, 10, 200)
+            } else {
+                MockSocketTransport::new_server("127.0.0.1:8088".to_string(), 0.0, 10, 200)
+            };
+            let stats = mock_transport.stats.clone();
+            (Arc::new(mock_transport), stats)
+        }
     };
-    let transport_stats = mock_transport.stats.clone();
-    let transport: Arc<dyn RadioTransport> = Arc::new(mock_transport);
 
     // 3. Start Server Runtime
     start_server_with_stats(config, transport, run_duration_secs, Some(transport_stats)).await

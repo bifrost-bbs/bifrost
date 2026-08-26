@@ -268,6 +268,11 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/network", get(get_network_registry_handler))
         .route("/api/network/sync", post(sync_network_registry_handler))
         .route("/api/network/test", post(test_network_ping_handler))
+        // Radio & Modem Management
+        .route(
+            "/api/radio",
+            get(get_radio_status_handler).post(configure_radio_handler),
+        )
         // WebSockets
         .route("/ws/logs", get(ws_logs_handler))
         .route("/ws/terminal", get(ws_terminal_handler));
@@ -1254,6 +1259,84 @@ async fn test_network_ping_handler(
             "endpoint": addr,
         }))),
     }
+}
+
+// --- RADIO & MODEM MANAGEMENT HANDLERS ---
+
+#[derive(Debug, Deserialize)]
+pub struct ConfigureRadioBody {
+    pub mode: Option<String>,
+    pub port: Option<String>,
+    pub baud_rate: Option<u32>,
+    pub frequency_hz: Option<u32>,
+    pub bandwidth_hz: Option<u32>,
+    pub spreading_factor: Option<u8>,
+    pub coding_rate: Option<u8>,
+    pub tx_power_dbm: Option<i8>,
+}
+
+async fn get_radio_status_handler(
+    State(state): State<AppState>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let cfg = state.config_mgr.get_config();
+    let radio_cfg = cfg.radio;
+
+    // Detect available serial ports on host
+    let mut available_ports = Vec::new();
+    if let Ok(entries) = std::fs::read_dir("/dev") {
+        for entry in entries.flatten() {
+            let fname = entry.file_name().to_string_lossy().to_string();
+            if fname.starts_with("ttyACM") || fname.starts_with("ttyUSB") || fname.starts_with("cu.usb") {
+                available_ports.push(format!("/dev/{}", fname));
+            }
+        }
+    }
+    available_ports.sort();
+
+    Ok(Json(serde_json::json!({
+        "mode": radio_cfg.mode,
+        "port": radio_cfg.port,
+        "baud_rate": radio_cfg.baud_rate,
+        "frequency_hz": radio_cfg.frequency_hz,
+        "bandwidth_hz": radio_cfg.bandwidth_hz,
+        "spreading_factor": radio_cfg.spreading_factor,
+        "coding_rate": radio_cfg.coding_rate,
+        "tx_power_dbm": radio_cfg.tx_power_dbm,
+        "available_ports": available_ports,
+    })))
+}
+
+async fn configure_radio_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<ConfigureRadioBody>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    require_perm(&state, &headers, PERM_ADMIN)?;
+    let mut cfg = state.config_mgr.get_config();
+
+    if let Some(m) = body.mode { cfg.radio.mode = m; }
+    if let Some(p) = body.port { cfg.radio.port = p; }
+    if let Some(b) = body.baud_rate { cfg.radio.baud_rate = b; }
+    if let Some(f) = body.frequency_hz { cfg.radio.frequency_hz = f; }
+    if let Some(bw) = body.bandwidth_hz { cfg.radio.bandwidth_hz = bw; }
+    if let Some(sf) = body.spreading_factor { cfg.radio.spreading_factor = sf; }
+    if let Some(cr) = body.coding_rate { cfg.radio.coding_rate = cr; }
+    if let Some(tx) = body.tx_power_dbm { cfg.radio.tx_power_dbm = tx; }
+
+    state.config_mgr.save_config(cfg.clone())
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to save config: {}", e)))?;
+
+    // Restart BBS to apply new radio settings
+    let cfg_path = state.config_mgr.get_config_path().to_string_lossy().to_string();
+    let _ = state.supervisor.restart_bbs(Some(&cfg_path), Some("captured_packets")).await;
+
+    state.log_buffer.push("heimdall", "INFO", &format!("Radio hardware configured: mode={}, port={}, freq={}Hz, sf={}, cr={}",
+        cfg.radio.mode, cfg.radio.port, cfg.radio.frequency_hz, cfg.radio.spreading_factor, cfg.radio.coding_rate));
+
+    Ok(Json(serde_json::json!({
+        "status": "configured",
+        "radio": cfg.radio,
+    })))
 }
 
 // --- WEBSOCKET HANDLERS ---

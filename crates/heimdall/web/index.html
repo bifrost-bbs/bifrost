@@ -86,6 +86,9 @@
     <button class="nav-tab" data-tab="network" id="tab-btn-network" aria-controls="tab-network" aria-selected="false">
       <span class="tab-key">[N]</span> NETWORK
     </button>
+    <button class="nav-tab" data-tab="radio" id="tab-btn-radio" aria-controls="tab-radio" aria-selected="false">
+      <span class="tab-key">[R]</span> RADIO MODEM
+    </button>
   </nav>
 
   <!-- Impersonation Alert Banner -->
@@ -777,6 +780,129 @@
               <!-- Dynamically populated -->
             </tbody>
           </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 12: RADIO & MODEM HARDWARE -->
+    <section id="tab-radio" class="tab-pane" role="tabpanel" aria-labelledby="tab-btn-radio">
+      <div class="config-layout">
+        <!-- Radio Hardware Configuration Panel -->
+        <div class="retro-panel">
+          <div class="panel-header">
+            <span class="panel-title">══ MESHCORE KISS MODEM SETTINGS ══</span>
+            <button id="btn-refresh-radio" class="retro-btn btn-sm">↻ REFRESH HARDWARE</button>
+          </div>
+          <form id="radio-config-form" class="retro-form">
+            <fieldset class="form-section">
+              <legend>Physical Interface &amp; Port</legend>
+              <div class="form-grid-2">
+                <div class="form-group">
+                  <label for="radio-mode-select">Transport Mode:</label>
+                  <select id="radio-mode-select" class="retro-select">
+                    <option value="serial">Physical Serial (MeshCore KISS Modem)</option>
+                    <option value="mock">Virtual Mock Socket (Loopback)</option>
+                  </select>
+                </div>
+                <div class="form-group">
+                  <label for="radio-port-select">Serial Device Port:</label>
+                  <input type="text" id="radio-port-input" class="retro-input" list="available-ports-list" placeholder="/dev/ttyACM1" value="/dev/ttyACM1">
+                  <datalist id="available-ports-list"></datalist>
+                </div>
+                <div class="form-group">
+                  <label for="radio-baud-input">Baud Rate:</label>
+                  <input type="number" id="radio-baud-input" class="retro-input" value="115200">
+                </div>
+                <div class="form-group">
+                  <label for="radio-txpower-input">TX Power (dBm):</label>
+                  <input type="number" id="radio-txpower-input" class="retro-input" min="1" max="22" value="20">
+                </div>
+              </div>
+            </fieldset>
+
+            <fieldset class="form-section">
+              <legend>RF Physical Layer Parameters</legend>
+              <div class="form-grid-2">
+                <div class="form-group">
+                  <label for="radio-freq-input">Frequency (Hz):</label>
+                  <input type="number" id="radio-freq-input" class="retro-input" value="915000000" step="1000">
+                </div>
+                <div class="form-group">
+                  <label for="radio-bw-input">Bandwidth (Hz):</label>
+                  <select id="radio-bw-select" class="retro-select">
+                    <option value="125000">125 kHz (125000 Hz)</option>
+                    <option value="250000" selected>250 kHz (250000 Hz - MeshCore Default)</option>
+                    <option value="500000">500 kHz (500000 Hz)</option>
+                    <option value="62500">62.5 kHz (62500 Hz)</option>
+                  </select>
+                </div>
+                <div class="form-group">
+                  <label for="radio-sf-select">Spreading Factor (SF):</label>
+                  <select id="radio-sf-select" class="retro-select">
+                    <option value="5">SF5 (Ultra Fast / Short Range)</option>
+                    <option value="6">SF6 (Fast)</option>
+                    <option value="7" selected>SF7 (Standard MeshCore)</option>
+                    <option value="8">SF8 (Medium Range)</option>
+                    <option value="9">SF9 (Long Range)</option>
+                    <option value="10">SF10 (Very Long Range)</option>
+                    <option value="11">SF11 (Extreme Range)</option>
+                    <option value="12">SF12 (Maximum Range / Low Rate)</option>
+                  </select>
+                </div>
+                <div class="form-group">
+                  <label for="radio-cr-select">Coding Rate (CR):</label>
+                  <select id="radio-cr-select" class="retro-select">
+                    <option value="5" selected>4/5 (Standard MeshCore)</option>
+                    <option value="6">4/6 (Medium Error Correction)</option>
+                    <option value="7">4/7 (High Error Correction)</option>
+                    <option value="8">4/8 (Maximum Error Correction)</option>
+                  </select>
+                </div>
+              </div>
+            </fieldset>
+
+            <div class="form-actions">
+              <button type="submit" class="retro-btn btn-success">💾 SAVE RADIO SETTINGS &amp; REBOOT MODEM</button>
+            </div>
+          </form>
+        </div>
+
+        <!-- Live Modem Telemetry Panel -->
+        <div class="retro-panel">
+          <div class="panel-header">
+            <span class="panel-title">══ CONNECTED MODEM TELEMETRY ══</span>
+            <span class="badge" id="modem-online-badge">ONLINE</span>
+          </div>
+          <div style="padding: 15px; display: flex; flex-direction: column; gap: 10px;">
+            <div class="meta-row">
+              <span class="meta-label">DEVICE HARDWARE:</span>
+              <span class="meta-val" id="tele-device-name" style="font-weight: bold; color: var(--accent);">LilyGo T-Beam</span>
+            </div>
+            <div class="meta-row">
+              <span class="meta-label">FIRMWARE VERSION:</span>
+              <span class="meta-val" id="tele-firmware-ver">v1 (MeshCore KISS)</span>
+            </div>
+            <div class="meta-row">
+              <span class="meta-label">NODE IDENTITY KEY:</span>
+              <span class="meta-val" id="tele-node-key" style="font-family: monospace; font-size: 11px; word-break: break-all;">99e038834e9a5afb229dd864e4156da0866714c7d870e7edd4f35db18d76e158</span>
+            </div>
+            <div class="meta-row">
+              <span class="meta-label">RF NOISE FLOOR:</span>
+              <span class="meta-val" id="tele-noise-floor">-109 dBm</span>
+            </div>
+            <div class="meta-row">
+              <span class="meta-label">BATTERY VOLTAGE:</span>
+              <span class="meta-val" id="tele-battery-mv">3750 mV (USB/LiPo)</span>
+            </div>
+            <div class="meta-row">
+              <span class="meta-label">MCU TEMPERATURE:</span>
+              <span class="meta-val" id="tele-mcu-temp">40.0 °C</span>
+            </div>
+            <div class="meta-row">
+              <span class="meta-label">MODEM PACKETS RX/TX:</span>
+              <span class="meta-val" id="tele-modem-packets">0 RX / 0 TX (0 Errors)</span>
+            </div>
+          </div>
         </div>
       </div>
     </section>

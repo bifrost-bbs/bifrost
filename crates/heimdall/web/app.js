@@ -59,6 +59,7 @@ class HeimdallApp {
     this.fetchApps();
     this.fetchCatalog();
     this.fetchNetworkRegistry();
+    this.fetchRadio();
     this.fetchConfig();
     this.fetchTelemetry();
     this.fetchCaptures();
@@ -77,6 +78,9 @@ class HeimdallApp {
       this.fetchServices();
       if (this.activeTab === 'network') {
         this.fetchNetworkRegistry();
+      }
+      if (this.activeTab === 'radio') {
+        this.fetchRadio();
       }
       if (this.activeTab === 'telemetry') {
         this.fetchTelemetry();
@@ -202,6 +206,13 @@ class HeimdallApp {
     // Multi-BBS Network Controls
     on('btn-refresh-network', 'click', () => this.syncNetworkRegistry());
     on('network-search-input', 'input', (e) => this.filterNetworkNodes(e.target.value));
+
+    // Radio Hardware Controls
+    on('btn-refresh-radio', 'click', () => this.fetchRadio());
+    on('radio-config-form', 'submit', (e) => {
+      e.preventDefault();
+      this.saveRadioConfig();
+    });
 
     // Database Controls
     on('btn-refresh-db', 'click', () => this.fetchDatabase());
@@ -615,6 +626,7 @@ class HeimdallApp {
       'users': 'heimdall.users',
       'store': 'heimdall.apps',
       'network': 'heimdall.overview',
+      'radio': 'heimdall.config',
     };
 
     const reqPerm = permMap[tabId];
@@ -651,6 +663,8 @@ class HeimdallApp {
       this.fetchCatalog();
     } else if (tabId === 'network') {
       this.fetchNetworkRegistry();
+    } else if (tabId === 'radio') {
+      this.fetchRadio();
     }
   }
 
@@ -2087,6 +2101,85 @@ directory = "${document.getElementById('cfg-capture-dir').value}"
         btnEl.textContent = originalText;
         btnEl.style.color = '';
       }, 4000);
+    }
+  }
+
+  // --- RADIO / KISS MODEM METHODS ---
+
+  async fetchRadio() {
+    try {
+      const res = await this.apiFetch('/api/radio');
+      if (!res.ok) return;
+      const data = await res.json();
+
+      const modeSelect = document.getElementById('radio-mode-select');
+      const portInput = document.getElementById('radio-port-input');
+      const baudInput = document.getElementById('radio-baud-input');
+      const txPowerInput = document.getElementById('radio-txpower-input');
+      const freqInput = document.getElementById('radio-freq-input');
+      const bwSelect = document.getElementById('radio-bw-select');
+      const sfSelect = document.getElementById('radio-sf-select');
+      const crSelect = document.getElementById('radio-cr-select');
+
+      if (modeSelect) modeSelect.value = data.mode || 'serial';
+      if (portInput) portInput.value = data.port || '/dev/ttyACM1';
+      if (baudInput) baudInput.value = data.baud_rate || 115200;
+      if (txPowerInput) txPowerInput.value = data.tx_power_dbm !== undefined ? data.tx_power_dbm : 20;
+      if (freqInput) freqInput.value = data.frequency_hz || 915000000;
+      if (bwSelect && data.bandwidth_hz) bwSelect.value = String(data.bandwidth_hz);
+      if (sfSelect && data.spreading_factor) sfSelect.value = String(data.spreading_factor);
+      if (crSelect && data.coding_rate) crSelect.value = String(data.coding_rate);
+
+      // Populate available serial ports datalist
+      const portDatalist = document.getElementById('available-ports-list');
+      if (portDatalist && Array.isArray(data.available_ports)) {
+        portDatalist.innerHTML = '';
+        data.available_ports.forEach(p => {
+          const opt = document.createElement('option');
+          opt.value = p;
+          portDatalist.appendChild(opt);
+        });
+      }
+    } catch (e) {
+      console.warn('Radio fetch error:', e);
+    }
+  }
+
+  async saveRadioConfig() {
+    const mode = document.getElementById('radio-mode-select').value;
+    const port = document.getElementById('radio-port-input').value;
+    const baudRate = parseInt(document.getElementById('radio-baud-input').value, 10) || 115200;
+    const txPower = parseInt(document.getElementById('radio-txpower-input').value, 10) || 20;
+    const freq = parseInt(document.getElementById('radio-freq-input').value, 10) || 915000000;
+    const bw = parseInt(document.getElementById('radio-bw-select').value, 10) || 250000;
+    const sf = parseInt(document.getElementById('radio-sf-select').value, 10) || 7;
+    const cr = parseInt(document.getElementById('radio-cr-select').value, 10) || 5;
+
+    try {
+      const res = await this.apiFetch('/api/radio', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          mode,
+          port,
+          baud_rate: baudRate,
+          tx_power_dbm: txPower,
+          frequency_hz: freq,
+          bandwidth_hz: bw,
+          spreading_factor: sf,
+          coding_rate: cr,
+        }),
+      });
+
+      if (res.ok) {
+        alert('Radio hardware configuration saved! BBS daemon is restarting with new modem settings.');
+        this.fetchRadio();
+        this.fetchOverview();
+      } else {
+        alert('Failed to save radio configuration: ' + await res.text());
+      }
+    } catch (e) {
+      alert('Error saving radio configuration: ' + e);
     }
   }
 }
