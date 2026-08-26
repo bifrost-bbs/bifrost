@@ -559,6 +559,507 @@ impl RadioTransport for MockSocketTransport {
     }
 }
 
+// ---------------------------------------------------------------------------
+// MeshCore KISS Modem Protocol Implementation & Physical Radio Transport
+// ---------------------------------------------------------------------------
+
+pub const KISS_FEND: u8 = 0xC0;
+pub const KISS_FESC: u8 = 0xDB;
+pub const KISS_TFEND: u8 = 0xDC;
+pub const KISS_TFESC: u8 = 0xDD;
+
+pub const KISS_CMD_DATA: u8 = 0x00;
+pub const KISS_CMD_TXDELAY: u8 = 0x01;
+pub const KISS_CMD_PERSISTENCE: u8 = 0x02;
+pub const KISS_CMD_SLOTTIME: u8 = 0x03;
+pub const KISS_CMD_TXTAIL: u8 = 0x04;
+pub const KISS_CMD_FULLDUPLEX: u8 = 0x05;
+pub const KISS_CMD_SETHARDWARE: u8 = 0x06;
+pub const KISS_CMD_RETURN: u8 = 0xFF;
+
+// MeshCore SetHardware Request Sub-commands (Host -> TNC)
+pub const KISS_SUB_GET_IDENTITY: u8 = 0x01;
+pub const KISS_SUB_GET_RANDOM: u8 = 0x02;
+pub const KISS_SUB_VERIFY_SIG: u8 = 0x03;
+pub const KISS_SUB_SIGN_DATA: u8 = 0x04;
+pub const KISS_SUB_ENCRYPT_DATA: u8 = 0x05;
+pub const KISS_SUB_DECRYPT_DATA: u8 = 0x06;
+pub const KISS_SUB_KEY_EXCHANGE: u8 = 0x07;
+pub const KISS_SUB_HASH: u8 = 0x08;
+pub const KISS_SUB_SET_RADIO: u8 = 0x09;
+pub const KISS_SUB_SET_TX_POWER: u8 = 0x0A;
+pub const KISS_SUB_GET_RADIO: u8 = 0x0B;
+pub const KISS_SUB_GET_TX_POWER: u8 = 0x0C;
+pub const KISS_SUB_GET_CURRENT_RSSI: u8 = 0x0D;
+pub const KISS_SUB_IS_CHANNEL_BUSY: u8 = 0x0E;
+pub const KISS_SUB_GET_AIRTIME: u8 = 0x0F;
+pub const KISS_SUB_GET_NOISE_FLOOR: u8 = 0x10;
+pub const KISS_SUB_GET_VERSION: u8 = 0x11;
+pub const KISS_SUB_GET_STATS: u8 = 0x12;
+pub const KISS_SUB_GET_BATTERY: u8 = 0x13;
+pub const KISS_SUB_GET_MCU_TEMP: u8 = 0x14;
+pub const KISS_SUB_GET_SENSORS: u8 = 0x15;
+pub const KISS_SUB_GET_DEVICE_NAME: u8 = 0x16;
+pub const KISS_SUB_PING: u8 = 0x17;
+pub const KISS_SUB_REBOOT: u8 = 0x18;
+pub const KISS_SUB_SET_SIGNAL_REPORT: u8 = 0x19;
+pub const KISS_SUB_GET_SIGNAL_REPORT: u8 = 0x1A;
+
+// MeshCore SetHardware Response Sub-commands (TNC -> Host)
+pub const KISS_RESP_IDENTITY: u8 = 0x81;
+pub const KISS_RESP_RANDOM: u8 = 0x82;
+pub const KISS_RESP_VERIFY: u8 = 0x83;
+pub const KISS_RESP_SIGNATURE: u8 = 0x84;
+pub const KISS_RESP_ENCRYPTED: u8 = 0x85;
+pub const KISS_RESP_DECRYPTED: u8 = 0x86;
+pub const KISS_RESP_SHARED_SECRET: u8 = 0x87;
+pub const KISS_RESP_HASH: u8 = 0x88;
+pub const KISS_RESP_RADIO: u8 = 0x8B;
+pub const KISS_RESP_TX_POWER: u8 = 0x8C;
+pub const KISS_RESP_CURRENT_RSSI: u8 = 0x8D;
+pub const KISS_RESP_CHANNEL_BUSY: u8 = 0x8E;
+pub const KISS_RESP_AIRTIME: u8 = 0x8F;
+pub const KISS_RESP_NOISE_FLOOR: u8 = 0x90;
+pub const KISS_RESP_VERSION: u8 = 0x91;
+pub const KISS_RESP_STATS: u8 = 0x92;
+pub const KISS_RESP_BATTERY: u8 = 0x93;
+pub const KISS_RESP_MCU_TEMP: u8 = 0x94;
+pub const KISS_RESP_SENSORS: u8 = 0x95;
+pub const KISS_RESP_DEVICE_NAME: u8 = 0x96;
+pub const KISS_RESP_PONG: u8 = 0x97;
+pub const KISS_RESP_SIGNAL_REPORT: u8 = 0x9A;
+pub const KISS_RESP_OK: u8 = 0xF0;
+pub const KISS_RESP_ERROR: u8 = 0xF1;
+pub const KISS_RESP_TX_DONE: u8 = 0xF8;
+pub const KISS_RESP_RX_META: u8 = 0xF9;
+
+/// Encodes a raw byte payload into a framed KISS packet (FEND ... FEND with byte escaping).
+pub fn encode_kiss_frame(command_byte: u8, data: &[u8]) -> Vec<u8> {
+    let mut frame = Vec::with_capacity(data.len() + 8);
+    frame.push(KISS_FEND);
+    frame.push(command_byte);
+    for &byte in data {
+        match byte {
+            KISS_FEND => {
+                frame.push(KISS_FESC);
+                frame.push(KISS_TFEND);
+            }
+            KISS_FESC => {
+                frame.push(KISS_FESC);
+                frame.push(KISS_TFESC);
+            }
+            other => frame.push(other),
+        }
+    }
+    frame.push(KISS_FEND);
+    frame
+}
+
+/// State machine for unescaping incoming byte stream into complete KISS frames.
+#[derive(Debug, Default)]
+pub struct KissFrameDecoder {
+    in_frame: bool,
+    escaped: bool,
+    current_frame: Vec<u8>,
+}
+
+impl KissFrameDecoder {
+    pub fn new() -> Self {
+        Self {
+            in_frame: false,
+            escaped: false,
+            current_frame: Vec::with_capacity(512),
+        }
+    }
+
+    /// Feeds incoming bytes from serial, returning complete unescaped frames.
+    /// Each returned `Vec<u8>` starts with the Command byte (e.g. 0x00 for Data, 0x06 for SetHardware).
+    pub fn feed(&mut self, chunk: &[u8]) -> Vec<Vec<u8>> {
+        let mut completed_frames = Vec::new();
+        for &byte in chunk {
+            if byte == KISS_FEND {
+                if self.in_frame && !self.current_frame.is_empty() {
+                    completed_frames.push(std::mem::take(&mut self.current_frame));
+                }
+                self.in_frame = true;
+                self.escaped = false;
+            } else if self.in_frame {
+                if self.escaped {
+                    match byte {
+                        KISS_TFEND => self.current_frame.push(KISS_FEND),
+                        KISS_TFESC => self.current_frame.push(KISS_FESC),
+                        other => self.current_frame.push(other),
+                    }
+                    self.escaped = false;
+                } else if byte == KISS_FESC {
+                    self.escaped = true;
+                } else {
+                    self.current_frame.push(byte);
+                }
+            }
+        }
+        completed_frames
+    }
+}
+
+/// Radio telemetry information retrieved from MeshCore KISS modem.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ModemTelemetry {
+    pub device_name: Option<String>,
+    pub firmware_version: Option<u8>,
+    pub public_key_hex: Option<String>,
+    pub frequency_hz: Option<u32>,
+    pub bandwidth_hz: Option<u32>,
+    pub spreading_factor: Option<u8>,
+    pub coding_rate: Option<u8>,
+    pub tx_power_dbm: Option<i8>,
+    pub noise_floor_dbm: Option<i16>,
+    pub battery_mv: Option<u16>,
+    pub mcu_temp_c: Option<f32>,
+    pub packets_rx: Option<u32>,
+    pub packets_tx: Option<u32>,
+    pub errors_rx: Option<u32>,
+    pub last_seen_snr: Option<f32>,
+    pub last_seen_rssi: Option<i16>,
+    pub last_update_ts: u64,
+}
+
+/// MeshCore KISS Modem Transport configuration parameters.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KissModemConfig {
+    pub port_path: String,
+    pub baud_rate: u32,
+    pub frequency_hz: u32,
+    pub bandwidth_hz: u32,
+    pub spreading_factor: u8,
+    pub coding_rate: u8,
+    pub tx_power_dbm: i8,
+}
+
+impl Default for KissModemConfig {
+    fn default() -> Self {
+        Self {
+            port_path: "/dev/ttyACM1".to_string(),
+            baud_rate: 115200,
+            frequency_hz: 917_375_000,
+            bandwidth_hz: 62_500,
+            spreading_factor: 7,
+            coding_rate: 5,
+            tx_power_dbm: 22,
+        }
+    }
+}
+
+/// Physical Radio Transport connecting to a MeshCore KISS Modem over serial (UART / USB CDC).
+pub struct KissModemTransport {
+    tx_queue: tokio::sync::mpsc::Sender<Vec<u8>>,
+    rx_queue: Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<RadioPacket>>>,
+    pub telemetry: Arc<tokio::sync::RwLock<ModemTelemetry>>,
+    pub stats: Arc<TransportStats>,
+    config: KissModemConfig,
+    mtu: usize,
+    duty_cycle_tracker: Arc<AtomicU64>, // airtime ms consumed in window
+}
+
+impl KissModemTransport {
+    /// Opens the serial port and spawns the background TX/RX framing and telemetry polling task.
+    pub async fn open(config: KissModemConfig) -> Result<Self, TransportError> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio_serial::SerialPortBuilderExt;
+
+        let port_path = config.port_path.clone();
+        let baud_rate = config.baud_rate;
+
+        let mut serial_stream = tokio_serial::new(&port_path, baud_rate)
+            .open_native_async()
+            .map_err(|e| TransportError::SendError(format!("Failed to open serial {}: {}", port_path, e)))?;
+
+        let (tx_queue, mut rx_out) = tokio::sync::mpsc::channel::<Vec<u8>>(100);
+        let (tx_in, rx_queue) = tokio::sync::mpsc::channel::<RadioPacket>(100);
+
+        let telemetry = Arc::new(tokio::sync::RwLock::new(ModemTelemetry::default()));
+        let telemetry_clone = telemetry.clone();
+
+        let stats = Arc::new(TransportStats::new());
+        let stats_clone = stats.clone();
+
+        let duty_cycle_tracker = Arc::new(AtomicU64::new(0));
+
+        let freq = config.frequency_hz;
+        let bw = config.bandwidth_hz;
+        let sf = config.spreading_factor;
+        let cr = config.coding_rate;
+        let tx_pwr = config.tx_power_dbm;
+
+        // Background reader/writer and telemetry manager task
+        tokio::spawn(async move {
+            let mut decoder = KissFrameDecoder::new();
+            let mut read_buf = [0u8; 1024];
+
+            // Send initial configuration: SetRadio, SetTxPower, GetIdentity, GetDeviceName, GetVersion, SetSignalReport
+            let mut init_frames = Vec::new();
+            
+            // SetRadio (0x09) + freq(4) + bw(4) + sf(1) + cr(1)
+            let mut radio_buf = Vec::with_capacity(11);
+            radio_buf.push(KISS_SUB_SET_RADIO);
+            radio_buf.extend_from_slice(&freq.to_le_bytes());
+            radio_buf.extend_from_slice(&bw.to_le_bytes());
+            radio_buf.push(sf);
+            radio_buf.push(cr);
+            init_frames.push(encode_kiss_frame(KISS_CMD_SETHARDWARE, &radio_buf));
+
+            // SetTxPower (0x0A)
+            init_frames.push(encode_kiss_frame(KISS_CMD_SETHARDWARE, &[KISS_SUB_SET_TX_POWER, tx_pwr as u8]));
+
+            // SetSignalReport (0x19, enable=1)
+            init_frames.push(encode_kiss_frame(KISS_CMD_SETHARDWARE, &[KISS_SUB_SET_SIGNAL_REPORT, 0x01]));
+
+            // Queries: Version, Identity, DeviceName, Radio, TxPower, NoiseFloor, Battery, Temp
+            init_frames.push(encode_kiss_frame(KISS_CMD_SETHARDWARE, &[KISS_SUB_GET_VERSION]));
+            init_frames.push(encode_kiss_frame(KISS_CMD_SETHARDWARE, &[KISS_SUB_GET_IDENTITY]));
+            init_frames.push(encode_kiss_frame(KISS_CMD_SETHARDWARE, &[KISS_SUB_GET_DEVICE_NAME]));
+            init_frames.push(encode_kiss_frame(KISS_CMD_SETHARDWARE, &[KISS_SUB_GET_RADIO]));
+            init_frames.push(encode_kiss_frame(KISS_CMD_SETHARDWARE, &[KISS_SUB_GET_TX_POWER]));
+            init_frames.push(encode_kiss_frame(KISS_CMD_SETHARDWARE, &[KISS_SUB_GET_NOISE_FLOOR]));
+            init_frames.push(encode_kiss_frame(KISS_CMD_SETHARDWARE, &[KISS_SUB_GET_BATTERY]));
+            init_frames.push(encode_kiss_frame(KISS_CMD_SETHARDWARE, &[KISS_SUB_GET_MCU_TEMP]));
+
+            for frame in init_frames {
+                let _ = serial_stream.write_all(&frame).await;
+            }
+            let _ = serial_stream.flush().await;
+
+            let mut tele_interval = tokio::time::interval(tokio::time::Duration::from_secs(5));
+            let mut last_rx_snr: i8 = 0;
+            let mut last_rx_rssi: i16 = 0;
+
+            loop {
+                tokio::select! {
+                    _ = tele_interval.tick() => {
+                        // Periodically refresh noise floor, battery, temp, stats
+                        let poll_cmds = [
+                            KISS_SUB_GET_NOISE_FLOOR,
+                            KISS_SUB_GET_BATTERY,
+                            KISS_SUB_GET_MCU_TEMP,
+                            KISS_SUB_GET_STATS,
+                        ];
+                        for cmd in poll_cmds {
+                            let frame = encode_kiss_frame(KISS_CMD_SETHARDWARE, &[cmd]);
+                            let _ = serial_stream.write_all(&frame).await;
+                        }
+                        let _ = serial_stream.flush().await;
+                    }
+
+                    // Outbound raw packet transmission from BBS
+                    Some(outbound_raw_packet) = rx_out.recv() => {
+                        let frame = encode_kiss_frame(KISS_CMD_DATA, &outbound_raw_packet);
+                        if let Err(e) = serial_stream.write_all(&frame).await {
+                            log::error!("Serial write error sending KISS DATA: {:?}", e);
+                            stats_clone.record_send_error();
+                        } else {
+                            let _ = serial_stream.flush().await;
+                            stats_clone.record_send(outbound_raw_packet.len());
+                            log::debug!("[KISS TX] Transmitted {} byte packet to modem", outbound_raw_packet.len());
+                        }
+                    }
+
+                    // Incoming byte stream from modem
+                    read_res = serial_stream.read(&mut read_buf) => {
+                        match read_res {
+                            Ok(0) => {
+                                log::warn!("KISS modem serial stream reached EOF");
+                                break;
+                            }
+                            Ok(n) => {
+                                let frames = decoder.feed(&read_buf[..n]);
+                                for frame in frames {
+                                    if frame.is_empty() {
+                                        continue;
+                                    }
+                                    let cmd = frame[0];
+                                    let payload = &frame[1..];
+
+                                    if cmd == KISS_CMD_DATA {
+                                        // Received an over-the-air packet!
+                                        stats_clone.record_receive(payload.len());
+                                        log::info!("[KISS RX] Received {} bytes from radio (RSSI: {} dBm, SNR: {} dB)",
+                                            payload.len(), last_rx_rssi, last_rx_snr as f32 / 4.0);
+
+                                        let mut src_node = [0u8; 32];
+                                        let dst_node = [0u8; 32];
+                                        if payload.len() >= 32 {
+                                            src_node.copy_from_slice(&payload[0..32]);
+                                        }
+
+                                        let pkt = RadioPacket {
+                                            is_broadcast: true,
+                                            src_node,
+                                            dst_node,
+                                            payload: payload.to_vec(),
+                                            signal_rssi: last_rx_rssi,
+                                            signal_snr: last_rx_snr,
+                                        };
+
+                                        let _ = tx_in.send(pkt).await;
+                                    } else if cmd == KISS_CMD_SETHARDWARE {
+                                        if payload.is_empty() {
+                                            continue;
+                                        }
+                                        let sub = payload[0];
+                                        let sub_data = &payload[1..];
+
+                                        let mut tele = telemetry_clone.write().await;
+                                        tele.last_update_ts = std::time::SystemTime::now()
+                                            .duration_since(std::time::UNIX_EPOCH)
+                                            .unwrap_or_default()
+                                            .as_secs();
+
+                                        match sub {
+                                            KISS_RESP_IDENTITY => {
+                                                if sub_data.len() >= 32 {
+                                                    let hex_key = sub_data[..32].iter().map(|b| format!("{:02x}", b)).collect::<String>();
+                                                    log::info!("KISS Modem Node Identity: {}", hex_key);
+                                                    tele.public_key_hex = Some(hex_key);
+                                                }
+                                            }
+                                            KISS_RESP_VERSION => {
+                                                if !sub_data.is_empty() {
+                                                    tele.firmware_version = Some(sub_data[0]);
+                                                }
+                                            }
+                                            KISS_RESP_DEVICE_NAME => {
+                                                if let Ok(name) = String::from_utf8(sub_data.to_vec()) {
+                                                    log::info!("KISS Modem Device Name: {}", name);
+                                                    tele.device_name = Some(name);
+                                                }
+                                            }
+                                            KISS_RESP_RADIO => {
+                                                if sub_data.len() >= 10 {
+                                                    tele.frequency_hz = Some(u32::from_le_bytes(sub_data[0..4].try_into().unwrap()));
+                                                    tele.bandwidth_hz = Some(u32::from_le_bytes(sub_data[4..8].try_into().unwrap()));
+                                                    tele.spreading_factor = Some(sub_data[8]);
+                                                    tele.coding_rate = Some(sub_data[9]);
+                                                }
+                                            }
+                                            KISS_RESP_TX_POWER => {
+                                                if !sub_data.is_empty() {
+                                                    tele.tx_power_dbm = Some(sub_data[0] as i8);
+                                                }
+                                            }
+                                            KISS_RESP_NOISE_FLOOR => {
+                                                if sub_data.len() >= 2 {
+                                                    tele.noise_floor_dbm = Some(i16::from_le_bytes(sub_data[0..2].try_into().unwrap()));
+                                                }
+                                            }
+                                            KISS_RESP_BATTERY => {
+                                                if sub_data.len() >= 2 {
+                                                    tele.battery_mv = Some(u16::from_le_bytes(sub_data[0..2].try_into().unwrap()));
+                                                }
+                                            }
+                                            KISS_RESP_MCU_TEMP => {
+                                                if sub_data.len() >= 2 {
+                                                    let temp_tenths = i16::from_le_bytes(sub_data[0..2].try_into().unwrap());
+                                                    tele.mcu_temp_c = Some(temp_tenths as f32 / 10.0);
+                                                }
+                                            }
+                                            KISS_RESP_STATS => {
+                                                if sub_data.len() >= 12 {
+                                                    tele.packets_rx = Some(u32::from_le_bytes(sub_data[0..4].try_into().unwrap()));
+                                                    tele.packets_tx = Some(u32::from_le_bytes(sub_data[4..8].try_into().unwrap()));
+                                                    tele.errors_rx = Some(u32::from_le_bytes(sub_data[8..12].try_into().unwrap()));
+                                                }
+                                            }
+                                            KISS_RESP_RX_META => {
+                                                if sub_data.len() >= 2 {
+                                                    last_rx_snr = sub_data[0] as i8;
+                                                    last_rx_rssi = (sub_data[1] as i8) as i16;
+                                                    tele.last_seen_snr = Some(last_rx_snr as f32 / 4.0);
+                                                    tele.last_seen_rssi = Some(last_rx_rssi);
+                                                }
+                                            }
+                                            KISS_RESP_TX_DONE => {
+                                                log::debug!("[KISS EVENT] TxDone: result={:?}", sub_data.first());
+                                            }
+                                            KISS_RESP_ERROR => {
+                                                log::warn!("[KISS ERROR] Modem error code: 0x{:02X}", sub_data.first().unwrap_or(&0));
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                log::error!("Serial read error: {:?}", e);
+                                stats_clone.record_receive_error();
+                                tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        Ok(Self {
+            tx_queue,
+            rx_queue: Arc::new(tokio::sync::Mutex::new(rx_queue)),
+            telemetry,
+            stats,
+            config,
+            mtu: 255,
+            duty_cycle_tracker,
+        })
+    }
+}
+
+#[async_trait]
+impl RadioTransport for KissModemTransport {
+    async fn send_packet(&self, packet: RadioPacket) -> Result<(), TransportError> {
+        if packet.payload.len() > self.mtu {
+            return Err(TransportError::MtuExceeded(packet.payload.len(), self.mtu));
+        }
+
+        let airtime_ms = self.get_estimated_airtime_ms(packet.payload.len());
+        self.duty_cycle_tracker.fetch_add(airtime_ms as u64, Ordering::Relaxed);
+
+        if self.tx_queue.send(packet.payload).await.is_err() {
+            self.stats.record_send_error();
+            return Err(TransportError::SendError("KISS TX queue closed".to_string()));
+        }
+
+        Ok(())
+    }
+
+    async fn receive_packet(&self) -> Result<RadioPacket, TransportError> {
+        let mut rx = self.rx_queue.lock().await;
+        if let Some(packet) = rx.recv().await {
+            Ok(packet)
+        } else {
+            Err(TransportError::ConnectionClosed)
+        }
+    }
+
+    fn get_estimated_airtime_ms(&self, payload_len: usize) -> u32 {
+        // Standard LoRa Time-on-Air estimation based on configured SF and BW
+        let sf = self.config.spreading_factor.clamp(5, 12) as u32;
+        let bw = self.config.bandwidth_hz.max(7800) as f32;
+        let tsym_ms = (1 << sf) as f32 / bw * 1000.0;
+        let preamble_syms = 8.0;
+        let payload_syms = (payload_len as f32 * 8.0) / (sf as f32);
+        ((preamble_syms + payload_syms) * tsym_ms) as u32
+    }
+
+    fn get_current_duty_cycle(&self) -> f32 {
+        // Compute duty cycle over a rolling 1-hour window
+        let consumed_ms = self.duty_cycle_tracker.load(Ordering::Relaxed);
+        let window_ms = 3_600_000.0;
+        (consumed_ms as f32 / window_ms) * 100.0
+    }
+
+    fn get_mtu(&self) -> usize {
+        self.mtu
+    }
+}
+
 /// CRC16 calculation helper using standard CRC16-CCITT polynomial (0x1021).
 pub fn crc16(data: &[u8]) -> u16 {
     let mut crc = 0xFFFFu16;
@@ -1525,4 +2026,57 @@ mod tests {
         bytes.pop(); // Remove 1 byte from payload
         assert!(BifrostRelayFrame::from_bytes(&bytes).is_err());
     }
+
+    #[test]
+    fn test_kiss_frame_encoding_and_escaping() {
+        let payload = vec![0x01, 0xC0, 0x02, 0xDB, 0x03];
+        let frame = encode_kiss_frame(KISS_CMD_DATA, &payload);
+        assert_eq!(frame[0], KISS_FEND);
+        assert_eq!(frame[1], KISS_CMD_DATA);
+        assert_eq!(*frame.last().unwrap(), KISS_FEND);
+
+        // Verify escaped sequences inside frame
+        let mut decoder = KissFrameDecoder::new();
+        let decoded_frames = decoder.feed(&frame);
+        assert_eq!(decoded_frames.len(), 1);
+        assert_eq!(decoded_frames[0][0], KISS_CMD_DATA);
+        assert_eq!(&decoded_frames[0][1..], &payload[..]);
+    }
+
+    #[test]
+    fn test_kiss_frame_decoder_chunking() {
+        let mut decoder = KissFrameDecoder::new();
+        let frame1 = encode_kiss_frame(0x00, b"packet1");
+        let frame2 = encode_kiss_frame(0x06, b"\x11");
+
+        // Feed byte-by-byte
+        let mut all_bytes = Vec::new();
+        all_bytes.extend_from_slice(&frame1);
+        all_bytes.extend_from_slice(&frame2);
+
+        let mut captured = Vec::new();
+        for chunk in all_bytes.chunks(3) {
+            let res = decoder.feed(chunk);
+            captured.extend(res);
+        }
+
+        assert_eq!(captured.len(), 2);
+        assert_eq!(captured[0][0], 0x00);
+        assert_eq!(&captured[0][1..], b"packet1");
+        assert_eq!(captured[1][0], 0x06);
+        assert_eq!(&captured[1][1..], b"\x11");
+    }
+
+    #[test]
+    fn test_kiss_modem_config_defaults() {
+        let cfg = KissModemConfig::default();
+        assert_eq!(cfg.port_path, "/dev/ttyACM1");
+        assert_eq!(cfg.baud_rate, 115200);
+        assert_eq!(cfg.frequency_hz, 917_375_000);
+        assert_eq!(cfg.bandwidth_hz, 62_500);
+        assert_eq!(cfg.spreading_factor, 7);
+        assert_eq!(cfg.coding_rate, 5);
+        assert_eq!(cfg.tx_power_dbm, 22);
+    }
 }
+
